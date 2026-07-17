@@ -1,0 +1,16 @@
+[package]
+name = "meeting-recorder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sysinfo = "0.32"
+thiserror = "2"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_Foundation",
+]

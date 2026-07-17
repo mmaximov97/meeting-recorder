@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Записи встреч</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1a1a1a;
+        --muted: #6b6b6b;
+        --line: #e3e3e3;
+        --accent: #2f6fed;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1e1e;
+          --fg: #eaeaea;
+          --muted: #9a9a9a;
+          --line: #333;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font: 14px/1.45 system-ui, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        margin-bottom: 12px;
+      }
+      .lamp {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #888;
+        flex: none;
+      }
+      .lamp.armed {
+        background: #e6aa1e;
+      }
+      .lamp.recording {
+        background: #dc3232;
+      }
+      /* Вопрос — не тост: кнопок в системном тосте на Windows нет, отвечают здесь. */
+      #ask {
+        display: none;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+      #ask.on {
+        display: block;
+      }
+      #ask p {
+        margin: 0 0 10px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        font: inherit;
+        padding: 7px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--accent);
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        margin: 18px 0 8px;
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      li {
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .name {
+        font-variant-numeric: tabular-nums;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .warn {
+        color: #d0761a;
+      }
+      .empty,
+      #err {
+        color: var(--muted);
+      }
+      #err {
+        color: #dc3232;
+        margin-top: 10px;
+        min-height: 1em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="status"><span id="lamp" class="lamp"></span><span id="state">Ожидание встречи</span></div>
+
+    <div id="ask">
+      <p id="ask-text">Похоже, встреча. Записать?</p>
+      <div class="row">
+        <button class="primary" id="yes">Записать</button>
+        <button id="no">Нет</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="toggle">Начать запись</button>
+      <button id="folder">Открыть папку</button>
+    </div>
+
+    <h2>Записи</h2>
+    <ul id="list"></ul>
+    <div id="err"></div>
+
+    <script src="main.js"></script>
+  </body>
+</html>

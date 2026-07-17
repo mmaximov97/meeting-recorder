@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Права главного окна: события из аудио-потока и базовые операции с окном.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

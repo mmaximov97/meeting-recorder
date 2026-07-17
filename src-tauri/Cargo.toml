@@ -1,0 +1,17 @@
+[package]
+name = "meeting-recorder-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Трей, тост-предложение, глобальный хоткей и окно со списком записей"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Ядро. Отсюда берутся App, WindowsDetector, poll_to_event — ровно те же, что
+# крутит консольный бинарь: GUI не имеет своей копии логики записи.
+meeting-recorder = { path = ".." }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }

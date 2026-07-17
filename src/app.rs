@@ -17,7 +17,7 @@
 //! правка остаётся зелёной. Фейки в тестах умеют падать в нужной точке —
 //! этого достаточно, чтобы каждый инвариант ловил свою мутацию.
 
-use crate::capture::{start_capture, Source};
+use crate::capture::{build_capture, start_silence, Source};
 use crate::detector::MicSession;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
@@ -100,6 +100,18 @@ impl SinkFactory for WavSinks {
 /// Живут только пока идёт детект или запись. Drop останавливает захват,
 /// поэтому индикатор микрофона в Windows гаснет сразу после Idle.
 struct Streams {
+    /// Тихий render-поток: не даёт эндпоинту простаивать, иначе WASAPI loopback
+    /// не отдаёт пакеты и дорожка `system` начинается не с открытия потока, а с
+    /// момента, когда в системе впервые что-то заиграло (см. `start_silence`).
+    ///
+    /// Лежит здесь, а не рядом с `App`, ровно ради требования «живёт столько же,
+    /// сколько захват»: раз он в той же структуре, что `_mic`/`_sys`, то один и
+    /// тот же `open` его поднимает, а один и тот же Drop — гасит. Забыть погасить
+    /// его отдельно невозможно, потому что отдельного гашения не существует.
+    ///
+    /// `Option`, потому что тишина — это средство выравнивания, а не условие
+    /// записи (см. `open`).
+    _silence: Option<cpal::Stream>,
     _mic: cpal::Stream,
     _sys: cpal::Stream,
     rx_mic: Receiver<Vec<i16>>,
@@ -141,26 +153,85 @@ impl AudioIo for CpalAudio {
         let (tx_sys, rx_sys) = channel();
 
         let t0 = Instant::now();
-        let _mic = start_capture(Source::Mic, tx_mic)?;
+        // Тишина поднимается ПЕРВОЙ и намеренно: к моменту, когда откроется
+        // loopback, эндпоинт уже обязан не простаивать. Открой мы её последней —
+        // между стартом loopback и первым пакетом осталась бы дыра ровно той
+        // длины, которую эта задача и убирает.
+        //
+        // Отказ тихого потока НЕ роняет запись: выравнивание — средство, а
+        // встреча — цель, и «дорожки разъехались» несравнимо дешевле, чем «записи
+        // нет вообще». Молчанием это не становится: причина уходит в stderr, а
+        // сам сценарий почти невозможен — устройство и конфиг здесь ровно те же,
+        // что у loopback ниже, а output-поток вдобавок терпимее к формату
+        // (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM), так что упасть в одиночку ему
+        // практически негде: почти всегда следом упадёт и `build_capture`, уже с `?`.
+        let _silence = match start_silence() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!(
+                    "не удалось поднять тихий render-поток: {e}\n\
+                     запись продолжится, но дорожка system может начаться позже mic \
+                     (loopback молчит, пока эндпоинт простаивает) — выравнивание не гарантировано"
+                );
+                None
+            }
+        };
         let t1 = Instant::now();
-        let _sys = start_capture(Source::SystemLoopback, tx_sys)?;
+
+        // Сначала ОТКРЫВАЕМ оба потока, не запуская ни одного. Открытие стоит
+        // дорого и непредсказуемо (loopback на спящем BT-эндпоинте — до 795 мс
+        // против 20 мс на проснувшемся), и вся эта разница ушла бы прямо в
+        // расхождение дорожек, стартуй мы их по очереди «открыл-запустил».
+        let mic_pending = build_capture(Source::Mic, tx_mic)?;
         let t2 = Instant::now();
+        let sys_pending = build_capture(Source::SystemLoopback, tx_sys)?;
+        let t3 = Instant::now();
+
+        // ...и только теперь запускаем — двумя вызовами подряд, между которыми
+        // не делается ничего. Отсюда и берётся остаточная Δ: это уже не
+        // стоимость открытия, а только промежуток между двумя `Start()`.
+        let _mic = mic_pending.play()?;
+        let t4 = Instant::now();
+        let _sys = sys_pending.play()?;
+        let t5 = Instant::now();
+
         if self.timing {
             eprintln!(
-                "[timing] start_capture(mic)      = {:?}",
-                t1.duration_since(t0)
+                "[timing] start_silence           = {:?}{}",
+                t1.duration_since(t0),
+                if _silence.is_some() { "" } else { " (НЕ ПОДНЯЛСЯ)" }
             );
             eprintln!(
-                "[timing] start_capture(loopback) = {:?}",
+                "[timing] build(mic)              = {:?}",
                 t2.duration_since(t1)
             );
-            eprintln!("[timing] open_streams всего      = {:?}", t2.duration_since(t0));
+            eprintln!(
+                "[timing] build(loopback)         = {:?}",
+                t3.duration_since(t2)
+            );
+            eprintln!(
+                "[timing] play(mic)               = {:?}",
+                t4.duration_since(t3)
+            );
+            eprintln!(
+                "[timing] play(loopback)          = {:?}",
+                t5.duration_since(t4)
+            );
+            // Остаточное смещение дорожек — промежуток между двумя стартами,
+            // то есть ровно стоимость play(mic). Стоимость открытия сюда уже
+            // не входит: она вся уплачена выше, до первого Start().
+            eprintln!(
+                "[timing] ожидаемая Δ дорожек     = {:?}",
+                t4.duration_since(t3)
+            );
+            eprintln!("[timing] open_streams всего      = {:?}", t5.duration_since(t0));
         }
         self.opened_at = Some(t0);
         self.logged_mic = false;
         self.logged_sys = false;
 
         self.streams = Some(Streams {
+            _silence,
             _mic,
             _sys,
             rx_mic,
@@ -170,6 +241,8 @@ impl AudioIo for CpalAudio {
     }
 
     /// Drop у cpal::Stream останавливает захват — этого достаточно.
+    /// Тихий render-поток лежит в той же структуре и умирает тем же Drop'ом:
+    /// отдельно его гасить не надо и, что важнее, невозможно забыть.
     fn close(&mut self) {
         self.streams = None;
         self.opened_at = None;

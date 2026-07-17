@@ -1,7 +1,7 @@
 mod detector;
 
-use detector::{windows::WindowsDetector, MeetingDetector};
-use std::{thread, time::Duration};
+use detector::{MeetingDetector, WindowsDetector, POLL_INTERVAL};
+use std::thread;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let det = WindowsDetector::new()?;
@@ -16,6 +16,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => eprintln!("ошибка: {e}"),
         }
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(POLL_INTERVAL);
     }
 }

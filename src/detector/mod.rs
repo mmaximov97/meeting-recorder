@@ -1,5 +1,9 @@
 pub mod windows;
 
+use std::time::Duration;
+
+pub use self::windows::WindowsDetector;
+
 /// Активная сессия захвата микрофона: какой-то процесс держит мик.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicSession {
@@ -13,8 +17,13 @@ pub enum DetectError {
     Com(#[from] ::windows::core::Error),
 }
 
-/// Опрашивается раз в 2 секунды. Поллинг, а не события: перечисление каждый раз
-/// видит все сессии, включая созданные до старта приложения.
+/// Интервал опроса детектора — единственный источник правды для всех вызывающих.
+///
+/// Поллинг, а не события: перечисление каждый раз видит все сессии, включая
+/// созданные до старта приложения.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Опрашивается раз в [`POLL_INTERVAL`].
 pub trait MeetingDetector {
     fn poll(&self) -> Result<Vec<MicSession>, DetectError>;
 }

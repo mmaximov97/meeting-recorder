@@ -1,0 +1,17 @@
+/target
+/src-tauri/target
+
+# Аудио не коммитим никогда, даже если каталог записей окажется внутри проекта
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.opus
+/recordings/
+
+# Транскрипты — тоже мимо репозитория, они уезжают в vault
+*.transcript.txt
+*.transcript.md
+
+.DS_Store
+Thumbs.db

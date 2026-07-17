@@ -1,4 +1,6 @@
 use super::{DetectError, MeetingDetector, MicSession};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use windows::core::Interface;
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
@@ -9,6 +11,38 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+
+/// Не чаще раза в это окно печатаем в stderr сообщение о пропущенном
+/// устройстве/сессии. `poll()` зовётся раз в [`super::POLL_INTERVAL`] (2с)
+/// бесконечно — без троттлинга стабильно отваливающееся устройство залило бы
+/// stderr потоком одинаковых строк. Троттлинг глобальный (не per-device):
+/// нам важно не молчать совсем, а не вести точный учёт того, какое именно
+/// устройство сейчас шумит — это всё равно видно в тексте самого сообщения.
+const SKIP_LOG_THROTTLE_SECS: u64 = 30;
+static LAST_SKIP_LOG_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Логирует отказ отдельного устройства/сессии в stderr с троттлингом (см.
+/// [`SKIP_LOG_THROTTLE_SECS`]). Не паникует и не глотает молча — просто не
+/// каждый вызов долетает до печати.
+fn log_skip(context: &str, err: &windows::core::Error) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_SKIP_LOG_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < SKIP_LOG_THROTTLE_SECS {
+        return;
+    }
+    // CAS, а не просто store: если два потока (в теории — см. докблок про
+    // !Send, на практике это один поток) одновременно проходят проверку
+    // выше, напечатать должен только один.
+    if LAST_SKIP_LOG_SECS
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        eprintln!("[meeting-recorder] пропускаю {context}: {err}");
+    }
+}
 
 /// Детектор mic-сессий поверх WASAPI.
 ///
@@ -90,19 +124,79 @@ impl MeetingDetector for WindowsDetector {
                 .enumerator
                 .EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)?;
 
+            // `?` наружу из poll() оставлен только на самом EnumAudioEndpoints
+            // (и на GetCount() коллекции сразу над ним — это ещё часть «вижу
+            // ли я устройства вообще», а не отказ конкретного устройства).
+            // Дальше — отказ ОДНОГО устройства или ОДНОЙ сессии не должен
+            // хоронить результаты остальных: устройства опрашиваются по
+            // очереди, и, например, гарнитуру могут выдернуть между
+            // EnumAudioEndpoints и Activate (AUDCLNT_E_DEVICE_INVALIDATED).
+            // Частичный результат лучше отсутствующего — если один мик
+            // отвалился, а на другом идёт звонок, мы обязаны его увидеть.
             for d in 0..devices.GetCount()? {
-                let device = devices.Item(d)?;
-                let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)?;
-                let sessions = manager.GetSessionEnumerator()?;
-                let count = sessions.GetCount()?;
-
-                for i in 0..count {
-                    let ctl = sessions.GetSession(i)?;
-                    if ctl.GetState()? != AudioSessionStateActive {
+                let device = match devices.Item(d) {
+                    Ok(device) => device,
+                    Err(e) => {
+                        log_skip(&format!("устройство #{d} (Item)"), &e);
                         continue;
                     }
-                    let ctl2: IAudioSessionControl2 = ctl.cast()?;
-                    let pid = ctl2.GetProcessId()?;
+                };
+                let manager: IAudioSessionManager2 = match device.Activate(CLSCTX_ALL, None) {
+                    Ok(manager) => manager,
+                    Err(e) => {
+                        log_skip(&format!("устройство #{d} (Activate)"), &e);
+                        continue;
+                    }
+                };
+                let sessions = match manager.GetSessionEnumerator() {
+                    Ok(sessions) => sessions,
+                    Err(e) => {
+                        log_skip(&format!("устройство #{d} (GetSessionEnumerator)"), &e);
+                        continue;
+                    }
+                };
+                let count = match sessions.GetCount() {
+                    Ok(count) => count,
+                    Err(e) => {
+                        log_skip(&format!("устройство #{d} (GetCount сессий)"), &e);
+                        continue;
+                    }
+                };
+
+                for i in 0..count {
+                    let ctl = match sessions.GetSession(i) {
+                        Ok(ctl) => ctl,
+                        Err(e) => {
+                            log_skip(&format!("сессия #{i} устройства #{d} (GetSession)"), &e);
+                            continue;
+                        }
+                    };
+                    let state = match ctl.GetState() {
+                        Ok(state) => state,
+                        Err(e) => {
+                            // Сессия могла умереть между GetSession и GetState —
+                            // тоже отказ ОДНОЙ сессии, а не всего опроса.
+                            log_skip(&format!("сессия #{i} устройства #{d} (GetState)"), &e);
+                            continue;
+                        }
+                    };
+                    if state != AudioSessionStateActive {
+                        continue;
+                    }
+                    let ctl2: IAudioSessionControl2 = match ctl.cast() {
+                        Ok(ctl2) => ctl2,
+                        Err(e) => {
+                            log_skip(&format!("сессия #{i} устройства #{d} (cast)"), &e);
+                            continue;
+                        }
+                    };
+                    let pid = match ctl2.GetProcessId() {
+                        Ok(pid) => pid,
+                        Err(e) => {
+                            log_skip(&format!("сессия #{i} устройства #{d} (GetProcessId)"), &e);
+                            continue;
+                        }
+                    };
                     if pid == 0 {
                         continue; // системная сессия, не процесс
                     }

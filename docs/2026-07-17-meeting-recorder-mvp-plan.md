@@ -1115,14 +1115,15 @@ impl App {
                 if let Some(w) = self.sink_sys.as_mut() { w.write(&sys)?; }
             }
             Action::CloseFile => {
-                // Дописать хвост, который натёк между последним pump_audio и стопом.
-                let (mic, sys) = self.drain_channels();
-                if let Some(w) = self.sink_mic.as_mut() { w.write(&mic)?; }
-                if let Some(w) = self.sink_sys.as_mut() { w.write(&sys)?; }
-                if let Some(w) = self.sink_mic.take() { println!("записано: {}", w.finalize()?.display()); }
-                if let Some(w) = self.sink_sys.take() { println!("записано: {}", w.finalize()?.display()); }
+                let result = self.close_sinks();
                 self.close_streams();
+                // FinalizeDone обязан уйти в машину ДАЖЕ при ошибке закрытия.
+                // Иначе она навсегда останется в Finalizing, откуда единственный
+                // выход — это событие, и приложение молча перестанет записывать
+                // что-либо вообще. В Task 7 (аудио-цикл в фоновом потоке под Tauri)
+                // это будет выглядеть как живой GUI, который ничего не пишет.
                 self.machine.handle(Event::FinalizeDone);
+                result?;
             }
             Action::None => {}
         }
@@ -1134,6 +1135,37 @@ impl App {
         self.sink_mic = Some(WavSink::create(&self.dir, &recording_filename(self.started, &src, Track::Mic))?);
         self.sink_sys = Some(WavSink::create(&self.dir, &recording_filename(self.started, &src, Track::System))?);
         Ok(())
+    }
+
+    /// Дописывает хвост и финализирует обе дорожки.
+    ///
+    /// Ошибку дописывания запоминаем, но НЕ выходим по `?`: финализировать
+    /// файл надо в любом случае. hound пишет длину данных в заголовок только
+    /// на finalize(); без него на диске останется WAV, который существует,
+    /// весит сотни мегабайт, открывается плеером — и играет тишину.
+    /// Отказ здесь выглядит как успех, поэтому дорожка финализируется даже
+    /// тогда, когда запись хвоста в неё провалилась.
+    fn close_sinks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Хвост, натёкший между последним pump_audio и стопом.
+        let (mic, sys) = self.drain_channels();
+        let mut first_err: Option<Box<dyn std::error::Error>> = None;
+
+        if let Some(w) = self.sink_mic.as_mut() {
+            if let Err(e) = w.write(&mic) { first_err.get_or_insert(e.into()); }
+        }
+        if let Some(w) = self.sink_sys.as_mut() {
+            if let Err(e) = w.write(&sys) { first_err.get_or_insert(e.into()); }
+        }
+        for sink in [self.sink_mic.take(), self.sink_sys.take()].into_iter().flatten() {
+            match sink.finalize() {
+                Ok(p) => println!("записано: {}", p.display()),
+                Err(e) => { first_err.get_or_insert(e.into()); }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Прокачать накопленные семплы туда, куда велит текущее состояние.
@@ -1179,12 +1211,12 @@ mod session;
 mod storage;
 
 use app::App;
-use detector::{windows::WindowsDetector, MeetingDetector};
-use session::{Event, State};
+use detector::{MeetingDetector, MicSession, WindowsDetector, POLL_INTERVAL};
+use session::Event;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
-use std::{thread, time::Duration};
+use std::{thread, time::Duration, time::Instant};
 
 /// Ввод с консоли в отдельном потоке, чтобы не блокировать аудио-цикл.
 fn spawn_stdin() -> Receiver<String> {
@@ -1209,33 +1241,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Готов. Команды: s — старт вручную, x — стоп, y/n — ответ на предложение.");
     let mut was_active = false;
     let mut asked = false;
+    let mut active: Option<MicSession> = None;
+    // Первый опрос — сразу, без ожидания интервала.
+    let mut last_poll = Instant::now() - POLL_INTERVAL;
 
     loop {
-        let sessions = det.poll().unwrap_or_default();
-        let active = sessions.first().cloned();
-        let is_active = active.is_some();
+        // Детектор опрашивается раз в POLL_INTERVAL (2 с) — это глобальное
+        // ограничение. Сам цикл крутится в 10 раз чаще, но только ради
+        // отзывчивости ввода и прокачки аудио, а не ради детекта.
+        if last_poll.elapsed() >= POLL_INTERVAL {
+            last_poll = Instant::now();
+            active = det.poll().unwrap_or_default().into_iter().next();
+            let is_active = active.is_some();
 
-        if is_active && !was_active {
-            app.on_event(Event::SessionAppeared, active.as_ref())?;
-            if app.state_is_armed() {
-                println!("Похоже, встреча ({}). Записать? y/n", active.as_ref().unwrap().process_name);
-                asked = true;
+            if is_active && !was_active {
+                app.on_event(Event::SessionAppeared, active.as_ref())?;
+                if app.state_is_armed() {
+                    println!("Похоже, встреча ({}). Записать? y/n", active.as_ref().unwrap().process_name);
+                    asked = true;
+                }
+            } else if !is_active && was_active {
+                app.on_event(Event::SessionGone, None)?;
+                asked = false;
             }
-        } else if !is_active && was_active {
-            app.on_event(Event::SessionGone, None)?;
-            asked = false;
+            was_active = is_active;
         }
-        was_active = is_active;
 
         for cmd in input.try_iter() {
+            // Любая из четырёх команд снимает висящий вопрос: иначе `s` в Armed
+            // оставил бы asked=true, и следующее `n` прилетело бы уже в
+            // Recording, где UserDeclined проглатывается — человек сказал
+            // «не записывать», а запись продолжила бы литься на диск.
             let e = match cmd.as_str() {
-                "y" if asked => { asked = false; Some(Event::UserConfirmed) }
-                "n" if asked => { asked = false; Some(Event::UserDeclined) }
+                "y" if asked => Some(Event::UserConfirmed),
+                "n" if asked => Some(Event::UserDeclined),
                 "s" => Some(Event::ManualStart),
                 "x" => Some(Event::ManualStop),
                 _ => None,
             };
             if let Some(e) = e {
+                asked = false;
                 app.on_event(e, active.as_ref())?;
             }
         }

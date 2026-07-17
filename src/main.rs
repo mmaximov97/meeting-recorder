@@ -52,6 +52,36 @@ fn first_foreign_session(sessions: Vec<MicSession>, me: u32) -> Option<MicSessio
     sessions.into_iter().find(|s| s.pid != me)
 }
 
+/// Решение по одному опросу детектора: кто теперь активная сессия и какое
+/// событие из этого следует.
+///
+/// Вынесено из `fn main` намеренно. Фикс само-детекта — это ДВЕ вещи: сама
+/// `first_foreign_session` и то, что её результат заведён в `was_active`,
+/// откуда и берутся `SessionAppeared`/`SessionGone`. Хелпер был покрыт
+/// тестами, проводка — нет, а бага жила именно в проводке. Пока эта строка
+/// стояла в `main`, её можно было откатить на `.next()`, и все тесты
+/// остались бы зелёными: приложение снова детектило бы само себя, а
+/// `SessionGone` не приходил бы никогда.
+///
+/// `was_active` передаётся, а не хранится: функция чистая — тот же вход даёт
+/// тот же выход, и оба перехода (появление/уход) проверяются без цикла,
+/// детектора и WASAPI.
+fn poll_to_event(
+    was_active: bool,
+    sessions: Vec<MicSession>,
+    me: u32,
+) -> (Option<MicSession>, Option<Event>) {
+    let active = first_foreign_session(sessions, me);
+    let event = match (active.is_some(), was_active) {
+        (true, false) => Some(Event::SessionAppeared),
+        (false, true) => Some(Event::SessionGone),
+        // Состояние не изменилось: повторный детект той же встречи — шум,
+        // а повторное «сессий по-прежнему нет» — тем более.
+        _ => None,
+    };
+    (active, event)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = PathBuf::from(r"C:\Users\<username>\Recordings");
     let det = WindowsDetector::new()?;
@@ -81,20 +111,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if debug_poll {
                         eprintln!("[poll] мы pid={me} → {sessions:?}");
                     }
-                    active = first_foreign_session(sessions, me);
-                    let is_active = active.is_some();
+                    let (found, event) = poll_to_event(was_active, sessions, me);
+                    active = found;
+                    was_active = active.is_some();
 
-                    if is_active && !was_active {
-                        app.on_event(Event::SessionAppeared, active.as_ref())?;
-                        if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
-                            println!("Похоже, встреча ({}). Записать? y/n", s.process_name);
-                            asked = true;
+                    match event {
+                        Some(Event::SessionAppeared) => {
+                            app.on_event(Event::SessionAppeared, active.as_ref())?;
+                            if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
+                                println!("Похоже, встреча ({}). Записать? y/n", s.process_name);
+                                asked = true;
+                            }
                         }
-                    } else if !is_active && was_active {
-                        app.on_event(Event::SessionGone, None)?;
-                        asked = false;
+                        Some(Event::SessionGone) => {
+                            app.on_event(Event::SessionGone, None)?;
+                            asked = false;
+                        }
+                        // Других событий poll_to_event не порождает.
+                        Some(_) | None => {}
                     }
-                    was_active = is_active;
                 }
                 // Ошибку опроса нельзя трактовать как «сессия исчезла»: сбой
                 // COM/WASAPI на один тик оборвал бы идущую авто-запись и тут же
@@ -160,14 +195,6 @@ mod tests {
         assert_eq!(first_foreign_session(sessions, 42), None);
     }
 
-    /// Именно этот случай ломался: мы уже в Armed (держим мик), Zoom вышел из
-    /// звонка. Остаться должно «сессий нет» → SessionGone → кольцо выброшено.
-    #[test]
-    fn после_ухода_zoom_остаёмся_только_мы_и_это_значит_сессий_нет() {
-        let sessions = vec![сессия(42, "meeting-recorder.exe")];
-        assert_eq!(first_foreign_session(sessions, 42), None);
-    }
-
     #[test]
     fn чужая_сессия_находится_даже_если_наша_идёт_первой() {
         let sessions = vec![сессия(42, "meeting-recorder.exe"), сессия(7, "Zoom.exe")];
@@ -189,5 +216,76 @@ mod tests {
             first_foreign_session(sessions, 42),
             Some(сессия(7, "Zoom.exe"))
         );
+    }
+
+    // ---- проводка фикса: poll_to_event ------------------------------------
+    //
+    // Тесты выше проверяют хелпер, эти — то, что его результат действительно
+    // заведён в решение о событии. Мутация «вернуть `.next()` вместо фильтра»
+    // (в любом из двух мест — в самой `first_foreign_session` или в вызове из
+    // `poll_to_event`) валит именно эту группу.
+
+    /// Гвоздь всей баги. Мы в Armed/Recording, то есть сами держим микрофон и
+    /// сами же попадаем в список детектора. Zoom вышел из звонка — остались
+    /// только мы. Это обязано читаться как «сессий нет» → `SessionGone`.
+    ///
+    /// Без фильтра своего pid `active` был бы `Some(мы)`, `is_active` осталось
+    /// бы `true` при `was_active == true`, и события не случилось бы ВООБЩЕ:
+    /// в Armed вопрос висел бы вечно с горящим микрофоном, в Recording(Auto)
+    /// запись не остановилась бы по концу звонка никогда.
+    #[test]
+    fn уход_zoom_даёт_session_gone_даже_пока_мы_держим_микрофон() {
+        let (active, event) = poll_to_event(true, vec![сессия(42, "meeting-recorder.exe")], 42);
+        assert_eq!(active, None, "наш собственный захват — не встреча");
+        assert_eq!(
+            event,
+            Some(Event::SessionGone),
+            "уход настоящей сессии обязан быть виден, даже когда мик держим мы"
+        );
+    }
+
+    /// Обратная сторона того же шва: собственный захват не имеет права
+    /// выглядеть началом встречи — иначе приложение предложило бы записать
+    /// само себя, а на `y` ушло бы в самоподдерживающийся детект.
+    #[test]
+    fn собственный_захват_не_поднимает_session_appeared() {
+        let (active, event) = poll_to_event(false, vec![сессия(42, "meeting-recorder.exe")], 42);
+        assert_eq!(active, None);
+        assert_eq!(event, None, "мы сами себе не встреча");
+    }
+
+    /// Чужая сессия рядом с нашей — всё ещё встреча: фильтр обязан убирать
+    /// ровно нас, а не всё подряд.
+    #[test]
+    fn zoom_рядом_с_нашей_сессией_остаётся_активной_встречей() {
+        let (active, event) = poll_to_event(
+            true,
+            vec![сессия(42, "meeting-recorder.exe"), сессия(7, "Zoom.exe")],
+            42,
+        );
+        assert_eq!(active, Some(сессия(7, "Zoom.exe")));
+        assert_eq!(event, None, "встреча уже шла — повторного события не нужно");
+    }
+
+    #[test]
+    fn появление_zoom_из_тишины_даёт_session_appeared() {
+        let (active, event) = poll_to_event(false, vec![сессия(7, "Zoom.exe")], 42);
+        assert_eq!(active, Some(сессия(7, "Zoom.exe")));
+        assert_eq!(event, Some(Event::SessionAppeared));
+    }
+
+    #[test]
+    fn исчезновение_последней_сессии_даёт_session_gone() {
+        let (active, event) = poll_to_event(true, Vec::new(), 42);
+        assert_eq!(active, None);
+        assert_eq!(event, Some(Event::SessionGone));
+    }
+
+    /// Тишина в Idle — самый частый опрос, событий быть не должно.
+    #[test]
+    fn пустой_опрос_без_активной_сессии_не_даёт_события() {
+        let (active, event) = poll_to_event(false, Vec::new(), 42);
+        assert_eq!(active, None);
+        assert_eq!(event, None);
     }
 }

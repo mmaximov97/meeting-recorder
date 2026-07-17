@@ -8,6 +8,12 @@ sysinfo = "0.32"
 thiserror = "2"
 hound = "3.5"
 chrono = "0.4"
+# 0.18, а не 0.15 из плана: у 0.15 другой API (россыпь отдельных типов ошибок,
+# StreamConfig по ссылке, SampleRate-newtype), а loopback на WASAPI подтверждён
+# прямо в исходниках 0.18 — см. комментарий в src/capture/mod.rs.
+# Тянет свою версию windows (>=0.61) рядом с нашей 0.58: дубликат в дереве
+# осознанный, версии semver-несовместимы и мирно сосуществуют.
+cpal = "0.18"
 
 [dependencies.windows]
 version = "0.58"

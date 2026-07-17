@@ -1,6 +1,7 @@
 mod detector;
 mod ringbuf;
 mod session;
+mod storage;
 
 use detector::{MeetingDetector, WindowsDetector, POLL_INTERVAL};
 use std::thread;

@@ -1,3 +1,4 @@
+mod capture;
 mod detector;
 mod ringbuf;
 mod session;

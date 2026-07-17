@@ -11,6 +11,18 @@ pub enum State {
     /// Детект сработал, пишем в кольцо, ждём ответа пользователя.
     Armed,
     Recording(Trigger),
+    /// Файл закрывается (`Action::CloseFile` уже выдан), ждём `FinalizeDone`.
+    ///
+    /// Контракт с вызывающим кодом: `FinalizeDone` — единственный выход из
+    /// этого состояния (см. `enum Event` — ни ошибки, ни таймаута там нет),
+    /// и он ОБЯЗАН прийти всегда, включая случай, когда закрытие файла на
+    /// стороне вызывающего провалилось (I/O-ошибка и т.п.). Машина здесь не
+    /// умеет отличать «успех» от «сбой» — это единственный явный выход.
+    ///
+    /// Если `FinalizeDone` не прислать, машина застревает в `Finalizing`
+    /// навсегда: любые последующие `SessionAppeared`/`ManualStart` уйдут в
+    /// catch-all (`Action::None`, без смены состояния), и приложение молча
+    /// перестанет реагировать на новые сессии/ручной старт.
     Finalizing,
 }
 
@@ -68,7 +80,11 @@ impl SessionMachine {
                 self.state = Recording(Trigger::Auto);
                 Action::FlushRingToFile
             }
-            (Armed, UserDeclined) | (Armed, SessionGone) => {
+            // ManualStop в Armed семантически — тот же отказ: микрофон уже
+            // захвачен под кольцо, юзер жмёт «стоп» до подтверждения записи.
+            // Без этого плеча событие проваливалось в catch-all, и микрофон
+            // оставался висеть в захваченном состоянии до истечения сессии.
+            (Armed, UserDeclined) | (Armed, SessionGone) | (Armed, ManualStop) => {
                 self.state = Idle;
                 Action::DiscardRing
             }
@@ -205,5 +221,106 @@ mod tests {
         m.handle(Event::ManualStart);
         assert_eq!(m.handle(Event::SessionAppeared), Action::None);
         assert_eq!(m.state(), State::Recording(Trigger::Manual));
+    }
+
+    /// Important 1 ревью: ManualStop в Armed — семантически тот же отказ,
+    /// что и UserDeclined/SessionGone. Микрофон уже захвачен под кольцо,
+    /// вопрос ещё висит на экране; жмём «стоп» — кольцо должно быть
+    /// выброшено, а не молча провалиться в catch-all с зависшим в Armed
+    /// (и потому не отпущенным) микрофоном.
+    #[test]
+    fn ручной_стоп_в_armed_равен_отказу_и_освобождает_микрофон() {
+        let mut m = SessionMachine::new();
+        m.handle(Event::SessionAppeared);
+        assert_eq!(m.handle(Event::ManualStop), Action::DiscardRing);
+        assert_eq!(m.state(), State::Idle);
+    }
+
+    /// Minor ревью: единственный прежний тест на catch-all покрывал только
+    /// (Recording(Manual), SessionAppeared) — из 35 комбинаций (Armed,
+    /// ManualStop) лежала ровно в непокрытых, и это была реальная бага
+    /// (Important 1 выше). Табличный тест перебирает все 5 состояний × 7
+    /// событий и фиксирует ожидаемую пару (Action, State) для каждой —
+    /// это документация полной матрицы переходов не хуже, чем тест: любое
+    /// будущее изменение поведения станет видимым здесь целиком.
+    ///
+    /// `State::Recording(Trigger::Auto)` и `State::Recording(Trigger::Manual)`
+    /// — разные состояния, посчитаны отдельно (отсюда 5, а не 4 состояния).
+    #[test]
+    fn таблица_переходов_покрывает_все_state_x_event() {
+        #[rustfmt::skip]
+        let table: &[(State, Event, Action, State)] = &[
+            // ---- Idle -----------------------------------------------------
+            (State::Idle, Event::SessionAppeared, Action::StartRingBuffer, State::Armed),
+            (State::Idle, Event::SessionGone,      Action::None,           State::Idle),
+            (State::Idle, Event::UserConfirmed,    Action::None,           State::Idle),
+            (State::Idle, Event::UserDeclined,     Action::None,           State::Idle),
+            (State::Idle, Event::ManualStart,      Action::StartFileWrite, State::Recording(Trigger::Manual)),
+            (State::Idle, Event::ManualStop,       Action::None,           State::Idle),
+            (State::Idle, Event::FinalizeDone,     Action::None,           State::Idle),
+
+            // ---- Armed ---- микрофон уже захвачен: SessionGone/UserDeclined/
+            // ManualStop — все три эквивалентны отказу, выбрасывают кольцо
+            // (Important 1 ревью, зафиксировано отдельным тестом выше тоже).
+            (State::Armed, Event::SessionAppeared, Action::None,            State::Armed),
+            (State::Armed, Event::SessionGone,     Action::DiscardRing,     State::Idle),
+            (State::Armed, Event::UserConfirmed,   Action::FlushRingToFile, State::Recording(Trigger::Auto)),
+            (State::Armed, Event::UserDeclined,    Action::DiscardRing,     State::Idle),
+            (State::Armed, Event::ManualStart,     Action::FlushRingToFile, State::Recording(Trigger::Auto)),
+            (State::Armed, Event::ManualStop,      Action::DiscardRing,     State::Idle),
+            (State::Armed, Event::FinalizeDone,    Action::None,            State::Armed),
+
+            // ---- Recording(Auto) -------------------------------------------
+            (State::Recording(Trigger::Auto), Event::SessionAppeared, Action::None,      State::Recording(Trigger::Auto)),
+            (State::Recording(Trigger::Auto), Event::SessionGone,     Action::CloseFile, State::Finalizing),
+            (State::Recording(Trigger::Auto), Event::UserConfirmed,   Action::None,      State::Recording(Trigger::Auto)),
+            (State::Recording(Trigger::Auto), Event::UserDeclined,    Action::None,      State::Recording(Trigger::Auto)),
+            (State::Recording(Trigger::Auto), Event::ManualStart,     Action::None,      State::Recording(Trigger::Auto)),
+            (State::Recording(Trigger::Auto), Event::ManualStop,      Action::CloseFile, State::Finalizing),
+            (State::Recording(Trigger::Auto), Event::FinalizeDone,    Action::None,      State::Recording(Trigger::Auto)),
+
+            // ---- Recording(Manual) ---- SessionGone здесь намеренно None: у
+            // ручной записи mic-сессии могло не быть вовсе (см. докблок
+            // State::Finalizing и тест ручную_запись_исчезновение...).
+            (State::Recording(Trigger::Manual), Event::SessionAppeared, Action::None,      State::Recording(Trigger::Manual)),
+            (State::Recording(Trigger::Manual), Event::SessionGone,     Action::None,      State::Recording(Trigger::Manual)),
+            (State::Recording(Trigger::Manual), Event::UserConfirmed,   Action::None,      State::Recording(Trigger::Manual)),
+            (State::Recording(Trigger::Manual), Event::UserDeclined,    Action::None,      State::Recording(Trigger::Manual)),
+            (State::Recording(Trigger::Manual), Event::ManualStart,     Action::None,      State::Recording(Trigger::Manual)),
+            (State::Recording(Trigger::Manual), Event::ManualStop,      Action::CloseFile, State::Finalizing),
+            (State::Recording(Trigger::Manual), Event::FinalizeDone,    Action::None,      State::Recording(Trigger::Manual)),
+
+            // ---- Finalizing ---- единственный легальный выход — FinalizeDone
+            // (см. докблок State::Finalizing, Important 2 ревью). Всё
+            // остальное — задокументированное застревание, не баг этого теста.
+            (State::Finalizing, Event::SessionAppeared, Action::None, State::Finalizing),
+            (State::Finalizing, Event::SessionGone,     Action::None, State::Finalizing),
+            (State::Finalizing, Event::UserConfirmed,   Action::None, State::Finalizing),
+            (State::Finalizing, Event::UserDeclined,    Action::None, State::Finalizing),
+            (State::Finalizing, Event::ManualStart,     Action::None, State::Finalizing),
+            (State::Finalizing, Event::ManualStop,      Action::None, State::Finalizing),
+            (State::Finalizing, Event::FinalizeDone,    Action::None, State::Idle),
+        ];
+
+        assert_eq!(
+            table.len(),
+            35,
+            "таблица должна покрывать все 5 состояний × 7 событий"
+        );
+
+        for &(from, event, expected_action, expected_to) in table {
+            let mut m = SessionMachine { state: from };
+            let action = m.handle(event);
+            assert_eq!(
+                action, expected_action,
+                "{from:?} + {event:?}: ожидали действие {expected_action:?}, получили {action:?}"
+            );
+            assert_eq!(
+                m.state(),
+                expected_to,
+                "{from:?} + {event:?}: ожидали состояние {expected_to:?}, получили {:?}",
+                m.state()
+            );
+        }
     }
 }

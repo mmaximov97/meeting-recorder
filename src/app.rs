@@ -4,6 +4,18 @@
 //! в `main.rs`, а в Task 7 его заменит GUI. `App` про это знать не должен:
 //! наружу торчат только `on_event` (событие → действие) и `pump_audio`
 //! (перелить накопленное аудио туда, куда велит состояние).
+//!
+//! # Почему захват и дорожки спрятаны за трейтами
+//!
+//! [`AudioIo`] и [`SinkFactory`] существуют ровно ради тестов. Инварианты, на
+//! которых держится вся задача — «`FinalizeDone` уходит в машину даже при
+//! ошибке закрытия», «финализируются обе дорожки, даже если запись хвоста в
+//! первую провалилась», «микрофон отпускается на отказе» — все до одного
+//! проявляются ТОЛЬКО на пути ошибки. Живой `cpal` и живой `hound` по команде
+//! не падают, поэтому без подставного бэкенда эти ветки не выполняются в
+//! тестах ни разу: код верен, покрытие нулевое, и любая «причёсывающая»
+//! правка остаётся зелёной. Фейки в тестах умеют падать в нужной точке —
+//! этого достаточно, чтобы каждый инвариант ловил свою мутацию.
 
 use crate::capture::{start_capture, Source};
 use crate::detector::MicSession;
@@ -13,6 +25,7 @@ use crate::storage::{recording_filename, Track, WavSink, SAMPLE_RATE};
 use chrono::{DateTime, Local};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
+use std::time::Instant;
 
 const RING_SECONDS: usize = 30;
 const RING_CAPACITY: usize = SAMPLE_RATE as usize * RING_SECONDS;
@@ -24,6 +37,66 @@ const MAX_SEQ: u32 = 1000;
 
 type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// Одна дорожка, открытая на запись.
+///
+/// `finalize` забирает `Box<Self>`, а не `self`: дорожка обязана потребляться
+/// (после финализации писать некуда), но трейт должен остаться объектно
+/// безопасным — `App` держит `Option<Box<dyn Sink>>`.
+pub trait Sink {
+    fn write(&mut self, samples: &[i16]) -> Res;
+    /// Дописывает WAV-заголовок с реальной длиной. Без него файл играет тишину.
+    fn finalize(self: Box<Self>) -> Res<PathBuf>;
+}
+
+/// Открывает дорожки записи. Отдельно от [`Sink`], потому что имя файла
+/// подбирается на каждую запись заново (см. `free_name_pair`).
+pub trait SinkFactory {
+    fn create(&self, dir: &Path, filename: &str) -> Res<Box<dyn Sink>>;
+}
+
+/// Что оркестратору нужно от захвата: взять микрофон, отпустить микрофон,
+/// забрать накопленное.
+///
+/// `open`/`close` — это ровно те две точки, где в Windows загорается и гаснет
+/// индикатор микрофона, поэтому они и вынесены в трейт: privacy-инварианты
+/// («мик берётся на детекте, а не в `App::new`», «отказ отпускает мик
+/// немедленно») проверяются через `is_open`.
+pub trait AudioIo {
+    fn open(&mut self) -> Res;
+    fn close(&mut self);
+    /// Держим ли мы сейчас микрофон, то есть горит ли индикатор в Windows.
+    ///
+    /// В рабочем коде не зовётся: `App` знает про захват из собственного
+    /// состояния, а Task 7 будет спрашивать про индикатор у `state()`.
+    /// Существует ради тестов privacy-инвариантов — «мик берётся на детекте,
+    /// а не в `App::new`» и «отказ отпускает мик немедленно» иначе не
+    /// сформулировать вовсе: наблюдать за индикатором изнутри теста больше
+    /// нечем.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn is_open(&self) -> bool;
+    /// Всё, что накопилось с прошлого раза: `(mic, system)`.
+    fn drain(&mut self) -> (Vec<i16>, Vec<i16>);
+}
+
+impl Sink for WavSink {
+    fn write(&mut self, samples: &[i16]) -> Res {
+        WavSink::write(self, samples)?;
+        Ok(())
+    }
+
+    fn finalize(self: Box<Self>) -> Res<PathBuf> {
+        Ok(WavSink::finalize(*self)?)
+    }
+}
+
+struct WavSinks;
+
+impl SinkFactory for WavSinks {
+    fn create(&self, dir: &Path, filename: &str) -> Res<Box<dyn Sink>> {
+        Ok(Box::new(WavSink::create(dir, filename)?))
+    }
+}
+
 /// Живут только пока идёт детект или запись. Drop останавливает захват,
 /// поэтому индикатор микрофона в Windows гаснет сразу после Idle.
 struct Streams {
@@ -33,22 +106,127 @@ struct Streams {
     rx_sys: Receiver<Vec<i16>>,
 }
 
+/// Реальный захват через cpal.
+struct CpalAudio {
+    streams: Option<Streams>,
+    /// `MR_DEBUG_TIMING=1` — замер стоимости открытия потоков и задержки
+    /// первого чанка по каждой дорожке. Живого звонка отладчиком не поймать,
+    /// а расхождение старта mic и loopback видно только на числах: это
+    /// доказательная база для отдельной задачи про смещение дорожек.
+    timing: bool,
+    /// Начало `open()` — общая точка отсчёта для обеих дорожек.
+    opened_at: Option<Instant>,
+    logged_mic: bool,
+    logged_sys: bool,
+}
+
+impl CpalAudio {
+    fn new() -> Self {
+        Self {
+            streams: None,
+            timing: std::env::var_os("MR_DEBUG_TIMING").is_some(),
+            opened_at: None,
+            logged_mic: false,
+            logged_sys: false,
+        }
+    }
+}
+
+impl AudioIo for CpalAudio {
+    fn open(&mut self) -> Res {
+        if self.streams.is_some() {
+            return Ok(());
+        }
+        let (tx_mic, rx_mic) = channel();
+        let (tx_sys, rx_sys) = channel();
+
+        let t0 = Instant::now();
+        let _mic = start_capture(Source::Mic, tx_mic)?;
+        let t1 = Instant::now();
+        let _sys = start_capture(Source::SystemLoopback, tx_sys)?;
+        let t2 = Instant::now();
+        if self.timing {
+            eprintln!(
+                "[timing] start_capture(mic)      = {:?}",
+                t1.duration_since(t0)
+            );
+            eprintln!(
+                "[timing] start_capture(loopback) = {:?}",
+                t2.duration_since(t1)
+            );
+            eprintln!("[timing] open_streams всего      = {:?}", t2.duration_since(t0));
+        }
+        self.opened_at = Some(t0);
+        self.logged_mic = false;
+        self.logged_sys = false;
+
+        self.streams = Some(Streams {
+            _mic,
+            _sys,
+            rx_mic,
+            rx_sys,
+        });
+        Ok(())
+    }
+
+    /// Drop у cpal::Stream останавливает захват — этого достаточно.
+    fn close(&mut self) {
+        self.streams = None;
+        self.opened_at = None;
+    }
+
+    fn is_open(&self) -> bool {
+        self.streams.is_some()
+    }
+
+    fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+        let (mic, sys) = match &self.streams {
+            Some(s) => (
+                s.rx_mic.try_iter().flatten().collect::<Vec<i16>>(),
+                s.rx_sys.try_iter().flatten().collect::<Vec<i16>>(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        if self.timing {
+            // Замер грубый: drain зовётся из цикла раз в 200 мс, так что
+            // «первый чанк» округлён вверх до тика. Для смещения масштаба
+            // ~1 с этого хватает, для микросекундных выводов — нет.
+            if let Some(t0) = self.opened_at {
+                if !self.logged_mic && !mic.is_empty() {
+                    eprintln!("[timing] первый чанк mic      = +{:?}", t0.elapsed());
+                    self.logged_mic = true;
+                }
+                if !self.logged_sys && !sys.is_empty() {
+                    eprintln!("[timing] первый чанк loopback = +{:?}", t0.elapsed());
+                    self.logged_sys = true;
+                }
+            }
+        }
+        (mic, sys)
+    }
+}
+
 pub struct App {
     machine: SessionMachine,
     dir: PathBuf,
     ring_mic: RingBuffer,
     ring_sys: RingBuffer,
-    sink_mic: Option<WavSink>,
-    sink_sys: Option<WavSink>,
-    streams: Option<Streams>,
+    sink_mic: Option<Box<dyn Sink>>,
+    sink_sys: Option<Box<dyn Sink>>,
+    audio: Box<dyn AudioIo>,
+    sinks: Box<dyn SinkFactory>,
     current_source: String,
     started: DateTime<Local>,
 }
 
 impl App {
     /// Микрофон здесь НЕ открывается. Потоки поднимаются только по детекту
-    /// или по ручному старту — см. open_streams().
+    /// или по ручному старту — см. `Action::StartRingBuffer`.
     pub fn new(dir: PathBuf) -> Self {
+        Self::with_backends(dir, Box::new(CpalAudio::new()), Box::new(WavSinks))
+    }
+
+    fn with_backends(dir: PathBuf, audio: Box<dyn AudioIo>, sinks: Box<dyn SinkFactory>) -> Self {
         Self {
             machine: SessionMachine::new(),
             dir,
@@ -56,7 +234,8 @@ impl App {
             ring_sys: RingBuffer::new(RING_CAPACITY),
             sink_mic: None,
             sink_sys: None,
-            streams: None,
+            audio,
+            sinks,
             current_source: "manual".into(),
             started: Local::now(),
         }
@@ -70,45 +249,68 @@ impl App {
         matches!(self.machine.state(), State::Armed)
     }
 
-    fn open_streams(&mut self) -> Res {
-        if self.streams.is_some() {
-            return Ok(());
-        }
-        let (tx_mic, rx_mic) = channel();
-        let (tx_sys, rx_sys) = channel();
-        let _mic = start_capture(Source::Mic, tx_mic)?;
-        let _sys = start_capture(Source::SystemLoopback, tx_sys)?;
-        self.streams = Some(Streams {
-            _mic,
-            _sys,
-            rx_mic,
-            rx_sys,
-        });
-        Ok(())
-    }
-
-    /// Drop у cpal::Stream останавливает захват — этого достаточно.
-    fn close_streams(&mut self) {
-        self.streams = None;
-    }
-
     /// Забрать всё, что накопилось в каналах захвата.
     fn drain_channels(&mut self) -> (Vec<i16>, Vec<i16>) {
-        match &self.streams {
-            Some(s) => (
-                s.rx_mic.try_iter().flatten().collect(),
-                s.rx_sys.try_iter().flatten().collect(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        }
+        self.audio.drain()
     }
 
+    /// Событие → переход машины → применение действия.
+    ///
+    /// # Почему ошибка применения сбрасывает машину
+    ///
+    /// Машина переходит ДО того, как действие применено (иначе не узнать, какое
+    /// действие применять), поэтому провалившееся действие оставляет состояние
+    /// и реальный мир в разных точках. Самый дорогой случай: `FlushRingToFile`
+    /// не смог открыть файлы — машина уже в `Recording(Auto)`, `sink_*` пусты,
+    /// потоки открыты. Дальше `pump_audio` через `if let Some(w)` молча ничего
+    /// не пишет и возвращает `Ok`, а `close_sinks` с двумя `None` возвращает
+    /// `Ok` без единого файла: **отказ выглядит как успех**. В Task 6 это
+    /// маскировал `?` в `main` (процесс просто падал), но в Task 7 GUI ловит
+    /// ошибку и живёт дальше — получился бы живой интерфейс с горящим
+    /// индикатором мика, который не пишет ничего.
+    ///
+    /// Выбран сброс в `Idle`, а не откат состояния назад, по двум причинам.
+    /// Во-первых, `Idle` — единственная точка, где у КАЖДОГО поля есть
+    /// известное значение (нет синков, нет потоков, кольцо пусто), поэтому
+    /// «мир сошёлся с машиной» здесь проверяется, а не выводится рассуждением;
+    /// откат же в `Armed` пришлось бы дополнять разбором того, что именно
+    /// действие успело сделать до падения (открыть потоки? слить кольцо?).
+    /// Во-вторых, `Idle` честнее по смыслу: запись не начата и микрофон
+    /// отпущен — ровно это и произошло. Откат в `Armed` оставил бы горящий
+    /// индикатор и крутящееся кольцо после того, как запись уже провалилась.
+    ///
+    /// Ошибка при этом не глотается — она уходит наверх, к тому, кто умеет о
+    /// ней сказать (в Task 7 — GUI).
     pub fn on_event(&mut self, e: Event, source: Option<&MicSession>) -> Res {
         if let Some(s) = source {
             self.current_source = s.process_name.clone();
         }
         let action = self.machine.handle(e);
-        self.apply(action)
+        match self.apply(action) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.reset_to_idle();
+                Err(err)
+            }
+        }
+    }
+
+    /// Свести машину и мир в одну точку после провалившегося действия.
+    ///
+    /// Машина пересоздаётся, а не «переводится» в `Idle`: легального события
+    /// «у меня всё сломалось» в `enum Event` нет, а `session.rs` — готовый
+    /// модуль, трогать его нельзя. `SessionMachine::new()` — это и есть Idle.
+    ///
+    /// `close_sinks` зовётся best-effort: его собственная ошибка отбрасывается,
+    /// потому что наверх уже уходит первая, настоящая причина. Но позвать его
+    /// надо обязательно — если синки успели открыться и в них что-то попало,
+    /// это «что-то» лучше дописать и финализировать, чем бросить недописанным.
+    fn reset_to_idle(&mut self) {
+        let _ = self.close_sinks();
+        self.audio.close();
+        self.ring_mic.drain_to_vec();
+        self.ring_sys.drain_to_vec();
+        self.machine = SessionMachine::new();
     }
 
     fn apply(&mut self, action: Action) -> Res {
@@ -117,17 +319,17 @@ impl App {
                 self.started = Local::now();
                 // Микрофон берётся ИМЕННО ЗДЕСЬ — на детекте, до вопроса.
                 // Индикатор мика в Windows загорается в этот момент.
-                self.open_streams()?;
+                self.audio.open()?;
             }
             Action::DiscardRing => {
                 self.ring_mic.drain_to_vec();
                 self.ring_sys.drain_to_vec();
-                self.close_streams(); // отказ — отпускаем микрофон немедленно
+                self.audio.close(); // отказ — отпускаем микрофон немедленно
             }
             Action::StartFileWrite => {
                 self.started = Local::now();
                 self.current_source = "manual".into();
-                self.open_streams()?;
+                self.audio.open()?;
                 self.open_sinks()?;
             }
             Action::FlushRingToFile => {
@@ -143,12 +345,19 @@ impl App {
             }
             Action::CloseFile => {
                 let result = self.close_sinks();
-                self.close_streams();
+                self.audio.close();
                 // FinalizeDone обязан уйти в машину ДАЖЕ при ошибке закрытия.
                 // Иначе она навсегда останется в Finalizing, откуда единственный
                 // выход — это событие, и приложение молча перестанет записывать
                 // что-либо вообще. В Task 7 (аудио-цикл в фоновом потоке под Tauri)
                 // это будет выглядеть как живой GUI, который ничего не пишет.
+                //
+                // `reset_to_idle` в on_event сегодня подстраховал бы и этот
+                // случай, но полагаться на страховку тут нельзя: докблок
+                // `State::Finalizing` требует присылать FinalizeDone ВСЕГДА,
+                // включая провал закрытия, — это контракт машины, а не
+                // внутреннее дело `apply`. Уважать его дешевле здесь, чем
+                // чинить снаружи пересозданием машины.
                 self.machine.handle(Event::FinalizeDone);
                 result?;
             }
@@ -164,8 +373,8 @@ impl App {
         // Порядок важен: если вторая дорожка не открылась, первую надо
         // закрыть, иначе на диске останется осиротевший mic-файл, а
         // sink_mic — висеть в Some до следующего open_sinks.
-        let sink_mic = WavSink::create(&self.dir, &mic)?;
-        match WavSink::create(&self.dir, &sys) {
+        let sink_mic = self.sinks.create(&self.dir, &mic)?;
+        match self.sinks.create(&self.dir, &sys) {
             Ok(sink_sys) => {
                 self.sink_mic = Some(sink_mic);
                 self.sink_sys = Some(sink_sys);
@@ -174,7 +383,7 @@ impl App {
             Err(e) => {
                 let _ = sink_mic.finalize();
                 let _ = std::fs::remove_file(self.dir.join(&mic));
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -194,12 +403,12 @@ impl App {
 
         if let Some(w) = self.sink_mic.as_mut() {
             if let Err(e) = w.write(&mic) {
-                first_err.get_or_insert(e.into());
+                first_err.get_or_insert(e);
             }
         }
         if let Some(w) = self.sink_sys.as_mut() {
             if let Err(e) = w.write(&sys) {
-                first_err.get_or_insert(e.into());
+                first_err.get_or_insert(e);
             }
         }
         for sink in [self.sink_mic.take(), self.sink_sys.take()]
@@ -209,7 +418,7 @@ impl App {
             match sink.finalize() {
                 Ok(p) => println!("записано: {}", p.display()),
                 Err(e) => {
-                    first_err.get_or_insert(e.into());
+                    first_err.get_or_insert(e);
                 }
             }
         }
@@ -304,7 +513,10 @@ fn free_name_pair(dir: &Path, started: DateTime<Local>, source: &str) -> Res<(St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Trigger;
     use chrono::TimeZone;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn момент() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 7, 17, 14, 30, 0).unwrap()
@@ -346,6 +558,155 @@ mod tests {
 
     fn коснуться(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"").expect("создать файл-заглушку");
+    }
+
+    // ---- подставной бэкенд -------------------------------------------------
+    //
+    // Всё, что ниже, существует ради веток ошибок. Живой cpal и живой hound
+    // по команде не падают, поэтому инварианты «финализируем обе дорожки даже
+    // при ошибке записи», «FinalizeDone уходит даже при провале закрытия» и
+    // «микрофон отпущен» без фейков не выполняются в тестах ни разу.
+
+    /// Общий журнал вызовов: он же способ увидеть, что именно App сделал с
+    /// дорожками и микрофоном. Rc/RefCell, а не каналы — App однопоточен,
+    /// а `cpal::Stream` и так `!Send`.
+    type Журнал = Rc<RefCell<Vec<String>>>;
+
+    fn журнал() -> Журнал {
+        Rc::new(RefCell::new(Vec::new()))
+    }
+
+    fn ошибка(текст: &str) -> Box<dyn std::error::Error> {
+        Box::new(std::io::Error::other(текст.to_string()))
+    }
+
+    /// Что именно должно сломаться в подставных дорожках.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Поломка {
+        Нет,
+        /// `create` не открывает дорожку вовсе — сценарий «диск полон».
+        НеОткрывается,
+        /// `write` падает только у mic — так проверяется, что беда с одной
+        /// дорожкой не уносит финализацию второй.
+        ХвостMicНеПишется,
+        /// `finalize` падает у обеих.
+        НеФинализируется,
+    }
+
+    struct ФейкSink {
+        дорожка: &'static str,
+        журнал: Журнал,
+        падать_на_write: bool,
+        падать_на_finalize: bool,
+    }
+
+    impl Sink for ФейкSink {
+        fn write(&mut self, samples: &[i16]) -> Res {
+            if self.падать_на_write {
+                self.журнал
+                    .borrow_mut()
+                    .push(format!("write-err:{}", self.дорожка));
+                return Err(ошибка("запись сэмплов провалилась"));
+            }
+            self.журнал
+                .borrow_mut()
+                .push(format!("write:{}:{}", self.дорожка, samples.len()));
+            Ok(())
+        }
+
+        fn finalize(self: Box<Self>) -> Res<PathBuf> {
+            // Пишем в журнал ДО проверки поломки: нам важен сам факт попытки
+            // финализации, а не её успех.
+            self.журнал
+                .borrow_mut()
+                .push(format!("finalize:{}", self.дорожка));
+            if self.падать_на_finalize {
+                return Err(ошибка("финализация провалилась"));
+            }
+            Ok(PathBuf::from(format!("{}.wav", self.дорожка)))
+        }
+    }
+
+    struct ФейкSinks {
+        журнал: Журнал,
+        поломка: Поломка,
+    }
+
+    impl SinkFactory for ФейкSinks {
+        fn create(&self, _dir: &Path, filename: &str) -> Res<Box<dyn Sink>> {
+            // Дорожку опознаём по имени — App открывает их одним и тем же
+            // вызовом, и другого способа их различить у фабрики нет.
+            let mic = filename.contains(".mic.");
+            let дорожка = if mic { "mic" } else { "system" };
+            if self.поломка == Поломка::НеОткрывается {
+                self.журнал
+                    .borrow_mut()
+                    .push(format!("create-err:{дорожка}"));
+                return Err(ошибка("не удалось открыть дорожку"));
+            }
+            self.журнал.borrow_mut().push(format!("create:{дорожка}"));
+            Ok(Box::new(ФейкSink {
+                дорожка,
+                журнал: self.журнал.clone(),
+                падать_на_write: self.поломка == Поломка::ХвостMicНеПишется && mic,
+                падать_на_finalize: self.поломка == Поломка::НеФинализируется,
+            }))
+        }
+    }
+
+    struct ФейкAudio {
+        журнал: Журнал,
+        открыт: bool,
+        /// Что отдавать по каждому вызову drain, по порядку.
+        очередь: Vec<(Vec<i16>, Vec<i16>)>,
+    }
+
+    impl AudioIo for ФейкAudio {
+        fn open(&mut self) -> Res {
+            self.открыт = true;
+            self.журнал.borrow_mut().push("audio:open".into());
+            Ok(())
+        }
+
+        fn close(&mut self) {
+            if self.открыт {
+                self.журнал.borrow_mut().push("audio:close".into());
+            }
+            self.открыт = false;
+        }
+
+        fn is_open(&self) -> bool {
+            self.открыт
+        }
+
+        fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+            // Закрытый захват не отдаёт ничего — как и настоящий.
+            if !self.открыт || self.очередь.is_empty() {
+                return (Vec::new(), Vec::new());
+            }
+            self.очередь.remove(0)
+        }
+    }
+
+    /// App на подставном бэкенде. `dir` — заведомо несуществующий путь: до
+    /// файловой системы эти тесты не доходят, всё ловится фейками.
+    fn стенд(журнал: &Журнал, поломка: Поломка, звук: Vec<(Vec<i16>, Vec<i16>)>) -> App {
+        App::with_backends(
+            PathBuf::from("."),
+            Box::new(ФейкAudio {
+                журнал: журнал.clone(),
+                открыт: false,
+                очередь: звук,
+            }),
+            Box::new(ФейкSinks {
+                журнал: журнал.clone(),
+                поломка,
+            }),
+        )
+    }
+
+    fn записано(журнал: &Журнал) -> Vec<String> {
+        журнал.borrow().clone()
     }
 
     #[test]
@@ -443,20 +804,344 @@ mod tests {
     /// тогда индикатор мика в Windows горел бы всё время работы приложения.
     #[test]
     fn новый_app_не_открывает_потоки_захвата() {
-        let app = App::new(PathBuf::from("."));
+        let ж = журнал();
+        let app = стенд(&ж, Поломка::Нет, Vec::new());
         assert!(
-            app.streams.is_none(),
+            !app.audio.is_open(),
             "App::new не имеет права открывать микрофон — он берётся на детекте"
         );
         assert_eq!(app.state(), State::Idle);
+        assert!(
+            записано(&ж).is_empty(),
+            "конструктор не должен трогать ни захват, ни диск"
+        );
     }
 
-    /// pump_audio в Idle не должен ничего требовать от каналов и файлов —
-    /// это самый частый вызов в цикле (5 раз в секунду).
+    /// В Idle накопленное аудио обязано быть выброшено, а не осесть в кольце
+    /// и не уехать на диск.
+    ///
+    /// Прежний вариант этого теста звал `pump_audio` на пустом `App` и
+    /// проверял `state() == Idle` после функции, которая машину не трогает
+    /// вовсе: при `streams: None` дренаж пуст по построению, так что тест
+    /// падал бы только на панике. Здесь захват открыт и данные есть — то
+    /// есть проверяется настоящее решение `pump_audio`, а не тавтология.
     #[test]
-    fn pump_audio_в_idle_ничего_не_делает() {
-        let mut app = App::new(PathBuf::from("."));
-        app.pump_audio().expect("pump в Idle обязан быть no-op");
+    fn pump_audio_в_idle_выбрасывает_аудио_а_не_копит_его() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+        app.audio.open().expect("открыть подставной захват");
+
+        app.pump_audio().expect("pump в Idle обязан быть безобиден");
+
         assert_eq!(app.state(), State::Idle);
+        assert!(
+            app.ring_mic.is_empty() && app.ring_sys.is_empty(),
+            "в Idle кольцо не набирается: это состояние «мы не слушаем»"
+        );
+        assert!(
+            записано(&ж).iter().all(|з| !з.starts_with("write:")),
+            "в Idle на диск не уходит ничего, журнал: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Кольцо набирается только в Armed — обратная сторона предыдущего теста,
+    /// иначе «ничего не копим» проходило бы и у сломанного pump_audio.
+    #[test]
+    fn pump_audio_в_armed_набирает_кольцо() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        assert_eq!(app.state(), State::Armed);
+
+        app.pump_audio().expect("pump в Armed");
+
+        assert_eq!(app.ring_mic.len(), 3, "кольцо обязано набираться в Armed");
+        assert_eq!(app.ring_sys.len(), 3);
+        assert!(
+            записано(&ж).iter().all(|з| !з.starts_with("create:")),
+            "до подтверждения на диск не создаётся ничего"
+        );
+    }
+
+    // ---- Important 2 ревью: машина и мир не расходятся при ошибке ----------
+
+    /// Провал открытия файлов не имеет права оставить машину в `Recording`.
+    ///
+    /// Без сброса состояние было бы `Recording(Auto)` при `sink_* = None`:
+    /// `pump_audio` через `if let Some(w)` молча вернул бы `Ok`, ничего не
+    /// записав, и `close_sinks` с двумя `None` — тоже `Ok`, без единого файла.
+    /// Отказ выглядел бы как успех, а в Task 7 — как живой GUI с горящим
+    /// индикатором мика, который ничего не пишет.
+    #[test]
+    fn провал_открытия_файла_не_оставляет_машину_в_записи() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::НеОткрывается, Vec::new());
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        assert_eq!(app.state(), State::Armed);
+        assert!(app.audio.is_open(), "на детекте микрофон берётся");
+
+        let err = app
+            .on_event(Event::UserConfirmed, None)
+            .expect_err("открытие дорожек обязано упасть");
+        assert!(
+            err.to_string().contains("не удалось открыть дорожку"),
+            "наверх обязана уйти первая, настоящая причина, а не подмена: {err}"
+        );
+
+        assert_eq!(
+            app.state(),
+            State::Idle,
+            "машина не имеет права остаться в Recording, когда файлов нет"
+        );
+        assert!(
+            !app.audio.is_open(),
+            "запись не начата — микрофон обязан быть отпущен, индикатор погашен"
+        );
+        assert!(
+            app.sink_mic.is_none() && app.sink_sys.is_none(),
+            "синков нет — и машина обязана говорить о мире то же самое"
+        );
+    }
+
+    /// Та же ошибка, но с точки зрения последствий: после провала `pump_audio`
+    /// не должен изображать запись. Это и есть та «тихая» половина баги —
+    /// сама по себе она возвращает Ok и потому незаметна.
+    #[test]
+    fn после_провала_открытия_файла_pump_audio_ничего_не_изображает() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::НеОткрывается, vec![(vec![1, 2], vec![3, 4])]);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        app.on_event(Event::UserConfirmed, None)
+            .expect_err("открытие дорожек обязано упасть");
+
+        app.pump_audio().expect("pump после сброса безобиден");
+
+        assert_eq!(app.state(), State::Idle);
+        assert!(
+            записано(&ж).iter().all(|з| !з.starts_with("write:")),
+            "писать некуда, и делать вид, что пишем, нельзя: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Провал взятия микрофона на детекте — тот же инвариант с другого конца:
+    /// машина не имеет права уйти в Armed, если захват не открылся.
+    #[test]
+    fn провал_взятия_микрофона_не_оставляет_машину_в_armed() {
+        struct МикЗанят;
+        impl AudioIo for МикЗанят {
+            fn open(&mut self) -> Res {
+                Err(ошибка("микрофон занят другим приложением"))
+            }
+            fn close(&mut self) {}
+            fn is_open(&self) -> bool {
+                false
+            }
+            fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+                (Vec::new(), Vec::new())
+            }
+        }
+        let ж = журнал();
+        let mut app = App::with_backends(
+            PathBuf::from("."),
+            Box::new(МикЗанят),
+            Box::new(ФейкSinks {
+                журнал: ж.clone(),
+                поломка: Поломка::Нет,
+            }),
+        );
+
+        app.on_event(Event::SessionAppeared, None)
+            .expect_err("взятие микрофона обязано упасть");
+
+        assert_eq!(
+            app.state(),
+            State::Idle,
+            "Armed означает «мы слушаем»; если микрофон не взят, это ложь"
+        );
+    }
+
+    // ---- Important 3 ревью: инварианты закрытия ---------------------------
+
+    /// `FinalizeDone` обязан уйти в машину даже когда закрытие файла упало.
+    ///
+    /// Зовём `apply` напрямую, а не через `on_event`: `on_event` ловит ошибку
+    /// и сбрасывает машину в Idle своей страховкой (`reset_to_idle`), поэтому
+    /// сквозь него контракт самого `apply` не виден — тест был бы зелёным в
+    /// обе стороны. Проверяется именно `apply`: он обязан соблюдать контракт
+    /// `State::Finalizing` («FinalizeDone присылают ВСЕГДА, включая провал
+    /// закрытия») своими силами, а не в расчёте на страховку снаружи.
+    ///
+    /// Без этого машина навсегда осталась бы в `Finalizing`: легальный выход
+    /// оттуда ровно один, и приложение молча перестало бы писать что-либо.
+    #[test]
+    fn finalize_done_уходит_в_машину_даже_если_закрытие_упало() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::НеФинализируется, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        assert_eq!(app.state(), State::Recording(Trigger::Manual));
+
+        let action = app.machine.handle(Event::ManualStop);
+        assert_eq!(action, Action::CloseFile);
+        assert_eq!(app.state(), State::Finalizing);
+
+        let err = app.apply(action).expect_err("финализация обязана упасть");
+        assert!(err.to_string().contains("финализация провалилась"));
+        assert_eq!(
+            app.state(),
+            State::Idle,
+            "машина застряла в Finalizing: выход оттуда только по FinalizeDone, \
+             и прислать его обязаны даже при ошибке закрытия"
+        );
+    }
+
+    /// Обе дорожки финализируются, даже если запись хвоста в первую упала.
+    ///
+    /// hound пишет длину данных в заголовок только на `finalize()`. Без него
+    /// на диске остаётся WAV, который существует, весит сколько надо,
+    /// открывается плеером — и играет тишину. Ошибка в mic не имеет права
+    /// утащить за собой system.
+    #[test]
+    fn обе_дорожки_финализируются_даже_если_хвост_в_первую_не_записался() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::ХвостMicНеПишется,
+            vec![(vec![1, 2, 3], vec![4, 5, 6])],
+        );
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+
+        app.on_event(Event::ManualStop, None)
+            .expect_err("запись хвоста в mic обязана упасть");
+
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"write-err:mic".to_string()),
+            "тест бессмысленен, если хвост в mic не падал: {ж:?}"
+        );
+        assert!(
+            ж.contains(&"finalize:mic".to_string()),
+            "дорожка mic обязана быть финализирована даже после ошибки записи \
+             хвоста — иначе заголовок остаётся с нулевой длиной и WAV играет \
+             тишину: {ж:?}"
+        );
+        assert!(
+            ж.contains(&"finalize:system".to_string()),
+            "ошибка в mic не имеет права утащить за собой финализацию system: {ж:?}"
+        );
+    }
+
+    /// Хвост дописывается во вторую дорожку, даже если первая упала: беда с
+    /// mic не должна стоить system её последних сэмплов.
+    #[test]
+    fn хвост_во_вторую_дорожку_пишется_даже_если_первая_упала() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::ХвостMicНеПишется,
+            vec![(vec![1, 2, 3], vec![4, 5, 6])],
+        );
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.on_event(Event::ManualStop, None)
+            .expect_err("запись хвоста в mic обязана упасть");
+
+        assert!(
+            записано(&ж).contains(&"write:system:3".to_string()),
+            "хвост system обязан быть дописан: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Отказ отпускает микрофон немедленно и не оставляет на диске ничего.
+    #[test]
+    fn отказ_отпускает_микрофон_и_не_пишет_на_диск() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        app.pump_audio().expect("набрать кольцо");
+        assert!(app.audio.is_open(), "на детекте микрофон берётся");
+        assert!(!app.ring_mic.is_empty(), "кольцо набралось");
+
+        app.on_event(Event::UserDeclined, None).expect("отказ");
+
+        assert_eq!(app.state(), State::Idle);
+        assert!(
+            !app.audio.is_open(),
+            "отказ обязан отпустить микрофон немедленно — индикатор гаснет"
+        );
+        assert!(
+            app.ring_mic.is_empty() && app.ring_sys.is_empty(),
+            "кольцо обязано быть выброшено"
+        );
+        assert!(
+            записано(&ж).iter().all(|з| !з.starts_with("create:")),
+            "на диск не должно попасть ничего: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Закрытие файла тоже отпускает микрофон: после стопа приложение не
+    /// слушает, и индикатор обязан погаснуть.
+    #[test]
+    fn закрытие_файла_отпускает_микрофон() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        assert!(app.audio.is_open());
+
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        assert_eq!(app.state(), State::Idle);
+        assert!(
+            !app.audio.is_open(),
+            "после закрытия файла микрофон обязан быть отпущен"
+        );
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"finalize:mic".to_string()) && ж.contains(&"finalize:system".to_string()),
+            "обе дорожки обязаны быть финализированы на нормальном пути: {ж:?}"
+        );
+    }
+
+    /// Сессия исчезла до ответа — кольцо выброшено, микрофон отпущен, на диск
+    /// не попало ничего. Тот же инвариант, что и у отказа, но по событию от
+    /// детектора: именно этот путь ломался само-детектом (см. `main.rs`).
+    #[test]
+    fn уход_сессии_до_ответа_выбрасывает_кольцо_и_отпускает_микрофон() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        app.pump_audio().expect("набрать кольцо");
+
+        app.on_event(Event::SessionGone, None).expect("сессия ушла");
+
+        assert_eq!(app.state(), State::Idle);
+        assert!(!app.audio.is_open(), "микрофон обязан быть отпущен");
+        assert!(app.ring_mic.is_empty() && app.ring_sys.is_empty());
+        assert!(
+            записано(&ж).iter().all(|з| !з.starts_with("create:")),
+            "на диск не должно попасть ничего: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Подтверждение сливает кольцо в файл — то, ради чего кольцо и заведено:
+    /// в записи слышно то, что было до ответа `y`.
+    #[test]
+    fn подтверждение_сливает_кольцо_в_файл() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        app.pump_audio().expect("набрать кольцо");
+
+        app.on_event(Event::UserConfirmed, None).expect("подтверждение");
+
+        assert_eq!(app.state(), State::Recording(Trigger::Auto));
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"write:mic:3".to_string()) && ж.contains(&"write:system:3".to_string()),
+            "кольцо обязано уйти в начало файла: {ж:?}"
+        );
     }
 }

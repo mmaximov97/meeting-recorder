@@ -1317,54 +1317,220 @@ git commit -m "feat(app): сборка end-to-end через консоль, б�
 
 ### Task 7: Tauri-оболочка — трей, тост, окно, хоткей
 
+> **Переписан 2026-07-17 после Task 1-6.** Первая редакция предписывала невозможное:
+> «аудио-цикл переезжает в фоновый поток, поднимаемый в `setup`» — при том что
+> `WindowsDetector` и `cpal::Stream` оба `!Send` и через границу потока не проходят.
+> Ниже — редакция, учитывающая реальность.
+
 **Files:**
-- Create: `src-tauri/` (через `cargo create-tauri-app`)
-- Modify: структура проекта — текущие `src/*.rs` переезжают в `src-tauri/src/`
-- Create: `src/index.html`, `src/main.js` (фронтенд со списком записей)
+- Create: `src/lib.rs` (выставить модули наружу; крейт становится lib + bin)
+- Create: `src-tauri/` — отдельный крейт, зависит от корневого по пути
+- Create: `ui/index.html`, `ui/main.js`
+- Modify: `Cargo.toml` (добавить `[lib]`)
 
 **Interfaces:**
-- Consumes: всё из Task 6
+- Consumes: `App`, `WindowsDetector`, `poll_to_event`, `Event`, `State`, `POLL_INTERVAL`
 - Produces: GUI
 
-- [ ] **Step 1: Инициализировать Tauri поверх существующего кода**
+#### Архитектура — читать до кода
+
+**Консольный бинарь из Task 6 остаётся.** Он не мусор, а инструмент отладки: единственный способ проверить ядро без GUI. Не удалять, не «мигрировать».
+
+**Главный констрейнт — `!Send`.** `WindowsDetector` держит `IMMDeviceEnumerator` (COM привязан к апартаменту потока), `cpal::Stream` тоже `!Send`. Значит:
+
+- `App` и детектор **конструируются внутри аудио-потока** и живут только там. Передать их туда нельзя — ни `Arc<Mutex<>>`, ни `unsafe impl Send` (последнее даст UB, а не решение).
+- UI общается с аудио-потоком **только сообщениями**. `Sender<Event>` — `Send`, `AppHandle` — `Send + Sync`, этого достаточно.
+
+Схема:
+
+```
+UI-поток (Tauri)                    Аудио-поток (std::thread::spawn)
+  трей, тост, окно, хоткей            WindowsDetector::new()  <- конструируется ЗДЕСЬ
+        |                             App::new()              <- и это тоже
+        |  Sender<Event>  ----------> rx.try_iter()
+        |                                 |
+        |  <---- emit("state") ---------  handle.emit(...)
+```
+
+- [ ] **Step 1: Выставить ядро как библиотеку**
+
+Create `src/lib.rs`:
+
+```rust
+pub mod app;
+pub mod capture;
+pub mod detector;
+pub mod ringbuf;
+pub mod session;
+pub mod storage;
+```
+
+Modify `Cargo.toml` — добавить перед `[dependencies]`:
+
+```toml
+[lib]
+name = "meeting_recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "meeting-recorder-cli"
+path = "src/main.rs"
+```
+
+`src/main.rs` переключить на использование крейта (`use meeting_recorder::...`) вместо `mod`-объявлений.
+
+Run: `/mnt/c/Users/Cypher/.cargo/bin/cargo.exe test`
+Expected: все 88 тестов проходят — реструктуризация не должна ничего сломать.
+
+- [ ] **Step 2: Завести Tauri-крейт**
 
 Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && npm.cmd create tauri-app@latest -- --template vanilla`
 
-Затем перенести модули из `src/*.rs` в `src-tauri/src/` и переключить `main.rs` на Tauri-точку входа. Аудио-цикл из Task 6 переезжает в фоновый поток, поднимаемый в `tauri::Builder::setup`.
-
-- [ ] **Step 2: Добавить плагины трея и хоткея**
-
-Modify `src-tauri/Cargo.toml`:
+Ответить так, чтобы фронтенд лёг в `ui/`, а Rust — в `src-tauri/`. В `src-tauri/Cargo.toml`:
 
 ```toml
+[dependencies]
+meeting-recorder = { path = ".." }
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
 ```
 
-- [ ] **Step 3: Пробросить события из аудио-цикла в UI**
+- [ ] **Step 3: Аудио-поток — всё `!Send` внутри**
 
-Фоновый поток шлёт `app_handle.emit("state-changed", state)`; фронтенд подписывается и красит иконку трея. Тост-предложение — через `tauri-plugin-notification` с кнопками «Записать» / «Нет», ответ уходит обратно в цикл через канал.
+Create `src-tauri/src/audio.rs`:
 
-- [ ] **Step 4: Глобальный хоткей**
+```rust
+use meeting_recorder::app::App;
+use meeting_recorder::detector::{MeetingDetector, WindowsDetector, POLL_INTERVAL};
+use meeting_recorder::session::Event;
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
-Зарегистрировать `Ctrl+Shift+R` на toggle записи (шлёт `Event::ManualStart` / `Event::ManualStop` в зависимости от состояния).
+const TICK: Duration = Duration::from_millis(200);
 
-- [ ] **Step 5: Окно со списком записей**
+/// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не уезжают —
+/// оба !Send (COM привязан к апартаменту потока, cpal::Stream тоже).
+pub fn run(handle: AppHandle, rx: Receiver<Event>, dir: PathBuf) {
+    let det = match WindowsDetector::new() {
+        Ok(d) => d,
+        Err(e) => { let _ = handle.emit("fatal", format!("детектор не поднялся: {e}")); return; }
+    };
+    let mut app = App::new(dir);
+    let me = std::process::id();
+    let mut was_active = false;
+    let mut last_poll = Instant::now() - POLL_INTERVAL;
 
-Читает каталог `C:\Users\Cypher\Recordings`, группирует по префиксу `YYYY-MM-DD_HH-MM_source`, показывает пары дорожек, даёт кнопку «открыть папку».
+    loop {
+        if last_poll.elapsed() >= POLL_INTERVAL {
+            last_poll = Instant::now();
+            let sessions = det.poll().unwrap_or_default();
+            // poll_to_event фильтрует НАШ pid: без этого приложение детектит само
+            // себя (мы держим мик в Armed и в записи), SessionGone не приходит
+            // никогда, запись не останавливается по концу звонка.
+            let (active, ev) = meeting_recorder::app::poll_to_event(was_active, sessions, me);
+            was_active = active.is_some();
+            if let Some(ev) = ev {
+                if let Err(e) = app.on_event(ev, active.as_ref()) {
+                    let _ = handle.emit("error", e.to_string());
+                }
+                let _ = handle.emit("state", format!("{:?}", app.state()));
+                if app.state_is_armed() {
+                    let src = active.map(|s| s.process_name).unwrap_or_default();
+                    let _ = handle.emit("ask", src);
+                }
+            }
+        }
 
-- [ ] **Step 6: Проверить**
+        for ev in rx.try_iter() {
+            if let Err(e) = app.on_event(ev, None) {
+                let _ = handle.emit("error", e.to_string());
+            }
+            let _ = handle.emit("state", format!("{:?}", app.state()));
+        }
+
+        if let Err(e) = app.pump_audio() {
+            let _ = handle.emit("error", e.to_string());
+        }
+        std::thread::sleep(TICK);
+    }
+}
+```
+
+> **Не «упрощать» обработку ошибок в `?`.** В консольном бинаре ранний выход ронял процесс — громко. Здесь GUI переживёт ошибку и будет выглядеть живым, ничего не записывая. Ошибки уходят в UI событием, цикл продолжается.
+
+- [ ] **Step 4: Точка входа и хоткей**
+
+Modify `src-tauri/src/main.rs`:
+
+```rust
+mod audio;
+
+use meeting_recorder::session::Event;
+use std::sync::mpsc::{channel, Sender};
+use std::sync::Mutex;
+use tauri::Manager;
+
+struct Cmd(Mutex<Sender<Event>>);
+
+#[tauri::command]
+fn send_event(name: &str, state: tauri::State<Cmd>) -> Result<(), String> {
+    let ev = match name {
+        "confirm" => Event::UserConfirmed,
+        "decline" => Event::UserDeclined,
+        "start" => Event::ManualStart,
+        "stop" => Event::ManualStop,
+        other => return Err(format!("неизвестное событие: {other}")),
+    };
+    state.0.lock().map_err(|e| e.to_string())?.send(ev).map_err(|e| e.to_string())
+}
+
+fn main() {
+    let (tx, rx) = channel::<Event>();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(Cmd(Mutex::new(tx)))
+        .invoke_handler(tauri::generate_handler![send_event, list_recordings])
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let dir = std::path::PathBuf::from(r"C:\Users\Cypher\Recordings");
+            // Аудио-поток. Всё !Send рождается ВНУТРИ него.
+            std::thread::spawn(move || audio::run(handle, rx, dir));
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("не удалось запустить приложение");
+}
+```
+
+Хоткей `Ctrl+Shift+R` — toggle: шлёт `ManualStart` или `ManualStop` в зависимости от последнего известного состояния (UI его знает из событий `state`).
+
+- [ ] **Step 5: Трей и тост**
+
+Иконка трея отражает состояние: `Idle` — серая, `Armed` — мигает, `Recording` — красная. Меню: «Начать запись» / «Остановить», «Открыть папку записей», «Выход».
+
+Тост по событию `ask` — через `tauri-plugin-notification`, с кнопками «Записать» / «Нет», ответ уходит через `send_event`.
+
+> **Выход из трея обязан финализировать запись.** Иначе получится WAV с нулевой длиной в заголовке — файл существует, открывается, играет тишину. В консольном бинаре для этого есть команда `q`.
+
+- [ ] **Step 6: Окно со списком**
+
+Команда `list_recordings` читает `C:\Users\Cypher\Recordings`, группирует по префиксу `YYYY-MM-DD_HH-MM_source` (суффикс дорожки — `.mic.wav` / `.system.wav`, у повторов в ту же минуту — `_N`), возвращает пары. Фронтенд показывает список и кнопку «открыть папку».
+
+- [ ] **Step 7: Проверить**
 
 Run: `npm.cmd run tauri dev`
 
-Проверить все три сценария из Task 6, но через GUI: тост появляется, кнопки работают, хоткей стартует/останавливает, список пополняется, иконка трея отражает состояние.
+Три сценария через GUI: тост появляется и кнопки работают; хоткей стартует и останавливает; список пополняется; иконка трея отражает состояние; выход из трея во время записи оставляет валидный WAV.
 
-- [ ] **Step 7: Коммит**
+- [ ] **Step 8: Коммит**
 
 ```bash
 git add -A
-git commit -m "feat(ui): Tauri-оболочка — трей, тост-предложение, хоткей, список записей"
+git commit -m "feat(ui): Tauri-оболочка — трей, тост, хоткей, список записей"
 ```
 
 ---

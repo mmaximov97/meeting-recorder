@@ -29,41 +29,69 @@ static BLINK_ON: AtomicBool = AtomicBool::new(true);
 /// tauri 2.11). Единственный способ дотянуться до пункта после сборки меню —
 /// не терять ссылку на него.
 static TOGGLE_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+/// Текст фатальной ошибки для подсказки трея. `OnceLock`, потому что фатальная
+/// ошибка одна: выхода из этого состояния нет, перезаписывать нечем.
+static FATAL_MSG: OnceLock<String> = OnceLock::new();
 
 const IDLE: u8 = 0;
 const ARMED: u8 = 1;
 const RECORDING: u8 = 2;
+/// Аудио-поток мёртв. Терминальное состояние: подняться обратно некому — всё
+/// `!Send` умерло вместе с потоком.
+const FATAL: u8 = 3;
 
 /// Как часто мигает иконка в Armed.
 const BLINK: Duration = Duration::from_millis(600);
 
+/// Сколько ждать финализации, прежде чем выйти силой.
+///
+/// Финализация — это дописать хвост кольца и закрыть два файла, доли секунды.
+/// 5 с — запас на тик цикла (200 мс), опрос детектора и медленный диск, а не
+/// оценка нормальной работы: срабатывание этого таймера означает, что
+/// аудио-поток завис. Меньше ставить нельзя — оборвём живую финализацию и сами
+/// сделаем тот самый битый WAV.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+
 const SIZE: u32 = 32;
 
-/// Залитый кружок SIZE×SIZE в RGBA.
+/// Залитый кружок SIZE×SIZE в RGBA. `barred` — вырезать поперёк полосу (знак
+/// «нельзя»).
 ///
 /// Сглаживания нет намеренно: на 32×32 в трее его не видно, а лишний код —
-/// видно.
-fn dot(r: u8, g: u8, b: u8, a: u8) -> Image<'static> {
+/// видно. Полоса именно вырезается, а не рисуется: цвет фона трея заранее
+/// неизвестен (тёмная тема, светлая, произвольные обои), а дырка видна на любом.
+fn mark(r: u8, g: u8, b: u8, a: u8, barred: bool) -> Image<'static> {
     let mut buf = vec![0u8; (SIZE * SIZE * 4) as usize];
     let c = (SIZE as f32 - 1.0) / 2.0;
     let radius = c - 2.0;
     for y in 0..SIZE {
         for x in 0..SIZE {
             let (dx, dy) = (x as f32 - c, y as f32 - c);
-            if dx * dx + dy * dy <= radius * radius {
-                let i = ((y * SIZE + x) * 4) as usize;
-                buf[i] = r;
-                buf[i + 1] = g;
-                buf[i + 2] = b;
-                buf[i + 3] = a;
+            if dx * dx + dy * dy > radius * radius {
+                continue;
             }
+            if barred && dy.abs() <= 2.5 {
+                continue;
+            }
+            let i = ((y * SIZE + x) * 4) as usize;
+            buf[i] = r;
+            buf[i + 1] = g;
+            buf[i + 2] = b;
+            buf[i + 3] = a;
         }
     }
     Image::new_owned(buf, SIZE, SIZE)
 }
 
+fn dot(r: u8, g: u8, b: u8, a: u8) -> Image<'static> {
+    mark(r, g, b, a, false)
+}
+
 fn icon_for(state: u8, blink_on: bool) -> Image<'static> {
     match state {
+        // Записи не будет. Красный перечёркнутый: цветом похож на «пишем»,
+        // формой — заведомо нет, и эту разницу видно даже боковым зрением.
+        FATAL => mark(220, 50, 50, 255, true),
         // Пишем — красный, всегда горит.
         RECORDING => dot(220, 50, 50, 255),
         // Вопрос висит — жёлтый, мигает: состояние требует ответа.
@@ -85,23 +113,36 @@ fn repaint(app: &AppHandle) {
     };
     let _ = tray.set_icon(Some(icon_for(state, BLINK_ON.load(Ordering::Relaxed))));
     let _ = tray.set_tooltip(Some(match state {
-        RECORDING => "Идёт запись",
-        ARMED => "Похоже, встреча — записать?",
-        _ => "Ожидание встречи",
+        FATAL => FATAL_MSG
+            .get()
+            .map_or_else(|| "Запись не работает".to_string(), |m| m.clone()),
+        RECORDING => "Идёт запись".to_string(),
+        ARMED => "Похоже, встреча — записать?".to_string(),
+        _ => "Ожидание встречи".to_string(),
     }));
 
     if let Some(item) = TOGGLE_ITEM.get() {
         let _ = item.set_text(match state {
+            FATAL => "Запись недоступна",
             RECORDING => "Остановить запись",
             ARMED => "Записать эту встречу",
             _ => "Начать запись",
         });
+        // Пункт меню, который гарантированно ничего не сделает, не должен
+        // выглядеть работающим: живой на вид GUI поверх мёртвой записи — это и
+        // есть починенная болезнь, а не её симптом.
+        let _ = item.set_enabled(state != FATAL);
     }
 }
 
 /// Сообщить трею новое состояние. Можно звать откуда угодно — перерисовка сама
 /// уедет на главный поток.
 pub fn set_state(app: &AppHandle, st: UiState) {
+    // Из FATAL дороги назад нет: аудио-поток, который его вызвал, уже не
+    // работает, и перекрасить иконку обратно в «всё хорошо» значило бы соврать.
+    if ICON_STATE.load(Ordering::Relaxed) == FATAL {
+        return;
+    }
     let v = match st {
         UiState::Idle => IDLE,
         UiState::Armed => ARMED,
@@ -111,6 +152,18 @@ pub fn set_state(app: &AppHandle, st: UiState) {
     // Каждый заход в Armed начинается с горящей фазы, иначе первый кадр мог бы
     // оказаться притушенным и выглядеть как «ничего не произошло».
     BLINK_ON.store(true, Ordering::Relaxed);
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || repaint(&h));
+}
+
+/// Показать в трее, что записи больше не будет.
+///
+/// Зовётся из [`crate::status::fatal`], а не напрямую: трей — один из каналов,
+/// но не единственный. Иконка ценна тем, что она на экране всегда: окно скрыто,
+/// событие мог никто не слушать, тост глушится под Focus Assist.
+pub fn set_fatal(app: &AppHandle, msg: &str) {
+    let _ = FATAL_MSG.set(msg.to_string());
+    ICON_STATE.store(FATAL, Ordering::Relaxed);
     let h = app.clone();
     let _ = app.run_on_main_thread(move || repaint(&h));
 }
@@ -139,10 +192,31 @@ fn spawn_blinker(app: &AppHandle) {
 ///
 /// Если аудио-поток мёртв (канал закрыт), финализировать уже нечего и некому —
 /// выходим сами, иначе «Выход» перестал бы работать вовсе.
+///
+/// Отдельно — случай «канал принял, но забрать некому»: см. [`QUIT_GRACE`].
 fn request_quit(app: &AppHandle, tx: &Sender<Ctl>) {
     if tx.send(Ctl::Shutdown).is_err() {
         app.exit(0);
+        return;
     }
+    // Успешный send — это ещё не доставка: канал не ограничен, и если
+    // аудио-поток завис в det.poll()/pump_audio, команда просто ляжет в очередь
+    // навсегда. Тогда «Выход» молча не работает, и пользователь отвечает на это
+    // убийством процесса.
+    //
+    // Форсированный выход файл не спасёт — finalize() в зависшем потоке не
+    // случится ни при каком раскладе, и WAV останется с нулевой длиной в
+    // заголовке. Но он и не хуже: убитый пользователем процесс дал бы ровно тот
+    // же файл, только после ожидания в пустоту. Спасать тут нечего — есть смысл
+    // хотя бы не врать кнопкой «Выход».
+    let h = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(QUIT_GRACE);
+        // Досюда доходим, только если процесс ещё жив, то есть аудио-поток НЕ
+        // вызвал exit(0) сам: успей он — этот поток умер бы вместе с процессом.
+        eprintln!("аудио-поток не ответил на Shutdown за {QUIT_GRACE:?} — выходим силой");
+        h.exit(0);
+    });
 }
 
 /// Собрать трей. `tx` — тот же канал в аудио-поток, что и у остальных команд:
@@ -162,7 +236,12 @@ pub fn build(app: &AppHandle, tx: Sender<Ctl>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "toggle" => {
-                let _ = tx.send(Ctl::Toggle);
+                // Провал send здесь — это «нажал и ничего»: пункт меню есть,
+                // запись не идёт, причины не видно. Молчать об этом нельзя ровно
+                // так же, как и в request_quit ниже, — случай один и тот же.
+                if tx.send(Ctl::Toggle).is_err() {
+                    crate::status::fatal(app, crate::status::DEAD.to_string());
+                }
             }
             "folder" => {
                 if let Err(e) = crate::open_folder() {

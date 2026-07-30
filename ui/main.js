@@ -102,6 +102,10 @@ async function обновить_список() {
         мета.classList.add("warn");
         мета.textContent += " · дорожка отсутствует";
       }
+      if (з.imbalance_db != null) {
+        мета.classList.add("warn");
+        мета.textContent += ` · микрофон тише системы на ${Math.round(з.imbalance_db)} дБ`;
+      }
       const колонка = document.createElement("div");
       колонка.className = "grow";
       колонка.append(имя, мета);

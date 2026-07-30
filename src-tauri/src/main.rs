@@ -4,12 +4,14 @@
 
 mod audio;
 mod config;
+mod imbalance;
 mod rename;
 mod status;
 mod tray;
 
 use audio::Ctl;
 use config::Config;
+use imbalance::Cache;
 use meeting_recorder::session::Event;
 use serde::Serialize;
 use status::{Snapshot, Status};
@@ -201,8 +203,26 @@ fn collect_files(root: &Path) -> Result<Vec<(Option<String>, String, u64)>, Stri
 }
 
 #[tauri::command]
-fn list_recordings() -> Result<Vec<Recording>, String> {
-    Ok(group_recordings(collect_files(&recordings_root())?))
+fn list_recordings(cache: tauri::State<Cache>) -> Result<Vec<Recording>, String> {
+    let root = recordings_root();
+    let mut list = group_recordings(collect_files(&root)?);
+    for r in &mut list {
+        // Пометка имеет смысл только для полной пары: одинокая дорожка уже
+        // помечена как неполная, и второе предупреждение о ней ничего не добавит.
+        if !(r.mic && r.system) {
+            continue;
+        }
+        let dir = match &r.folder {
+            Some(f) => root.join(f),
+            None => root.clone(),
+        };
+        let mic = cache.rms(&dir.join(format!("{}.mic.wav", r.name)));
+        let sys = cache.rms(&dir.join(format!("{}.system.wav", r.name)));
+        if let (Some(m), Some(s)) = (mic, sys) {
+            r.imbalance_db = imbalance::imbalance(m, s);
+        }
+    }
+    Ok(list)
 }
 
 /// Открыть каталог записей в проводнике.
@@ -300,6 +320,7 @@ fn main() {
         // Заводится до setup(): аудио-поток пишет сюда с первой же строки, а
         // фатальная ошибка там случается раньше, чем webview успеет подписаться.
         .manage(Status::default())
+        .manage(Cache::default())
         .invoke_handler(tauri::generate_handler![
             send_event,
             get_state,

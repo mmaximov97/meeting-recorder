@@ -4,6 +4,7 @@
 
 mod audio;
 mod config;
+mod rename;
 mod status;
 mod tray;
 
@@ -252,6 +253,20 @@ fn get_config(app: AppHandle) -> Config {
     Config::load(&app)
 }
 
+/// Переименовать запись. `folder` — месячная папка или `None` для корня.
+#[tauri::command]
+fn rename_recording(
+    folder: Option<String>,
+    base: String,
+    new_tail: String,
+) -> Result<String, String> {
+    let dir = match folder {
+        Some(f) => recordings_root().join(f),
+        None => recordings_root(),
+    };
+    rename::rename_recording(&dir, &base, &new_tail)
+}
+
 /// `id: None` — вернуться на системный дефолт.
 ///
 /// Имя приходит вместе с идентификатором и сохраняется рядом: когда устройства
@@ -292,7 +307,8 @@ fn main() {
             open_folder,
             list_mic_devices,
             get_config,
-            set_mic_device
+            set_mic_device,
+            rename_recording
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

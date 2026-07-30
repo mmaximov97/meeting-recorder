@@ -121,6 +121,26 @@
       li {
         padding: 8px 0;
         border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      li > .grow {
+        flex: 1;
+        min-width: 0;
+      }
+      .rename {
+        padding: 4px 8px;
+        font-size: 12px;
+      }
+      .tail-input {
+        font: inherit;
+        width: 100%;
+        padding: 4px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--accent);
+        background: transparent;
+        color: var(--fg);
       }
       .name {
         font-variant-numeric: tabular-nums;

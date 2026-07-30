@@ -789,7 +789,7 @@ git commit -m "feat(app): выбор микрофона доезжает до з
 - Consumes: `App::set_mic_device`, `DeviceChoice` (Task 3), `list_input_devices` (Task 2)
 - Produces:
   - `Config { pub mic_device_id: Option<String>, pub mic_device_name: Option<String> }`, `Config::load(&AppHandle) -> Config`, `Config::save(&self, &AppHandle) -> Result<(), String>`
-  - Tauri-команды `list_mic_devices() -> Result<Vec<String>, String>`, `get_config() -> Config`, `set_mic_device(name: Option<String>) -> Result<(), String>`
+  - Tauri-команды `list_mic_devices() -> Result<Vec<MicDevice>, String>` (где `MicDevice { id, name }`), `get_config() -> Config`, `set_mic_device(id: Option<String>, name: Option<String>) -> Result<(), String>`
   - `Ctl::SetMicDevice(DeviceChoice)`
 
 - [ ] **Step 1: Добавить зависимость**

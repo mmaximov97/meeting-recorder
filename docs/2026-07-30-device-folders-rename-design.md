@@ -31,14 +31,20 @@
 
 ```rust
 // src/capture/mod.rs — ядро
-pub enum DeviceChoice { Default, Named(String) }
-pub fn list_input_devices() -> Result<Vec<String>, CaptureError>;
+pub enum DeviceChoice { Default, Id(String) }
+pub struct InputDevice { pub id: String, pub name: String }
+pub fn list_input_devices() -> Result<Vec<InputDevice>, CaptureError>;
 ```
 
 ```rust
 // src-tauri/src/config.rs — GUI
 #[derive(Serialize, Deserialize, Default, Clone)]
-pub struct Config { pub mic_device: Option<String> }   // None = системный дефолт
+pub struct Config {
+    /// Идентификатор эндпоинта. None = системный дефолт.
+    pub mic_device_id: Option<String>,
+    /// Имя на момент выбора — только для показа. Матчинг по нему не идёт.
+    pub mic_device_name: Option<String>,
+}
 ```
 
 **Хранилище:** `app.path().app_config_dir()/config.json`. Путь даёт сам Tauri, новых зависимостей не появляется (`serde` уже в дереве через Tauri). Отвергнуто: `tauri-plugin-store` — плагин и права в capabilities ради одного поля; файл рядом с exe — `cargo clean` сносит `target/release/`, и настройка исчезает молча.
@@ -52,9 +58,15 @@ pub struct Resolved { pub device: cpal::Device, pub fell_back_from: Option<Strin
 pub fn resolve_input(choice: &DeviceChoice) -> Result<Resolved, CaptureError>;
 ```
 
-`Named(n)` ищется по имени устройства среди `host.input_devices()`. Не нашлось — берётся системный дефолт, а в `fell_back_from` кладётся то, что искали. Совпадение имён у двух устройств разрешается в пользу первого: cpal не даёт стабильных идентификаторов, имя — единственное, что есть.
+`Id(id)` ищется по идентификатору эндпоинта среди `host.input_devices()`. Не нашлось — берётся системный дефолт, а в `fell_back_from` кладётся искомый идентификатор.
 
-Имя читается через `Device::description()?.name()`, а не через `Device::name()`: в cpal 0.18.1, закреплённой в `Cargo.lock`, метода `name()` у `Device` больше нет. Это уточнение по факту компиляции, а не выбор — но оно важно для того же вывода: идентификатор у нас по-прежнему человеческая строка, и её нестабильность (переименование устройства в системе, два одинаковых имени) остаётся тем, с чем приходится жить.
+**Идентификатор, а не имя.** Первая редакция этой спеки утверждала, что «cpal не даёт стабильных идентификаторов, имя — единственное, что есть». Это оказалось неверно, и обнаружилось на ревью Task 2. В cpal 0.18.1 есть `DeviceTrait::id() -> Result<DeviceId, Error>`; на Windows он возвращает `IMMDevice::GetId()` — эндпоинт-идентификатор WASAPI, а докблок самого типа предписывает ровно наш сценарий: «Application code should obtain `DeviceId` values through `DeviceTrait::id` and persist them via `Display`/`FromStr`».
+
+Разница не косметическая. Имя ломается в двух реальных случаях — устройство переименовали в настройках Windows, или два эндпоинта названы одинаково, — и ломается тихо, откатом на системный дефолт. То есть даёт ровно тот отказ, ради устранения которого вся эта работа и затеяна.
+
+Имя при этом продолжает храниться, но **только для показа**: когда выбранного устройства нет в системе, выпадашка обязана сказать «Headset (Boss Bose) (сейчас недоступен)», а не показать пользователю строку вида `{0.0.1.00000000}.{guid}`. Матчинг по имени не идёт никогда — это единственный способ не получить обратно ту же хрупкость через чёрный ход.
+
+Ядро при этом знает только идентификаторы: `fell_back_from` несёт наверх именно его, а превращает его в человеческое имя GUI, у которого есть конфиг с запомненным именем. Читается имя через `Device::description()?.name()` — метода `Device::name()` в 0.18.1 нет.
 
 Матчинг вынесен в чистую функцию:
 

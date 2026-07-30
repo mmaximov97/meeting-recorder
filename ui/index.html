@@ -86,6 +86,15 @@
         border-color: var(--accent);
         color: #fff;
       }
+      select {
+        font: inherit;
+        flex: 1;
+        padding: 7px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+      }
       h2 {
         font-size: 13px;
         text-transform: uppercase;
@@ -132,6 +141,11 @@
         <button class="primary" id="yes">Записать</button>
         <button id="no">Нет</button>
       </div>
+    </div>
+
+    <h2>Микрофон</h2>
+    <div class="row">
+      <select id="mic"></select>
     </div>
 
     <div class="row">

@@ -50,12 +50,30 @@ pub fn rename_recording(dir: &Path, base: &str, new_tail: &str) -> Result<String
         match std::fs::rename(from, to) {
             Ok(()) => done.push((from.clone(), to.clone())),
             Err(e) => {
-                // Откат: вернуть уже переименованное. Ошибку отката глотаем —
-                // наверх уходит первая, настоящая причина.
-                for (from_done, to_done) in done.iter().rev() {
-                    let _ = std::fs::rename(to_done, from_done);
-                }
-                return Err(format!("не удалось переименовать {}: {e}", from.display()));
+                // Откат: вернуть уже переименованное. Ошибку самого отката
+                // здесь МОЛЧА не проглатываем: если она есть, наверх должна
+                // уйти не только первая причина, но и факт, что откат не
+                // довёл дело до конца — иначе человек прочитает «не удалось
+                // переименовать» и решит, что диск не тронут, хотя часть
+                // дорожек могла остаться висеть под новым именем.
+                let rollback_failures: Vec<String> = done
+                    .iter()
+                    .rev()
+                    .filter_map(|(from_done, to_done)| {
+                        std::fs::rename(to_done, from_done).err().map(|re| {
+                            format!("{} → {}: {re}", to_done.display(), from_done.display())
+                        })
+                    })
+                    .collect();
+                let reason = format!("не удалось переименовать {}: {e}", from.display());
+                return Err(if rollback_failures.is_empty() {
+                    reason
+                } else {
+                    format!(
+                        "{reason}; ОТКАТ НЕ УДАЛСЯ, на диске остался частично переименованный набор: {}",
+                        rollback_failures.join("; ")
+                    )
+                });
             }
         }
     }
@@ -183,5 +201,53 @@ mod tests {
             "2026-07-30_13-03_chrome"
         );
         assert!(dir.join("2026-07-30_13-03_chrome.mic.wav").exists());
+    }
+
+    /// Ревью Task 10, находка 2: все прежние тесты падали на upfront-проверке
+    /// `to.exists()`, ни один не доходил до настоящего `fs::rename`, значит
+    /// ветку отката не проверял никто. Здесь первая дорожка (`.mic.wav`)
+    /// переименовывается по-настоящему, а вторая (`.system.wav`) держится
+    /// заблокированной хендлом без `FILE_SHARE_DELETE`: обычный
+    /// `std::fs::File::open` эту дорожку не заблокировал бы — Rust на Windows
+    /// включает `FILE_SHARE_DELETE` в шаринг по умолчанию именно для того,
+    /// чтобы файл можно было переименовать/удалить, пока где-то открыт его
+    /// хендл. Здесь шаринг сознательно урезан до одного лишь чтения, и
+    /// `MoveFileExW` внутри `fs::rename` откажет с sharing violation уже
+    /// ПОСЛЕ того, как первая дорожка успешно переехала — ровно та ветка,
+    /// которую нужно было проверить.
+    #[test]
+    fn отказ_второй_дорожки_откатывает_первую() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+        let dir = ScratchDir::new("rollback");
+        файл(&dir, "2026-07-30_13-03_chrome.mic.wav");
+        файл(&dir, "2026-07-30_13-03_chrome.system.wav");
+
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ) // ни FILE_SHARE_WRITE, ни FILE_SHARE_DELETE
+            .open(dir.join("2026-07-30_13-03_chrome.system.wav"))
+            .expect("открыть system-дорожку с эксклюзивной (без delete) блокировкой");
+
+        let err = rename_recording(&dir, "2026-07-30_13-03_chrome", "артем").unwrap_err();
+        drop(lock); // снять блокировку сразу — дальше идёт только чтение файловой системы
+
+        assert!(
+            err.contains("не удалось переименовать"),
+            "текст ошибки: {err}"
+        );
+        assert!(
+            dir.join("2026-07-30_13-03_chrome.mic.wav").exists(),
+            "первая дорожка обязана откатиться на старое имя"
+        );
+        assert!(
+            !dir.join("2026-07-30_13-03_артем.mic.wav").exists(),
+            "новое имя первой дорожки не должно остаться висеть после отката"
+        );
+        assert!(
+            dir.join("2026-07-30_13-03_chrome.system.wav").exists(),
+            "вторая дорожка так и не переехала — она и была заблокирована"
+        );
     }
 }

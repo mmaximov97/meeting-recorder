@@ -65,7 +65,6 @@ pub enum DeviceChoice {
 /// Сравнение строго по равенству. `contains`/`starts_with` здесь были бы багом:
 /// "Headset (Boss Bose)" — префикс "Headset (Boss Bose Hands-Free)", и нестрогий
 /// матчинг молча выбрал бы узкополосный HFP-профиль.
-#[allow(dead_code)]
 fn pick(names: &[String], choice: &DeviceChoice) -> Option<usize> {
     match choice {
         DeviceChoice::Default => None,
@@ -318,32 +317,101 @@ impl PendingCapture {
     }
 }
 
-/// Открывает устройство и готовит поток захвата, **не запуская** его
-/// (см. [`PendingCapture`]).
-pub fn build_capture(
-    source: Source,
-    sink: Sender<Vec<i16>>,
-) -> Result<PendingCapture, CaptureError> {
+/// Имена всех доступных устройств записи — для выпадашки в UI.
+///
+/// Устройство, у которого имя не читается, пропускается: `Device::description()`
+/// ходит в WASAPI и может отказать на отдельном эндпоинте, и ронять из-за него
+/// весь список неправильно — остальные устройства выбрать по-прежнему можно.
+pub fn list_input_devices() -> Result<Vec<String>, CaptureError> {
     let host = cpal::default_host();
-    let device = match source {
-        Source::Mic => host.default_input_device(),
-        // WASAPI включает loopback прозрачно: cpal видит, что у устройства
-        // data_flow == eRender, и сам добавляет AUDCLNT_STREAMFLAGS_LOOPBACK
-        // при инициализации входного потока. Отдельного «loopback-устройства»
-        // перебирать не нужно — проверено по исходникам cpal 0.18.1
-        // (src/host/wasapi/device.rs, build_input_stream_raw_inner).
-        Source::SystemLoopback => host.default_output_device(),
+    Ok(host
+        .input_devices()?
+        .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+        .collect())
+}
+
+/// Устройство записи плюс признак того, что взяли не то, о чём просили.
+pub struct Resolved {
+    pub device: cpal::Device,
+    /// `Some(имя)` — просили это, не нашли, взяли системный дефолт.
+    pub fell_back_from: Option<String>,
+}
+
+/// Находит устройство по выбору, откатываясь на системный дефолт.
+///
+/// Фолбэк, а не ошибка: цена несимметрична. Испорченная дорожка чинится вторым
+/// дублем или усилением, потерянная встреча не чинится ничем. Но молчать о
+/// подмене нельзя — за этим и нужен `fell_back_from`.
+pub fn resolve_input(choice: &DeviceChoice) -> Result<Resolved, CaptureError> {
+    let host = cpal::default_host();
+    if let DeviceChoice::Named(want) = choice {
+        let devices: Vec<cpal::Device> = host.input_devices()?.collect();
+        let names: Vec<String> = devices
+            .iter()
+            .map(|d| {
+                d.description()
+                    .map(|desc| desc.name().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(i) = pick(&names, choice) {
+            return Ok(Resolved {
+                device: devices.into_iter().nth(i).expect("индекс из pick валиден"),
+                fell_back_from: None,
+            });
+        }
+        let device = host
+            .default_input_device()
+            .ok_or(CaptureError::NoDevice(Source::Mic))?;
+        return Ok(Resolved {
+            device,
+            fell_back_from: Some(want.clone()),
+        });
     }
-    .ok_or(CaptureError::NoDevice(source))?;
+    let device = host
+        .default_input_device()
+        .ok_or(CaptureError::NoDevice(Source::Mic))?;
+    Ok(Resolved {
+        device,
+        fell_back_from: None,
+    })
+}
 
-    let supported = match source {
-        Source::Mic => device.default_input_config()?,
-        // У render-устройства список input-конфигов пуст по построению
-        // (cpal: «If it's an output device, assume no input formats»), поэтому
-        // родной формат loopback читается из output-конфига.
-        Source::SystemLoopback => device.default_output_config()?,
-    };
+/// Открывает микрофон, **не запуская** поток (см. [`PendingCapture`]).
+///
+/// Возвращает вместе с потоком признак подмены устройства: сообщить о ней
+/// должен тот, кто умеет говорить с пользователем, а не этот модуль.
+pub fn build_mic_capture(
+    choice: &DeviceChoice,
+    sink: Sender<Vec<i16>>,
+) -> Result<(PendingCapture, Option<String>), CaptureError> {
+    let Resolved {
+        device,
+        fell_back_from,
+    } = resolve_input(choice)?;
+    let supported = device.default_input_config()?;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let pending = build_stream_for_format(&device, config, sample_format, sink)?;
+    Ok((pending, fell_back_from))
+}
 
+/// Открывает системный loopback, **не запуская** поток.
+///
+/// WASAPI включает loopback прозрачно: cpal видит `data_flow == eRender` и сам
+/// добавляет `AUDCLNT_STREAMFLAGS_LOOPBACK` при инициализации входного потока.
+/// Отдельного «loopback-устройства» перебирать не нужно — проверено по
+/// исходникам cpal 0.18.1 (`src/host/wasapi/device.rs`).
+///
+/// Устройство всегда системное по умолчанию: собеседников слушают через тот же
+/// выход, на который идёт звук. Родной формат читается из output-конфига — у
+/// render-устройства список input-конфигов пуст по построению.
+pub fn build_loopback_capture(sink: Sender<Vec<i16>>) -> Result<PendingCapture, CaptureError> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or(CaptureError::NoDevice(Source::SystemLoopback))?;
+    let supported = device.default_output_config()?;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     build_stream_for_format(&device, config, sample_format, sink)

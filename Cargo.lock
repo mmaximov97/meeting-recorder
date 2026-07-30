@@ -2114,6 +2114,7 @@ dependencies = [
 name = "meeting-recorder-gui"
 version = "0.1.0"
 dependencies = [
+ "hound",
  "meeting-recorder",
  "serde",
  "serde_json",

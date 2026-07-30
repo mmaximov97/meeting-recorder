@@ -308,6 +308,14 @@ fn set_mic_device(
         .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
 }
 
+/// Включить/выключить проверку микрофона.
+#[tauri::command]
+fn set_monitor(on: bool, state: tauri::State<Cmd>, app: AppHandle) -> Result<(), String> {
+    state
+        .send(Ctl::Monitor(on))
+        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+}
+
 fn main() {
     let (tx, rx) = channel::<Ctl>();
     let tray_tx = tx.clone();
@@ -329,6 +337,7 @@ fn main() {
             list_mic_devices,
             get_config,
             set_mic_device,
+            set_monitor,
             rename_recording
         ])
         .setup(move |app| {

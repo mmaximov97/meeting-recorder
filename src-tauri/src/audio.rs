@@ -30,6 +30,9 @@ use crate::tray;
 /// опрашивается раз в `POLL_INTERVAL` (2 с), и это его глобальное свойство.
 const TICK: Duration = Duration::from_millis(200);
 
+/// Через сколько проверка микрофона выключается сама.
+const MONITOR_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Команда аудио-потоку.
 ///
 /// Шире, чем `Event` из ядра, намеренно: `Toggle` и `Shutdown` — это вопросы к
@@ -46,6 +49,9 @@ pub enum Ctl {
     /// Сменить микрофон. Вступает в силу со следующего открытия потоков —
     /// менять устройство под идущей записью значило бы порвать дорожку.
     SetMicDevice(DeviceChoice),
+    /// Включить/выключить проверку микрофона. Как и `SetMicDevice`, это не
+    /// событие машины: состояние записи от проверки не меняется.
+    Monitor(bool),
     /// Выход. Обязан пройти через машину: см. [`run`].
     Shutdown,
 }
@@ -191,6 +197,11 @@ fn ctl_to_event(c: &Ctl, s: State) -> (Event, bool) {
         Ctl::SetMicDevice(_) => {
             unreachable!("drain_ctl обрабатывает SetMicDevice до ctl_to_event")
         }
+        // Тот же случай, что у `SetMicDevice`: `drain_ctl` перехватывает
+        // `Monitor` раньше, чем дело доходит сюда.
+        Ctl::Monitor(_) => {
+            unreachable!("drain_ctl обрабатывает Monitor до ctl_to_event")
+        }
     }
 }
 
@@ -203,16 +214,30 @@ fn ctl_to_event(c: &Ctl, s: State) -> (Event, bool) {
 /// предупреждает докблок `poll_to_event`: хелпер покрыт, проводка нет. Поэтому
 /// `feed` здесь — параметр: тест подставляет свой и смотрит, что именно уехало в
 /// машину и в каком порядке относительно выхода.
+///
+/// Отказ проверки обязан дойти до окна, а не только в stderr: в релизе консоли
+/// нет, и молчаливый отказ выглядел бы как «нажал Проверить, полоска стоит» —
+/// то есть неотличимо от «микрофон не слышит», ровно того, что эта кнопка и
+/// должна различать. Но сам `drain_ctl` не знает про `AppHandle` (и не должен:
+/// на нём держатся тесты проводки без Tauri), поэтому канал ошибки приходит
+/// параметром.
 fn drain_ctl(
     app: &mut App,
     rx: &Receiver<Ctl>,
     active: Option<&MicSession>,
     mut feed: impl FnMut(&mut App, Event, Option<&MicSession>),
+    mut on_error: impl FnMut(String),
 ) -> bool {
     for c in rx.try_iter() {
-        // Не событие машины: состояние от смены устройства не меняется.
+        // Не события машины: состояние записи от них не меняется.
         if let Ctl::SetMicDevice(choice) = c {
             app.set_mic_device(choice);
+            continue;
+        }
+        if let Ctl::Monitor(on) = c {
+            if let Err(e) = app.set_monitor(on) {
+                on_error(format!("проверка микрофона: {e}"));
+            }
             continue;
         }
         let (e, quit) = ctl_to_event(&c, app.state());
@@ -248,6 +273,10 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice
     // `Instant::now() - POLL_INTERVAL` нельзя: вычитание у Instant паникует,
     // если результат не представим.
     let mut last_poll: Option<Instant> = None;
+    // Проверка, забытая включённой, держала бы микрофон бесконечно. Таймер
+    // считает здесь, а не в webview: окно можно закрыть, и выключать проверку
+    // стало бы некому.
+    let mut monitor_since: Option<Instant> = None;
 
     loop {
         if last_poll.is_none_or(|t| t.elapsed() >= POLL_INTERVAL) {
@@ -277,13 +306,34 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice
             }
         }
 
-        let quit = drain_ctl(&mut app, &rx, active.as_ref(), |a, e, src| {
-            feed(a, &handle, e, src)
-        });
+        let quit = drain_ctl(
+            &mut app,
+            &rx,
+            active.as_ref(),
+            |a, e, src| feed(a, &handle, e, src),
+            |msg| {
+                let _ = handle.emit("error", msg.clone());
+                eprintln!("{msg}");
+            },
+        );
         if quit {
             // Финализация уже прошла внутри drain_ctl — см. её докблок.
             handle.exit(0);
             return;
+        }
+
+        // Взводим/снимаем таймер по факту состояния, а не по команде: так копия
+        // «включена ли проверка» не может разъехаться с истиной в App.
+        match (app.is_monitoring(), monitor_since) {
+            (true, None) => monitor_since = Some(Instant::now()),
+            (false, Some(_)) => monitor_since = None,
+            (true, Some(t)) if t.elapsed() >= MONITOR_TIMEOUT => {
+                if let Err(e) = app.set_monitor(false) {
+                    eprintln!("автовыключение проверки: {e}");
+                }
+                monitor_since = None;
+            }
+            _ => {}
         }
 
         if let Err(e) = app.pump_audio() {
@@ -291,6 +341,21 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice
             eprintln!("прокачка аудио: {e}");
         }
         sync(&handle, &app, &status);
+
+        // Рассылка уровней — только когда есть что показывать: в простое это
+        // было бы 5 событий в секунду в пустоту.
+        if app.is_monitoring() || app.state() != State::Idle {
+            let l = app.levels();
+            let _ = handle.emit(
+                "levels",
+                serde_json::json!({
+                    "mic": l.mic,
+                    "system": l.system,
+                    "monitoring": app.is_monitoring(),
+                }),
+            );
+        }
+
         std::thread::sleep(TICK);
     }
 }
@@ -398,7 +463,7 @@ mod tests {
         tx.send(Ctl::Shutdown).unwrap();
 
         let mut seen = Vec::new();
-        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e));
+        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
 
         assert!(quit, "Shutdown обязан закончить цикл");
         assert_eq!(
@@ -417,7 +482,13 @@ mod tests {
         tx.send(Ctl::Event(Event::UserDeclined)).unwrap();
 
         let mut seen = Vec::new();
-        assert!(drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e)));
+        assert!(drain_ctl(
+            &mut app(),
+            &rx,
+            None,
+            |_, e, _| seen.push(e),
+            |_| {}
+        ));
 
         assert_eq!(seen, vec![Event::UserConfirmed, Event::ManualStop]);
     }
@@ -426,7 +497,13 @@ mod tests {
     fn пустой_канал_это_не_повод_выходить() {
         let (_tx, rx) = channel::<Ctl>();
         let mut seen = Vec::new();
-        assert!(!drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e)));
+        assert!(!drain_ctl(
+            &mut app(),
+            &rx,
+            None,
+            |_, e, _| seen.push(e),
+            |_| {}
+        ));
         assert!(seen.is_empty());
     }
 
@@ -440,13 +517,49 @@ mod tests {
 
         let s = session(42);
         let mut seen: Vec<(Event, Option<u32>)> = Vec::new();
-        drain_ctl(&mut app(), &rx, Some(&s), |_, e, src| {
-            seen.push((e, src.map(|s| s.pid)))
-        });
+        drain_ctl(
+            &mut app(),
+            &rx,
+            Some(&s),
+            |_, e, src| seen.push((e, src.map(|s| s.pid))),
+            |_| {},
+        );
 
         assert_eq!(
             seen,
             vec![(Event::ManualStart, Some(42)), (Event::ManualStop, None)]
         );
+    }
+
+    /// Проверка микрофона — не событие машины: состояние записи от неё не
+    /// меняется, и в `feed` ничего уходить не должно.
+    #[test]
+    fn монитор_не_кормит_машину_событиями() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::Monitor(true)).unwrap();
+        tx.send(Ctl::Monitor(false)).unwrap();
+
+        let mut seen = Vec::new();
+        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
+
+        assert!(!quit);
+        assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+    }
+
+    #[test]
+    fn shutdown_после_монитора_всё_равно_финализирует() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::Monitor(true)).unwrap();
+        tx.send(Ctl::Shutdown).unwrap();
+
+        let mut seen = Vec::new();
+        assert!(drain_ctl(
+            &mut app(),
+            &rx,
+            None,
+            |_, e, _| seen.push(e),
+            |_| {}
+        ));
+        assert_eq!(seen, vec![Event::ManualStop]);
     }
 }

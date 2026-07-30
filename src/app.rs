@@ -305,6 +305,24 @@ impl AudioIo for CpalAudio {
     }
 }
 
+/// Пиковый уровень по обеим дорожкам, 0..1.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Levels {
+    pub mic: f32,
+    pub system: f32,
+}
+
+/// Во сколько раз уровень падает за тик без сигнала. При тике 200 мс полоска
+/// опускается примерно за полсекунды — глазу видно движение, но не мерцание.
+const LEVEL_DECAY: f32 = 0.7;
+
+fn peak(samples: &[i16]) -> f32 {
+    samples
+        .iter()
+        .map(|s| (*s as f32 / i16::MAX as f32).abs())
+        .fold(0.0, f32::max)
+}
+
 pub struct App {
     machine: SessionMachine,
     /// Корень записей. Конкретная папка считается из `started` — см. `month_dir`.
@@ -317,6 +335,11 @@ pub struct App {
     sinks: Box<dyn SinkFactory>,
     current_source: String,
     started: DateTime<Local>,
+    /// Включена ли явная проверка микрофона. Не состояние машины: она про
+    /// запись, а это про «дай послушать».
+    monitor: bool,
+    level_mic: f32,
+    level_sys: f32,
 }
 
 impl App {
@@ -336,6 +359,41 @@ impl App {
         self.audio.fell_back_from()
     }
 
+    pub fn levels(&self) -> Levels {
+        Levels {
+            mic: self.level_mic,
+            system: self.level_sys,
+        }
+    }
+
+    pub fn is_monitoring(&self) -> bool {
+        self.monitor
+    }
+
+    /// Явная проверка микрофона: открыть потоки, ничего не записывая.
+    ///
+    /// Инвариант «микрофон открыт только когда мы слушаем» сохраняется по
+    /// смыслу: слушаем именно потому, что попросили. Индикатор Windows при этом
+    /// честно горит.
+    ///
+    /// Выключение гасит потоки ТОЛЬКО в `Idle`. Если за время проверки пришёл
+    /// детект, потоки уже принадлежат записи — закрыть их здесь значило бы
+    /// оборвать встречу тем, что пользователь выключил проверку.
+    pub fn set_monitor(&mut self, on: bool) -> Res {
+        self.monitor = on;
+        if !matches!(self.machine.state(), State::Idle) {
+            return Ok(());
+        }
+        if on {
+            self.audio.open()?;
+        } else {
+            self.audio.close();
+            self.level_mic = 0.0;
+            self.level_sys = 0.0;
+        }
+        Ok(())
+    }
+
     fn with_backends(root: PathBuf, audio: Box<dyn AudioIo>, sinks: Box<dyn SinkFactory>) -> Self {
         Self {
             machine: SessionMachine::new(),
@@ -348,6 +406,9 @@ impl App {
             sinks,
             current_source: "manual".into(),
             started: Local::now(),
+            monitor: false,
+            level_mic: 0.0,
+            level_sys: 0.0,
         }
     }
 
@@ -418,6 +479,7 @@ impl App {
     fn reset_to_idle(&mut self) {
         let _ = self.close_sinks();
         self.audio.close();
+        self.monitor = false;
         self.ring_mic.drain_to_vec();
         self.ring_sys.drain_to_vec();
         self.machine = SessionMachine::new();
@@ -435,6 +497,7 @@ impl App {
                 self.ring_mic.drain_to_vec();
                 self.ring_sys.drain_to_vec();
                 self.audio.close(); // отказ — отпускаем микрофон немедленно
+                self.monitor = false;
             }
             Action::StartFileWrite => {
                 self.started = Local::now();
@@ -456,6 +519,7 @@ impl App {
             Action::CloseFile => {
                 let result = self.close_sinks();
                 self.audio.close();
+                self.monitor = false;
                 // FinalizeDone обязан уйти в машину ДАЖЕ при ошибке закрытия.
                 // Иначе она навсегда останется в Finalizing, откуда единственный
                 // выход — это событие, и приложение молча перестанет записывать
@@ -541,6 +605,12 @@ impl App {
     /// Прокачать накопленные семплы туда, куда велит текущее состояние.
     pub fn pump_audio(&mut self) -> Res {
         let (mic, sys) = self.drain_channels();
+        // Уровень считается всегда, когда что-то течёт: в записи он даровой
+        // (данные и так проходят здесь), в проверке — единственный смысл.
+        // Затухание, а не мгновенный ноль: иначе полоска мигала бы на паузах
+        // между словами.
+        self.level_mic = peak(&mic).max(self.level_mic * LEVEL_DECAY);
+        self.level_sys = peak(&sys).max(self.level_sys * LEVEL_DECAY);
         match self.machine.state() {
             State::Armed => {
                 self.ring_mic.push_slice(&mic);
@@ -554,6 +624,8 @@ impl App {
                     w.write(&sys)?;
                 }
             }
+            // Idle и Finalizing: сэмплы дренированы и отброшены. В проверке
+            // это и требуется — послушать, ничего не сохранив.
             _ => {}
         }
         Ok(())
@@ -1488,5 +1560,75 @@ mod tests {
         let ж = журнал();
         let (app, _) = стенд_с_устройством(&ж, None);
         assert_eq!(app.device_warning(), None);
+    }
+
+    // ---- проверка микрофона и уровень --------------------------------------
+
+    /// Инвариант микрофона: в Idle потоки открыты, только если явно попросили
+    /// их послушать.
+    #[test]
+    fn проверка_открывает_и_закрывает_микрофон_в_idle() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        assert!(!app.audio.is_open(), "в Idle микрофон отпущен");
+        app.set_monitor(true).expect("включение проверки");
+        assert!(app.audio.is_open());
+        app.set_monitor(false).expect("выключение проверки");
+        assert!(!app.audio.is_open());
+    }
+
+    /// Если за время проверки пришёл детект, потоки уже принадлежат записи.
+    /// Погасить их по выключению проверки значило бы оборвать встречу.
+    #[test]
+    fn выключение_проверки_не_гасит_идущую_запись() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.set_monitor(true).expect("включение проверки");
+        app.on_event(Event::SessionAppeared, Some(&сессия(42, "zoom.exe")))
+            .expect("детект");
+        app.set_monitor(false).expect("выключение проверки");
+        assert!(
+            app.audio.is_open(),
+            "машина в Armed — микрофон обязан остаться открытым"
+        );
+    }
+
+    #[test]
+    fn уровень_растёт_от_громких_сэмплов_и_затухает() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::Нет,
+            vec![(vec![i16::MAX / 2], Vec::new()), (Vec::new(), Vec::new())],
+        );
+        assert_eq!(app.levels().mic, 0.0, "до прокачки уровня нет");
+        // Захват отдаёт очередь только открытым — иначе drain вернёт пустоту.
+        app.set_monitor(true).expect("включение проверки");
+        app.pump_audio().expect("прокачка");
+        let первый = app.levels().mic;
+        assert!(первый > 0.4, "уровень: {первый}");
+        app.pump_audio().expect("прокачка на тишине");
+        assert!(
+            app.levels().mic < первый,
+            "без сигнала уровень обязан затухать"
+        );
+    }
+
+    #[test]
+    fn проверка_не_пишет_ни_в_кольцо_ни_в_файл() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![100; 1000], vec![100; 1000])]);
+        app.set_monitor(true).expect("включение проверки");
+        app.pump_audio().expect("прокачка");
+        assert_eq!(
+            app.ring_mic.len(),
+            0,
+            "в Idle кольцо не крутится, даже когда микрофон открыт"
+        );
+        assert!(
+            !записано(&ж).iter().any(|s| s.starts_with("create:")),
+            "проверка не открывает файлов: {:?}",
+            записано(&ж)
+        );
     }
 }

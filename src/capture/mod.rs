@@ -48,6 +48,31 @@ pub enum Source {
     SystemLoopback,
 }
 
+/// Какой микрофон брать. `Default` — тот, что выбран в системе.
+///
+/// Отдельный тип, а не `Option<String>`: `None` в вызывающем коде читается как
+/// «не задано», а здесь это осмысленный выбор «спросить систему», и путать эти
+/// два смысла нельзя — от них зависит, писать ли предупреждение о подмене.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DeviceChoice {
+    #[default]
+    Default,
+    Named(String),
+}
+
+/// Индекс выбранного устройства в списке имён.
+///
+/// Сравнение строго по равенству. `contains`/`starts_with` здесь были бы багом:
+/// "Headset (Boss Bose)" — префикс "Headset (Boss Bose Hands-Free)", и нестрогий
+/// матчинг молча выбрал бы узкополосный HFP-профиль.
+#[allow(dead_code)]
+fn pick(names: &[String], choice: &DeviceChoice) -> Option<usize> {
+    match choice {
+        DeviceChoice::Default => None,
+        DeviceChoice::Named(want) => names.iter().position(|n| n == want),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
     #[error("устройство не найдено: {0:?}")]
@@ -760,5 +785,62 @@ mod tests {
                 "{from} Гц → 16 кГц: 1 кГц должен пройти без потерь, RMS = {rms:.4}"
             );
         }
+    }
+
+    // --- выбор устройства ---
+
+    fn имена() -> Vec<String> {
+        vec![
+            "Microphone Array (Intel SST)".to_string(),
+            "Headset (Boss Bose)".to_string(),
+            "Headset (Boss Bose Hands-Free)".to_string(),
+        ]
+    }
+
+    #[test]
+    fn дефолт_не_выбирает_никого_из_списка() {
+        assert_eq!(
+            pick(&имена(), &DeviceChoice::Default),
+            None,
+            "Default означает «спросить систему», а не «взять первое из списка»"
+        );
+    }
+
+    #[test]
+    fn именованное_устройство_ищется_точным_совпадением() {
+        assert_eq!(
+            pick(&имена(), &DeviceChoice::Named("Headset (Boss Bose)".into())),
+            Some(1)
+        );
+    }
+
+    /// Подстрока — не совпадение. "Headset (Boss Bose)" является префиксом
+    /// "Headset (Boss Bose Hands-Free)", и матчинг по `contains`/`starts_with`
+    /// выбрал бы узкополосный HFP-профиль вместо нормального.
+    #[test]
+    fn подстрока_не_считается_совпадением() {
+        assert_eq!(
+            pick(&имена(), &DeviceChoice::Named("Headset (Boss".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn отсутствующее_устройство_даёт_none() {
+        assert_eq!(pick(&имена(), &DeviceChoice::Named("Yeti".into())), None);
+    }
+
+    /// cpal не даёт стабильных идентификаторов, поэтому два одинаковых имени
+    /// различить нечем. Берём первое — детерминированно и объяснимо.
+    #[test]
+    fn дубликат_имени_разрешается_в_пользу_первого() {
+        let names = vec!["Yeti".to_string(), "Yeti".to_string()];
+        assert_eq!(pick(&names, &DeviceChoice::Named("Yeti".into())), Some(0));
+    }
+
+    #[test]
+    fn пустой_список_не_паникует() {
+        assert_eq!(pick(&[], &DeviceChoice::Named("Yeti".into())), None);
+        assert_eq!(pick(&[], &DeviceChoice::Default), None);
     }
 }

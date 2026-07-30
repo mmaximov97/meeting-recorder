@@ -135,6 +135,29 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
         let _ = handle.emit("state", now);
         tray::set_state(handle, now);
     }
+
+    // Наверх идёт ИДЕНТИФИКАТОР эндпоинта: аудио-поток знает только его.
+    // Человеческое имя подставляет тот, у кого есть конфиг, — окно (для баннера)
+    // и код ниже (для тоста, который до окна не доходит).
+    let warn = app.device_warning();
+    if status.set_device_warning(warn.as_deref()) {
+        let _ = handle.emit("device-warning", warn.clone());
+        if let Some(id) = warn {
+            // Тост показывается и при закрытом окне, поэтому имя ему нужно
+            // здесь; конфиг читается только в момент изменения, а не каждый тик.
+            let имя = crate::config::Config::load(handle)
+                .mic_device_name
+                .unwrap_or(id);
+            let _ = handle
+                .notification()
+                .builder()
+                .title("Пишется не тот микрофон")
+                .body(format!(
+                    "«{имя}» недоступен — запись идёт с системного по умолчанию."
+                ))
+                .show();
+        }
+    }
 }
 
 /// Решение по одной команде: какое событие уходит в машину и надо ли после этого

@@ -2692,6 +2692,18 @@ mod tests {
 }
 ```
 
+> Правка по итогам ревью Task 11 (2026-07-30, Important): исходный набор из
+> восьми тестов ни разу не заходил в ветку `seek`/`windows > 1` — оба
+> WAV-теста укладываются в порог полного чтения (`total <= windows * WINDOW`).
+> Добавлен девятый тест `разреженная_выборка_с_seek_совпадает_с_полным_чтением`
+> — файл длиннее `windows * WINDOW` (200 × 4096 = 819 200 сэмплов), первые 10%
+> тишина, остальные 90% синус известной амплитуды; страйд подобран так, что
+> пропорция окон (20 тишина / 180 синус) точно повторяет пропорцию файла,
+> поэтому разреженная выборка обязана дать почти тот же RMS, что и полное
+> чтение. Проверено, что тест краснеет при сломанном `seek` (см.
+> `task-11-report.md`, секция «Фикс по ревью»). Итоговый счёт для Step 5 —
+> **10 passed**, а не 9.
+
 - [ ] **Step 3: Прогнать тест и убедиться, что он падает**
 
 Run: `cargo.exe test -p meeting-recorder-gui imbalance 2>&1 | tail -20`
@@ -2733,6 +2745,35 @@ pub const THRESHOLD_DB: f32 = 20.0;
 /// Сколько сэмплов в одном окне выборки.
 const WINDOW: usize = 4096;
 
+/// Дочитать до `take` сэмплов из текущей позиции `reader`, накопив их в
+/// `sum_sq`/`counted`.
+///
+/// Свободная функция, а не замыкание внутри [`sampled_rms_dbfs`]: она не
+/// захватывает ничего снаружи (всё приходит параметрами), поэтому
+/// `let mut accumulate = |...| { ... }` компилятор справедливо помечал
+/// `unused_mut` — мутируемым должно быть то, что меняется через `&mut`
+/// параметры, а не сам биндинг. Вынос убирает предупреждение и заодно делает
+/// вызывающий код короче на сигнатуру замыкания.
+///
+/// > Правка по итогам ревью Task 11 (2026-07-30, Important): исходная версия
+/// > объявляла эту логику как `let mut accumulate = |...|` внутри
+/// > `sampled_rms_dbfs` — единственная задача в плане, сданная с
+/// > `unused_mut`-предупреждением. См. `task-11-report.md`, секция «Фикс по
+/// > ревью».
+fn accumulate(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    take: usize,
+    sum_sq: &mut f64,
+    counted: &mut usize,
+) -> Result<(), hound::Error> {
+    for s in reader.samples::<i16>().take(take) {
+        let v = s? as f64;
+        *sum_sq += v * v;
+        *counted += 1;
+    }
+    Ok(())
+}
+
 /// RMS файла в dBFS по разреженной выборке.
 ///
 /// Читается `windows` окон по [`WINDOW`] сэмплов, равномерно по файлу: для
@@ -2747,18 +2788,6 @@ pub fn sampled_rms_dbfs(path: &Path, windows: usize) -> Result<f32, hound::Error
 
     let mut sum_sq = 0f64;
     let mut counted = 0usize;
-    let mut accumulate = |reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
-                          take: usize,
-                          sum_sq: &mut f64,
-                          counted: &mut usize|
-     -> Result<(), hound::Error> {
-        for s in reader.samples::<i16>().take(take) {
-            let v = s? as f64;
-            *sum_sq += v * v;
-            *counted += 1;
-        }
-        Ok(())
-    };
 
     if windows == 0 || total <= windows * WINDOW {
         accumulate(&mut reader, total, &mut sum_sq, &mut counted)?;
@@ -2822,7 +2851,7 @@ impl Cache {
 
 Run: `cargo.exe test -p meeting-recorder-gui imbalance 2>&1 | tail -10`
 
-Expected: `test result: ok. 9 passed`.
+Expected: `test result: ok. 10 passed` (после правки по ревью — было 9, см. сноску у Step 2).
 
 - [ ] **Step 6: Заполнить поле в списке**
 

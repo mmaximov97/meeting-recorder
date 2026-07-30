@@ -28,6 +28,29 @@ pub const THRESHOLD_DB: f32 = 20.0;
 /// Сколько сэмплов в одном окне выборки.
 const WINDOW: usize = 4096;
 
+/// Дочитать до `take` сэмплов из текущей позиции `reader`, накопив их в
+/// `sum_sq`/`counted`.
+///
+/// Свободная функция, а не замыкание внутри [`sampled_rms_dbfs`]: она не
+/// захватывает ничего снаружи (всё приходит параметрами), поэтому
+/// `let mut accumulate = |...| { ... }` компилятор справедливо помечал
+/// `unused_mut` — мутируемым должно быть то, что меняется через `&mut`
+/// параметры, а не сам биндинг. Вынос убирает предупреждение и заодно делает
+/// вызывающий код короче на сигнатуру замыкания.
+fn accumulate(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    take: usize,
+    sum_sq: &mut f64,
+    counted: &mut usize,
+) -> Result<(), hound::Error> {
+    for s in reader.samples::<i16>().take(take) {
+        let v = s? as f64;
+        *sum_sq += v * v;
+        *counted += 1;
+    }
+    Ok(())
+}
+
 /// RMS файла в dBFS по разреженной выборке.
 ///
 /// Читается `windows` окон по [`WINDOW`] сэмплов, равномерно по файлу: для
@@ -42,18 +65,6 @@ pub fn sampled_rms_dbfs(path: &Path, windows: usize) -> Result<f32, hound::Error
 
     let mut sum_sq = 0f64;
     let mut counted = 0usize;
-    let mut accumulate = |reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
-                          take: usize,
-                          sum_sq: &mut f64,
-                          counted: &mut usize|
-     -> Result<(), hound::Error> {
-        for s in reader.samples::<i16>().take(take) {
-            let v = s? as f64;
-            *sum_sq += v * v;
-            *counted += 1;
-        }
-        Ok(())
-    };
 
     if windows == 0 || total <= windows * WINDOW {
         accumulate(&mut reader, total, &mut sum_sq, &mut counted)?;
@@ -217,6 +228,83 @@ mod tests {
         hound::WavWriter::create(&path, spec).unwrap().finalize().unwrap();
 
         assert_eq!(sampled_rms_dbfs(&path, 200).unwrap(), FLOOR_DBFS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Единственный тест, реально уходящий в ветку `seek`/`windows > 1`: оба
+    /// теста выше укладываются в порог полного чтения
+    /// (`total <= windows * WINDOW`) и никогда не зовут `reader.seek`.
+    ///
+    /// Файл здесь специально длиннее `windows * WINDOW` (200 * 4096 =
+    /// 819 200 сэмплов), и, чтобы поймать не только «упало / не упало», а
+    /// осмысленность результата, первые 10% файла — цифровая тишина, а
+    /// остальные 90% — синус известной амплитуды. Страйд (`total / windows`)
+    /// подобран так, что каждое из 200 окон целиком попадает либо в тишину,
+    /// либо в синус, и пропорция окон (20 тишина / 180 синус) в точности
+    /// повторяет пропорцию файла (10% / 90%) — поэтому у разреженной выборки
+    /// и у полного чтения должен получиться практически один и тот же RMS.
+    /// Если бы `seek` не двигался (или считал не туда), выборка выродилась бы
+    /// в 200 перечтений первого окна — чистую тишину — и результат провалился
+    /// бы к `FLOOR_DBFS`, что и ловит вторая проверка ниже.
+    #[test]
+    fn разреженная_выборка_с_seek_совпадает_с_полным_чтением() {
+        let dir = std::env::temp_dir().join(format!("mr-imb-sparse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sparse.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        const TOTAL: usize = 850_000;
+        const SILENT: usize = 85_000; // ровно 10% — тишина в начале файла
+        const WINDOWS: usize = 200;
+        // 200 * 4096 = 819 200 — порог полного чтения в sampled_rms_dbfs.
+        // TOTAL заведомо больше, значит функция обязана пойти в ветку seek.
+        assert!(
+            TOTAL > WINDOWS * WINDOW,
+            "файл должен быть длиннее порога, иначе тест не проверяет seek"
+        );
+
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for i in 0..TOTAL {
+            let v = if i < SILENT {
+                0.0
+            } else {
+                (i as f32 / 16_000.0 * 440.0 * std::f32::consts::TAU).sin() * 0.5
+            };
+            w.write_sample((v * i16::MAX as f32) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+
+        // Ожидаемый RMS: 90% сигнала — синус амплитудой 0.5 (RMS = 0.5/√2),
+        // 10% — тишина (RMS-вклад 0). Считаем формулой, а не константой руками.
+        let sine_frac = (TOTAL - SILENT) as f64 / TOTAL as f64;
+        let expected_rms = (sine_frac * (0.5 / std::f64::consts::SQRT_2).powi(2)).sqrt();
+        let expected_db = (20.0 * expected_rms.log10()) as f32;
+
+        let full = sampled_rms_dbfs(&path, 0).unwrap();
+        assert!(
+            (full - expected_db).abs() < 0.5,
+            "полное чтение: получили {full} дБ, ожидали {expected_db} дБ"
+        );
+
+        let sparse = sampled_rms_dbfs(&path, WINDOWS).unwrap();
+        assert!(
+            (sparse - expected_db).abs() < 0.5,
+            "разреженная выборка: получили {sparse} дБ, ожидали {expected_db} дБ"
+        );
+        // Если бы seek не сработал, выборка читала бы только первое окно —
+        // сплошную тишину — и провалилась бы к полу, разойдясь с ожиданием на
+        // добрых 90+ дБ. Проверяем этот контраст явно, а не только близость к
+        // expected_db, чтобы намерение теста было видно и без чтения комментария.
+        assert!(
+            (sparse - FLOOR_DBFS).abs() > 30.0,
+            "выборка подозрительно близка к полу — похоже, seek не сдвинулся: {sparse} дБ"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

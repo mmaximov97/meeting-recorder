@@ -12,6 +12,7 @@
 //! аудио-цикла нет.
 
 use meeting_recorder::app::{poll_to_event, App};
+use meeting_recorder::capture::DeviceChoice;
 use meeting_recorder::detector::{MeetingDetector, MicSession, WindowsDetector, POLL_INTERVAL};
 use meeting_recorder::session::{Event, State};
 use serde::Serialize;
@@ -42,6 +43,9 @@ pub enum Ctl {
     /// не должны. Решение принимается здесь, по настоящему состоянию машины —
     /// иначе пришлось бы держать копию состояния в UI и ловить рассинхрон.
     Toggle,
+    /// Сменить микрофон. Вступает в силу со следующего открытия потоков —
+    /// менять устройство под идущей записью значило бы порвать дорожку.
+    SetMicDevice(DeviceChoice),
     /// Выход. Обязан пройти через машину: см. [`run`].
     Shutdown,
 }
@@ -158,6 +162,12 @@ fn ctl_to_event(c: &Ctl, s: State) -> (Event, bool) {
         // В Armed это тоже верно: там ManualStop = DiscardRing, то есть кольцо
         // выброшено и микрофон отпущен.
         Ctl::Shutdown => (Event::ManualStop, true),
+        // Не событие машины (см. `Ctl::SetMicDevice`): `drain_ctl` перехватывает
+        // этот вариант ДО вызова `ctl_to_event` и сюда его не пропускает. Ветка
+        // здесь нужна только для исчерпывающего match, а не как рабочий путь.
+        Ctl::SetMicDevice(_) => {
+            unreachable!("drain_ctl обрабатывает SetMicDevice до ctl_to_event")
+        }
     }
 }
 
@@ -177,6 +187,11 @@ fn drain_ctl(
     mut feed: impl FnMut(&mut App, Event, Option<&MicSession>),
 ) -> bool {
     for c in rx.try_iter() {
+        // Не событие машины: состояние от смены устройства не меняется.
+        if let Ctl::SetMicDevice(choice) = c {
+            app.set_mic_device(choice);
+            continue;
+        }
         let (e, quit) = ctl_to_event(&c, app.state());
         // На выходе источник не нужен: ManualStop закрывает то, что уже пишется,
         // а не начинает новое.
@@ -190,7 +205,7 @@ fn drain_ctl(
 
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
-pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf) {
+pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice) {
     let status = handle.state::<Status>();
     let det = match WindowsDetector::new() {
         Ok(d) => d,
@@ -202,8 +217,7 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf) {
             return;
         }
     };
-    // Временно: всегда системный дефолт, конфиг устройства появится в Task 4.
-    let mut app = App::new(dir, meeting_recorder::capture::DeviceChoice::Default);
+    let mut app = App::new(dir, mic);
     let me = std::process::id();
     let mut was_active = false;
     let mut active: Option<MicSession> = None;

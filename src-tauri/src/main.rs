@@ -3,10 +3,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod config;
 mod status;
 mod tray;
 
 use audio::Ctl;
+use config::Config;
 use meeting_recorder::session::Event;
 use serde::Serialize;
 use status::{Snapshot, Status};
@@ -163,6 +165,55 @@ fn open_folder() -> Result<(), String> {
     Ok(())
 }
 
+/// Доступные микрофоны для выпадашки: идентификатор и что показать.
+///
+/// `InputDevice` уже `Serialize`? Нет — он в ядре, где serde не подключён.
+/// Поэтому здесь своя DTO: тащить serde в ядро ради одной структуры значило бы
+/// расширить его зависимости под нужду GUI.
+#[derive(serde::Serialize)]
+struct MicDevice {
+    id: String,
+    name: String,
+}
+
+#[tauri::command]
+fn list_mic_devices() -> Result<Vec<MicDevice>, String> {
+    Ok(meeting_recorder::capture::list_input_devices()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|d| MicDevice {
+            id: d.id,
+            name: d.name,
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn get_config(app: AppHandle) -> Config {
+    Config::load(&app)
+}
+
+/// `id: None` — вернуться на системный дефолт.
+///
+/// Имя приходит вместе с идентификатором и сохраняется рядом: когда устройства
+/// не окажется в системе, показать пользователю будет нечего, кроме него.
+#[tauri::command]
+fn set_mic_device(
+    id: Option<String>,
+    name: Option<String>,
+    state: tauri::State<Cmd>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let cfg = Config {
+        mic_device_id: id,
+        mic_device_name: name,
+    };
+    cfg.save(&app)?;
+    state
+        .send(Ctl::SetMicDevice(cfg.choice()))
+        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+}
+
 fn main() {
     let (tx, rx) = channel::<Ctl>();
     let tray_tx = tx.clone();
@@ -179,7 +230,10 @@ fn main() {
             send_event,
             get_state,
             list_recordings,
-            open_folder
+            open_folder,
+            list_mic_devices,
+            get_config,
+            set_mic_device
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -205,7 +259,8 @@ fn main() {
             })?;
 
             // Аудио-поток. Всё !Send рождается ВНУТРИ него.
-            std::thread::spawn(move || audio::run(handle, rx, recordings_dir()));
+            let mic = Config::load(&handle).choice();
+            std::thread::spawn(move || audio::run(handle, rx, recordings_dir(), mic));
             Ok(())
         })
         .on_window_event(|window, event| {

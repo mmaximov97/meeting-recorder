@@ -57,6 +57,24 @@ async function команда(имя) {
   }
 }
 
+let проверка_идёт = false;
+
+$("check").addEventListener("click", async () => {
+  try {
+    await invoke("set_monitor", { on: !проверка_идёт });
+    показать_ошибку("");
+  } catch (e) {
+    показать_ошибку(String(e));
+  }
+});
+
+function применить_уровни(l) {
+  $("lvl-mic").style.width = `${Math.min(100, l.mic * 100)}%`;
+  $("lvl-sys").style.width = `${Math.min(100, l.system * 100)}%`;
+  проверка_идёт = Boolean(l.monitoring);
+  $("check").textContent = проверка_идёт ? "Остановить проверку" : "Проверить";
+}
+
 function размер(байты) {
   if (байты < 1024) return `${байты} Б`;
   const мб = байты / (1024 * 1024);
@@ -72,6 +90,9 @@ function применить_состояние(s) {
   // уже некому отвечать.
   $("ask").classList.toggle("on", s === "armed");
   if (s !== "recording" && s !== "armed") обновить_список();
+  if (s === "idle" && !проверка_идёт) {
+    применить_уровни({ mic: 0, system: 0, monitoring: false });
+  }
 }
 
 async function обновить_список() {
@@ -274,6 +295,7 @@ async function старт() {
   await listen("error", (e) => показать_ошибку(String(e.payload)));
   await listen("fatal", (e) => показать_фатальную(String(e.payload)));
   await listen("device-warning", (e) => показать_предупреждение_устройства(e.payload));
+  await listen("levels", (e) => применить_уровни(e.payload));
 
   try {
     const снимок = await invoke("get_state");

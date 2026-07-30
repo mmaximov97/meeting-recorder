@@ -102,12 +102,58 @@ async function обновить_список() {
         мета.classList.add("warn");
         мета.textContent += " · дорожка отсутствует";
       }
-      li.append(имя, мета);
+      const колонка = document.createElement("div");
+      колонка.className = "grow";
+      колонка.append(имя, мета);
+
+      const кнопка = document.createElement("button");
+      кнопка.className = "rename";
+      кнопка.textContent = "Переименовать";
+      кнопка.addEventListener("click", () => начать_переименование(з, имя, кнопка));
+
+      li.append(колонка, кнопка);
       list.append(li);
     }
   } catch (e) {
     показать_ошибку(String(e));
   }
+}
+
+// Префикс с датой не редактируется: по нему идёт сортировка списка, склейка
+// пары дорожек и выбор месячной папки. Поле правит только хвост.
+const ДЛИНА_ПРЕФИКСА = 17;
+
+function начать_переименование(запись, узел_имени, кнопка) {
+  const префикс = запись.name.slice(0, ДЛИНА_ПРЕФИКСА);
+  const хвост = запись.name.slice(ДЛИНА_ПРЕФИКСА);
+  узел_имени.textContent = префикс;
+  const поле = document.createElement("input");
+  поле.className = "tail-input";
+  поле.value = хвост;
+  узел_имени.append(поле);
+  поле.focus();
+  поле.select();
+  кнопка.disabled = true;
+
+  const применить = async () => {
+    try {
+      await invoke("rename_recording", {
+        folder: запись.folder ?? null,
+        base: запись.name,
+        newTail: поле.value,
+      });
+      показать_ошибку("");
+    } catch (e) {
+      показать_ошибку(String(e));
+    }
+    обновить_список();
+  };
+
+  поле.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") применить();
+    if (e.key === "Escape") обновить_список();
+  });
+  поле.addEventListener("blur", применить);
 }
 
 // Значение <option> — идентификатор эндпоинта, подпись — имя. Пользователь

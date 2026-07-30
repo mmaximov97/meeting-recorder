@@ -40,14 +40,61 @@ pub fn recording_filename(started: DateTime<Local>, source: &str, track: Track) 
 /// этом с большим запасом на конкатенацию нескольких слов через дефис.
 const MAX_SOURCE_LEN: usize = 100;
 
-/// `Zoom.exe` → `zoom`, `My App v2.exe` → `my-app-v2`,
-/// `Яндекс.Телемост.exe` → `яндекс-телемост`. Юникодные буквы/цифры сохраняются —
-/// имена процессов на кириллице (например, у «Яндекс.Телемост») реальны и не должны
-/// схлопываться в пустоту. Если после очистки ничего не осталось (пустая строка,
-/// строка из одних разделителей, `.exe` без имени) — возвращается `unknown`, чтобы
-/// источник в имени файла не терялся молча.
-fn sanitize_source(source: &str) -> String {
-    let stem = source.strip_suffix(".exe").unwrap_or(source);
+/// Ширина префикса `YYYY-MM-DD_HH-MM_` — 17 символов, все ASCII.
+pub const PREFIX_LEN: usize = 17;
+
+/// Форма префикса: `d` — цифра, остальное — литерал.
+const PREFIX_SHAPE: &[u8] = b"dddd-dd-dd_dd-dd_";
+
+fn prefix_ok(b: &[u8]) -> bool {
+    b.len() >= PREFIX_LEN
+        && PREFIX_SHAPE
+            .iter()
+            .zip(b)
+            .all(|(shape, c)| match shape {
+                b'd' => c.is_ascii_digit(),
+                lit => c == lit,
+            })
+}
+
+/// Разбирает основу имени на неизменяемый префикс и редактируемый хвост.
+///
+/// Префикс — несущая конструкция: по нему идёт сортировка списка, склейка пары
+/// дорожек и выбор месячной папки. Поэтому он фиксированной ширины и проверяется
+/// по форме, а не «до последнего подчёркивания» — иначе `zoom_2` разъехался бы
+/// на префикс `..._zoom_` и хвост `2`.
+///
+/// `None` — имя не наше (чужой файл в каталоге) или хвост пуст.
+pub fn split_name(base: &str) -> Option<(String, String)> {
+    if !prefix_ok(base.as_bytes()) {
+        return None;
+    }
+    // Резать по PREFIX_LEN безопасно: первые 17 байт проверены как ASCII,
+    // значит граница символа здесь совпадает с границей байта. Хвост при этом
+    // может быть каким угодно юникодом.
+    let (prefix, tail) = base.split_at(PREFIX_LEN);
+    if tail.is_empty() {
+        return None;
+    }
+    Some((prefix.to_string(), tail.to_string()))
+}
+
+/// Новая основа имени с заменённым хвостом.
+///
+/// `None` — исходное имя не разбирается или новый хвост после очистки пуст.
+pub fn rename_tail(base: &str, new_tail: &str) -> Option<String> {
+    let (prefix, _) = split_name(base)?;
+    let tail = sanitize_tail(new_tail)?;
+    Some(format!("{prefix}{tail}"))
+}
+
+/// Очистка произвольной строки под хвост имени файла. `None` — после очистки
+/// ничего не осталось.
+///
+/// Юникодные буквы сохраняются: имена процессов на кириллице (у «Яндекс.Телемост»)
+/// реальны, и человек тоже вправе назвать запись по-русски.
+fn sanitize_tail(raw: &str) -> Option<String> {
+    let stem = raw.strip_suffix(".exe").unwrap_or(raw);
     let cleaned: String = stem
         .to_lowercase()
         .chars()
@@ -62,14 +109,20 @@ fn sanitize_source(source: &str) -> String {
         out.push(c);
     }
     let out = out.trim_matches('-');
-    // обрезаем по границе символа, а не байта — источник может быть кириллицей
+    // обрезаем по границе символа, а не байта — хвост может быть кириллицей
     let truncated: String = out.chars().take(MAX_SOURCE_LEN).collect();
     let truncated = truncated.trim_end_matches('-');
     if truncated.is_empty() {
-        "unknown".to_string()
+        None
     } else {
-        truncated.to_string()
+        Some(truncated.to_string())
     }
+}
+
+/// То же, но для автоименования: пустой результат заменяется на `unknown`,
+/// чтобы источник в имени файла не терялся молча.
+fn sanitize_source(source: &str) -> String {
+    sanitize_tail(source).unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Папка записи по времени её НАЧАЛА: `<root>/2026-07`.
@@ -214,6 +267,81 @@ mod tests {
     fn источник_ровно_на_лимите_не_обрезается() {
         let source = "a".repeat(MAX_SOURCE_LEN);
         assert_eq!(sanitize_source(&source), source);
+    }
+
+    #[test]
+    fn имя_разбирается_на_префикс_и_хвост() {
+        assert_eq!(
+            split_name("2026-07-30_13-03_chrome"),
+            Some(("2026-07-30_13-03_".to_string(), "chrome".to_string()))
+        );
+    }
+
+    #[test]
+    fn суффикс_повтора_это_часть_хвоста() {
+        assert_eq!(
+            split_name("2026-07-30_13-03_chrome_2"),
+            Some(("2026-07-30_13-03_".to_string(), "chrome_2".to_string()))
+        );
+    }
+
+    #[test]
+    fn чужое_имя_не_разбирается() {
+        assert_eq!(split_name("заметки"), None);
+        assert_eq!(split_name("2026-07-30_13-03_"), None, "пустой хвост");
+        assert_eq!(split_name("2026-07-30 13-03_chrome"), None, "пробел вместо _");
+        assert_eq!(split_name("20260730_1303_chrome"), None, "нет дефисов");
+        assert_eq!(split_name(""), None);
+    }
+
+    /// Первые 17 символов префикса — ASCII, но хвост может быть кириллицей.
+    /// Разбор обязан резать по границе символа, а не по байту.
+    #[test]
+    fn кириллический_хвост_разбирается_без_паники() {
+        assert_eq!(
+            split_name("2026-07-30_13-03_разговор"),
+            Some(("2026-07-30_13-03_".to_string(), "разговор".to_string()))
+        );
+    }
+
+    #[test]
+    fn переименование_меняет_только_хвост() {
+        assert_eq!(
+            rename_tail("2026-07-30_13-03_chrome", "Разговор с Артемом"),
+            Some("2026-07-30_13-03_разговор-с-артемом".to_string())
+        );
+    }
+
+    #[test]
+    fn суффикс_повтора_переименованием_стирается() {
+        assert_eq!(
+            rename_tail("2026-07-30_13-03_chrome_2", "демо"),
+            Some("2026-07-30_13-03_демо".to_string()),
+            "хвост заменяется целиком, вместе с номером повтора"
+        );
+    }
+
+    /// Пустой хвост — ошибка, а не подстановка `unknown`. При автоименовании
+    /// источник берёт машина и подставить туда нечего; здесь поле стёр человек
+    /// и обязан это увидеть.
+    #[test]
+    fn пустой_новый_хвост_это_ошибка() {
+        assert_eq!(rename_tail("2026-07-30_13-03_chrome", ""), None);
+        assert_eq!(rename_tail("2026-07-30_13-03_chrome", "---"), None);
+        assert_eq!(rename_tail("2026-07-30_13-03_chrome", "   "), None);
+    }
+
+    #[test]
+    fn слишком_длинный_хвост_обрезается() {
+        let длинный = "я".repeat(200);
+        let out = rename_tail("2026-07-30_13-03_chrome", &длинный).expect("хвост непустой");
+        let (_, хвост) = split_name(&out).expect("результат разбирается обратно");
+        assert_eq!(хвост.chars().count(), MAX_SOURCE_LEN);
+    }
+
+    #[test]
+    fn чужое_имя_не_переименовывается() {
+        assert_eq!(rename_tail("заметки", "новое"), None);
     }
 
     #[test]

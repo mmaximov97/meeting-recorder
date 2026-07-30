@@ -202,7 +202,8 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf) {
             return;
         }
     };
-    let mut app = App::new(dir);
+    // Временно: всегда системный дефолт, конфиг устройства появится в Task 4.
+    let mut app = App::new(dir, meeting_recorder::capture::DeviceChoice::Default);
     let me = std::process::id();
     let mut was_active = false;
     let mut active: Option<MicSession> = None;
@@ -268,7 +269,10 @@ mod tests {
     /// устройств, ни каталога на диске здесь не появляется — `dir` нужен только
     /// как значение поля, до файловой системы дело не доходит.
     fn app() -> App {
-        App::new(PathBuf::from(r"C:\nonexistent\meeting-recorder-tests"))
+        App::new(
+            PathBuf::from(r"C:\nonexistent\meeting-recorder-tests"),
+            meeting_recorder::capture::DeviceChoice::Default,
+        )
     }
 
     fn session(pid: u32) -> MicSession {

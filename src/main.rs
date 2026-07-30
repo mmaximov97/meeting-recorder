@@ -32,9 +32,11 @@ fn spawn_stdin() -> Receiver<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = PathBuf::from(r"C:\Users\<username>\Recordings");
+    let root = PathBuf::from(r"C:\Users\<username>\Recordings");
     let det = WindowsDetector::new()?;
-    let mut app = App::new(dir);
+    // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный
+    // дефолт. Выбор устройства живёт в GUI, где его есть где хранить.
+    let mut app = App::new(root, meeting_recorder::capture::DeviceChoice::Default);
     let input = spawn_stdin();
     let me = std::process::id();
     // Живой звонок отлаживать нечем, кроме глаз: MR_DEBUG_POLL=1 печатает,

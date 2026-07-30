@@ -76,6 +76,16 @@ pub trait AudioIo {
     fn is_open(&self) -> bool;
     /// Всё, что накопилось с прошлого раза: `(mic, system)`.
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>);
+
+    /// Сменить микрофон. Применяется к следующему `open()`: менять устройство
+    /// под уже идущей записью значило бы порвать дорожку посередине.
+    fn set_mic_device(&mut self, _choice: DeviceChoice) {}
+
+    /// `Some(имя)` — при последнем `open()` просили это устройство, не нашли и
+    /// взяли системный дефолт.
+    fn fell_back_from(&self) -> Option<String> {
+        None
+    }
 }
 
 impl Sink for WavSink {
@@ -121,6 +131,11 @@ struct Streams {
 /// Реальный захват через cpal.
 struct CpalAudio {
     streams: Option<Streams>,
+    /// Какое устройство просить на следующем `open()`.
+    mic: DeviceChoice,
+    /// `Some(имя)` — на последнем `open()` просили не дефолт, не нашли и
+    /// взяли системный дефолт.
+    fell_back: Option<String>,
     /// `MR_DEBUG_TIMING=1` — замер стоимости открытия потоков и задержки
     /// первого чанка по каждой дорожке. Живого звонка отладчиком не поймать,
     /// а расхождение старта mic и loopback видно только на числах: это
@@ -133,9 +148,11 @@ struct CpalAudio {
 }
 
 impl CpalAudio {
-    fn new() -> Self {
+    fn new(mic: DeviceChoice) -> Self {
         Self {
             streams: None,
+            mic,
+            fell_back: None,
             timing: std::env::var_os("MR_DEBUG_TIMING").is_some(),
             opened_at: None,
             logged_mic: false,
@@ -182,11 +199,11 @@ impl AudioIo for CpalAudio {
         // дорого и непредсказуемо (loopback на спящем BT-эндпоинте — до 795 мс
         // против 20 мс на проснувшемся), и вся эта разница ушла бы прямо в
         // расхождение дорожек, стартуй мы их по очереди «открыл-запустил».
-        let (mic_pending, fell_back) = build_mic_capture(&DeviceChoice::Default, tx_mic)?;
+        let (mic_pending, fell_back) = build_mic_capture(&self.mic, tx_mic)?;
+        self.fell_back = fell_back;
         let t2 = Instant::now();
         let sys_pending = build_loopback_capture(tx_sys)?;
         let t3 = Instant::now();
-        let _ = fell_back; // проводка появится в Task 3
 
         // ...и только теперь запускаем — двумя вызовами подряд, между которыми
         // не делается ничего. Отсюда и берётся остаточная Δ: это уже не
@@ -278,6 +295,14 @@ impl AudioIo for CpalAudio {
         }
         (mic, sys)
     }
+
+    fn set_mic_device(&mut self, choice: DeviceChoice) {
+        self.mic = choice;
+    }
+
+    fn fell_back_from(&self) -> Option<String> {
+        self.fell_back.clone()
+    }
 }
 
 pub struct App {
@@ -294,10 +319,20 @@ pub struct App {
 }
 
 impl App {
-    /// Микрофон здесь НЕ открывается. Потоки поднимаются только по детекту
-    /// или по ручному старту — см. `Action::StartRingBuffer`.
-    pub fn new(dir: PathBuf) -> Self {
-        Self::with_backends(dir, Box::new(CpalAudio::new()), Box::new(WavSinks))
+    /// Микрофон здесь НЕ открывается. Потоки поднимаются только по детекту,
+    /// ручному старту или явной проверке — см. `Action::StartRingBuffer`.
+    pub fn new(root: PathBuf, mic: DeviceChoice) -> Self {
+        Self::with_backends(root, Box::new(CpalAudio::new(mic)), Box::new(WavSinks))
+    }
+
+    /// Сменить микрофон. Вступает в силу со следующего открытия потоков.
+    pub fn set_mic_device(&mut self, choice: DeviceChoice) {
+        self.audio.set_mic_device(choice);
+    }
+
+    /// `Some(имя)` — писали не тем микрофоном, о котором просили.
+    pub fn device_warning(&self) -> Option<String> {
+        self.audio.fell_back_from()
     }
 
     fn with_backends(dir: PathBuf, audio: Box<dyn AudioIo>, sinks: Box<dyn SinkFactory>) -> Self {
@@ -901,6 +936,11 @@ mod tests {
         открыт: bool,
         /// Что отдавать по каждому вызову drain, по порядку.
         очередь: Vec<(Vec<i16>, Vec<i16>)>,
+        /// Куда фейк кладёт последний выбор устройства — тест смотрит сюда.
+        выбор: Rc<RefCell<Option<DeviceChoice>>>,
+        /// Что вернуть из `fell_back_from`: `Some` — притворяемся, что просили
+        /// это устройство и не нашли.
+        подмена: Option<String>,
     }
 
     impl AudioIo for ФейкAudio {
@@ -928,6 +968,14 @@ mod tests {
             }
             self.очередь.remove(0)
         }
+
+        fn set_mic_device(&mut self, choice: DeviceChoice) {
+            *self.выбор.borrow_mut() = Some(choice);
+        }
+
+        fn fell_back_from(&self) -> Option<String> {
+            self.подмена.clone()
+        }
     }
 
     /// App на подставном бэкенде. `dir` — заведомо несуществующий путь: до
@@ -939,12 +987,38 @@ mod tests {
                 журнал: журнал.clone(),
                 открыт: false,
                 очередь: звук,
+                выбор: Rc::new(RefCell::new(None)),
+                подмена: None,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
                 поломка,
             }),
         )
+    }
+
+    /// Стенд, у которого захват можно расспросить про устройство: возвращает
+    /// App и общую ссылку на то, что фейку сказали выбрать.
+    fn стенд_с_устройством(
+        журнал: &Журнал,
+        подмена: Option<&str>,
+    ) -> (App, Rc<RefCell<Option<DeviceChoice>>>) {
+        let выбор = Rc::new(RefCell::new(None));
+        let app = App::with_backends(
+            PathBuf::from("."),
+            Box::new(ФейкAudio {
+                журнал: журнал.clone(),
+                открыт: false,
+                очередь: Vec::new(),
+                выбор: выбор.clone(),
+                подмена: подмена.map(str::to_string),
+            }),
+            Box::new(ФейкSinks {
+                журнал: журнал.clone(),
+                поломка: Поломка::Нет,
+            }),
+        );
+        (app, выбор)
     }
 
     fn записано(журнал: &Журнал) -> Vec<String> {
@@ -1385,5 +1459,33 @@ mod tests {
             ж.contains(&"write:mic:3".to_string()) && ж.contains(&"write:system:3".to_string()),
             "кольцо обязано уйти в начало файла: {ж:?}"
         );
+    }
+
+    // ---- выбор устройства -------------------------------------------------
+
+    #[test]
+    fn выбор_устройства_доезжает_до_захвата() {
+        let ж = журнал();
+        let (mut app, выбор) = стенд_с_устройством(&ж, None);
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+        assert_eq!(
+            *выбор.borrow(),
+            Some(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into())),
+            "App не хранит выбор сам — он обязан уехать в AudioIo"
+        );
+    }
+
+    #[test]
+    fn подмена_устройства_видна_снаружи() {
+        let ж = журнал();
+        let (app, _) = стенд_с_устройством(&ж, Some("Headset (Boss Bose)"));
+        assert_eq!(app.device_warning().as_deref(), Some("Headset (Boss Bose)"));
+    }
+
+    #[test]
+    fn без_подмены_предупреждения_нет() {
+        let ж = журнал();
+        let (app, _) = стенд_с_устройством(&ж, None);
+        assert_eq!(app.device_warning(), None);
     }
 }

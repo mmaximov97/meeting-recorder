@@ -167,22 +167,32 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
 }
 
 /// Решение по одной команде: какое событие уходит в машину и надо ли после этого
-/// выходить.
+/// выходить. `None` — команда не событие машины вовсе.
 ///
 /// Чистая функция по образцу `poll_to_event`, и ровно по той же причине: решение
 /// «`Shutdown` → `ManualStop`» — это инвариант 6 («выход из трея финализирует
 /// запись») в чистом виде, и жить оно должно там, где его можно прочитать
 /// тестом, а не внутри `loop`, до которого тест не дотянется.
-fn ctl_to_event(c: &Ctl, s: State) -> (Event, bool) {
+///
+/// `SetMicDevice`/`Monitor` дают `None`, а не `unreachable!()`. `drain_ctl`
+/// перехватывает оба варианта раньше и сюда их не пропускает, поэтому на
+/// практике эта ветка не исполняется, но паника здесь была бы неверной ценой
+/// за это предположение: она убивает единственный поток, который умеет писать
+/// на диск, причём тихо — `status::fatal` от паники в этом потоке не
+/// срабатывает, а «поток мёртв» всплывает только на следующей команде из GUI.
+/// `None` несёт тот же факт «сюда дойти не должны», но не обрушивает поток,
+/// если предположение всё же окажется неверным (например, после будущей
+/// правки, убравшей перехват в `drain_ctl`).
+fn ctl_to_event(c: &Ctl, s: State) -> Option<(Event, bool)> {
     match c {
-        Ctl::Event(e) => (*e, false),
+        Ctl::Event(e) => Some((*e, false)),
         // В Armed ManualStart — это подтверждение (кольцо уезжает в файл), в
         // Idle — старт с нуля, в записи — стоп. Решает машина, мы только
         // выбираем событие по её состоянию.
-        Ctl::Toggle => match s {
+        Ctl::Toggle => Some(match s {
             State::Recording(_) => (Event::ManualStop, false),
             _ => (Event::ManualStart, false),
-        },
+        }),
         // Выход обязан пройти через машину, а не через process::exit: ManualStop
         // закроет и финализирует файл, если запись идёт. hound пишет длину данных
         // в заголовок только на finalize(); убить процесс во время записи — это
@@ -190,18 +200,13 @@ fn ctl_to_event(c: &Ctl, s: State) -> (Event, bool) {
         //
         // В Armed это тоже верно: там ManualStop = DiscardRing, то есть кольцо
         // выброшено и микрофон отпущен.
-        Ctl::Shutdown => (Event::ManualStop, true),
+        Ctl::Shutdown => Some((Event::ManualStop, true)),
         // Не событие машины (см. `Ctl::SetMicDevice`): `drain_ctl` перехватывает
-        // этот вариант ДО вызова `ctl_to_event` и сюда его не пропускает. Ветка
-        // здесь нужна только для исчерпывающего match, а не как рабочий путь.
-        Ctl::SetMicDevice(_) => {
-            unreachable!("drain_ctl обрабатывает SetMicDevice до ctl_to_event")
-        }
+        // этот вариант ДО вызова `ctl_to_event` и сюда его не пропускает.
+        Ctl::SetMicDevice(_) => None,
         // Тот же случай, что у `SetMicDevice`: `drain_ctl` перехватывает
         // `Monitor` раньше, чем дело доходит сюда.
-        Ctl::Monitor(_) => {
-            unreachable!("drain_ctl обрабатывает Monitor до ctl_to_event")
-        }
+        Ctl::Monitor(_) => None,
     }
 }
 
@@ -240,7 +245,13 @@ fn drain_ctl(
             }
             continue;
         }
-        let (e, quit) = ctl_to_event(&c, app.state());
+        // `None` здесь означает «команда не должна была сюда дойти» (см.
+        // докблок `ctl_to_event`) — а не «ничего не делать» через панику.
+        // `SetMicDevice`/`Monitor` перехвачены веткой выше, так что на
+        // практике сюда попадают только команды с `Some`.
+        let Some((e, quit)) = ctl_to_event(&c, app.state()) else {
+            continue;
+        };
         // На выходе источник не нужен: ManualStop закрывает то, что уже пишется,
         // а не начинает новое.
         feed(app, e, if quit { None } else { active });
@@ -274,7 +285,7 @@ fn should_emit_levels(was_monitoring: bool, is_monitoring: bool, state: State) -
 
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
-pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice) {
+pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
     let status = handle.state::<Status>();
     let det = match WindowsDetector::new() {
         Ok(d) => d,
@@ -286,7 +297,7 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, dir: PathBuf, mic: DeviceChoice
             return;
         }
     };
-    let mut app = App::new(dir, mic);
+    let mut app = App::new(root, mic);
     let me = std::process::id();
     let mut was_active = false;
     let mut active: Option<MicSession> = None;
@@ -456,7 +467,7 @@ mod tests {
         ] {
             assert_eq!(
                 ctl_to_event(&Ctl::Toggle, state),
-                (want, false),
+                Some((want, false)),
                 "состояние {state:?}"
             );
         }
@@ -472,7 +483,7 @@ mod tests {
         ] {
             assert_eq!(
                 ctl_to_event(&Ctl::Event(e), State::Armed),
-                (e, false),
+                Some((e, false)),
                 "{e:?} — ответ пользователя, состояние машины его не переписывает"
             );
         }
@@ -489,10 +500,26 @@ mod tests {
         ] {
             assert_eq!(
                 ctl_to_event(&Ctl::Shutdown, s),
-                (Event::ManualStop, true),
+                Some((Event::ManualStop, true)),
                 "состояние {s:?}"
             );
         }
+    }
+
+    /// Дешёвая находка ревью: раньше эти две ветки паниковали через
+    /// `unreachable!()`. `drain_ctl` и сейчас не пропускает их сюда, но сам
+    /// `ctl_to_event` обязан молча вернуть `None`, а не убить аудио-поток,
+    /// если это предположение однажды перестанет быть верным.
+    #[test]
+    fn set_mic_device_и_monitor_дают_none() {
+        assert_eq!(
+            ctl_to_event(
+                &Ctl::SetMicDevice(meeting_recorder::capture::DeviceChoice::Default),
+                State::Idle
+            ),
+            None
+        );
+        assert_eq!(ctl_to_event(&Ctl::Monitor(true), State::Idle), None);
     }
 
     /// Инвариант 6 целиком, а не наполовину: проверяется не «`Shutdown` умеет
@@ -580,6 +607,29 @@ mod tests {
         let (tx, rx) = channel();
         tx.send(Ctl::Monitor(true)).unwrap();
         tx.send(Ctl::Monitor(false)).unwrap();
+
+        let mut seen = Vec::new();
+        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
+
+        assert!(!quit);
+        assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+    }
+
+    /// Симметрично `монитор_не_кормит_машину_событиями`: смена микрофона тоже
+    /// не событие машины — состояние записи от выбора устройства не меняется.
+    /// Закрепляет инвариант, ради которого `ctl_to_event` отдаёт `None` вместо
+    /// паники на `SetMicDevice`/`Monitor` (см. её докблок).
+    #[test]
+    fn set_mic_device_не_кормит_машину_событиями() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::SetMicDevice(
+            meeting_recorder::capture::DeviceChoice::Default,
+        ))
+        .unwrap();
+        tx.send(Ctl::SetMicDevice(
+            meeting_recorder::capture::DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()),
+        ))
+        .unwrap();
 
         let mut seen = Vec::new();
         let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});

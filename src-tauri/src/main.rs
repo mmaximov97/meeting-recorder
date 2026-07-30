@@ -19,10 +19,12 @@ use std::sync::Mutex;
 use tauri::{AppHandle, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// Тот же каталог, что у консольного бинаря (`src/main.rs`). Хардкод переехал
-/// сюда как есть: разъедься эти два пути, GUI перестал бы показывать записи,
-/// сделанные консолью, — а консоль остаётся инструментом отладки того же ядра.
-fn recordings_dir() -> PathBuf {
+/// Корень записей. Тот же, что у консольного бинаря (`src/main.rs`): разъедься
+/// эти два пути, GUI перестал бы показывать записи, сделанные консолью, — а
+/// консоль остаётся инструментом отладки того же ядра.
+///
+/// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
+fn recordings_root() -> PathBuf {
     PathBuf::from(r"C:\Users\<username>\Recordings")
 }
 
@@ -129,7 +131,7 @@ fn group_recordings(files: impl IntoIterator<Item = (String, u64)>) -> Vec<Recor
 /// Список записей. Обход каталога — здесь, склейка — в [`group_recordings`].
 #[tauri::command]
 fn list_recordings() -> Result<Vec<Recording>, String> {
-    let dir = recordings_dir();
+    let dir = recordings_root();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         // Каталога нет — записей просто ещё не было. Это не ошибка.
@@ -155,7 +157,7 @@ fn list_recordings() -> Result<Vec<Recording>, String> {
 /// пользователь это увидит сам.
 #[tauri::command]
 fn open_folder() -> Result<(), String> {
-    let dir = recordings_dir();
+    let dir = recordings_root();
     // Иначе explorer откроет «Документы» вместо пустого несуществующего пути.
     std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
     std::process::Command::new("explorer.exe")
@@ -260,7 +262,7 @@ fn main() {
 
             // Аудио-поток. Всё !Send рождается ВНУТРИ него.
             let mic = Config::load(&handle).choice();
-            std::thread::spawn(move || audio::run(handle, rx, recordings_dir(), mic));
+            std::thread::spawn(move || audio::run(handle, rx, recordings_root(), mic));
             Ok(())
         })
         .on_window_event(|window, event| {

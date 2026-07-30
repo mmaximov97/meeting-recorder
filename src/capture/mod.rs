@@ -292,7 +292,8 @@ impl Resampler {
 ///
 /// # Зачем разделены «открыть» и «запустить»
 ///
-/// Дорожка начинает идти не с `build_capture`, а с [`PendingCapture::play`]:
+/// Дорожка начинает идти не с `build_mic_capture`/`build_loopback_capture`, а
+/// с [`PendingCapture::play`]:
 /// в cpal `build_input_stream` только инициализирует WASAPI-клиент, а
 /// `IAudioClient::Start()` вызывается исключительно по команде `PlayStream`
 /// (проверено по исходникам cpal 0.18.1, `src/host/wasapi/stream.rs` — во всём

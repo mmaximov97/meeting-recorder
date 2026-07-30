@@ -50,25 +50,37 @@ pub enum Source {
 
 /// Какой микрофон брать. `Default` — тот, что выбран в системе.
 ///
-/// Отдельный тип, а не `Option<String>`: `None` в вызывающем коде читается как
-/// «не задано», а здесь это осмысленный выбор «спросить систему», и путать эти
-/// два смысла нельзя — от них зависит, писать ли предупреждение о подмене.
+/// Идентификатор, а не имя. `DeviceTrait::id()` на Windows отдаёт
+/// `IMMDevice::GetId()` — эндпоинт-идентификатор WASAPI, стабильный между
+/// перезапусками и переименованиями; докблок `DeviceId` прямо предписывает
+/// персистить его через `Display`/`FromStr`. Имя же меняется в настройках
+/// системы и не уникально, а промах по нему выглядит как тихий откат на
+/// системный дефолт — тот самый отказ, который эта фича и устраняет.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DeviceChoice {
     #[default]
     Default,
-    Named(String),
+    Id(String),
 }
 
-/// Индекс выбранного устройства в списке имён.
+/// Устройство записи для выпадашки: чем искать и что показать.
 ///
-/// Сравнение строго по равенству. `contains`/`starts_with` здесь были бы багом:
-/// "Headset (Boss Bose)" — префикс "Headset (Boss Bose Hands-Free)", и нестрогий
-/// матчинг молча выбрал бы узкополосный HFP-профиль.
-fn pick(names: &[String], choice: &DeviceChoice) -> Option<usize> {
+/// Имя здесь — исключительно для глаз. Матчинг по нему не идёт нигде, иначе
+/// хрупкость вернулась бы через чёрный ход.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+/// Индекс выбранного устройства в списке идентификаторов.
+///
+/// Сравнение строго по равенству: эндпоинт-идентификаторы разделяют префикс
+/// контейнера, и нестрогий матчинг выбрал бы соседнее устройство.
+fn pick(ids: &[String], choice: &DeviceChoice) -> Option<usize> {
     match choice {
         DeviceChoice::Default => None,
-        DeviceChoice::Named(want) => names.iter().position(|n| n == want),
+        DeviceChoice::Id(want) => ids.iter().position(|id| id == want),
     }
 }
 
@@ -317,23 +329,35 @@ impl PendingCapture {
     }
 }
 
-/// Имена всех доступных устройств записи — для выпадашки в UI.
+/// Идентификатор устройства строкой. `None` — дескриптор не читается.
 ///
-/// Устройство, у которого имя не читается, пропускается: `Device::description()`
-/// ходит в WASAPI и может отказать на отдельном эндпоинте, и ронять из-за него
-/// весь список неправильно — остальные устройства выбрать по-прежнему можно.
-pub fn list_input_devices() -> Result<Vec<String>, CaptureError> {
+/// `DeviceId` персистится через `Display`, поэтому строка — это и есть его
+/// каноническая форма, а не наше изобретение.
+fn device_id(d: &cpal::Device) -> Option<String> {
+    d.id().ok().map(|id| id.to_string())
+}
+
+/// Устройства записи — для выпадашки в UI.
+///
+/// Устройство, у которого не читается идентификатор ИЛИ имя, пропускается:
+/// выбрать его всё равно нельзя, а показать в списке — значит предложить то,
+/// что не запомнится.
+pub fn list_input_devices() -> Result<Vec<InputDevice>, CaptureError> {
     let host = cpal::default_host();
     Ok(host
         .input_devices()?
-        .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+        .filter_map(|d| {
+            let id = device_id(&d)?;
+            let name = d.description().ok()?.name().to_string();
+            Some(InputDevice { id, name })
+        })
         .collect())
 }
 
 /// Устройство записи плюс признак того, что взяли не то, о чём просили.
 pub struct Resolved {
     pub device: cpal::Device,
-    /// `Some(имя)` — просили это, не нашли, взяли системный дефолт.
+    /// `Some(идентификатор)` — просили это, не нашли, взяли системный дефолт.
     pub fell_back_from: Option<String>,
 }
 
@@ -344,17 +368,13 @@ pub struct Resolved {
 /// подмене нельзя — за этим и нужен `fell_back_from`.
 pub fn resolve_input(choice: &DeviceChoice) -> Result<Resolved, CaptureError> {
     let host = cpal::default_host();
-    if let DeviceChoice::Named(want) = choice {
+    if let DeviceChoice::Id(want) = choice {
         let devices: Vec<cpal::Device> = host.input_devices()?.collect();
-        let names: Vec<String> = devices
+        let ids: Vec<String> = devices
             .iter()
-            .map(|d| {
-                d.description()
-                    .map(|desc| desc.name().to_string())
-                    .unwrap_or_default()
-            })
+            .map(|d| device_id(d).unwrap_or_default())
             .collect();
-        if let Some(i) = pick(&names, choice) {
+        if let Some(i) = pick(&ids, choice) {
             return Ok(Resolved {
                 device: devices.into_iter().nth(i).expect("индекс из pick валиден"),
                 fell_back_from: None,
@@ -857,58 +877,61 @@ mod tests {
 
     // --- выбор устройства ---
 
-    fn имена() -> Vec<String> {
+    fn идентификаторы() -> Vec<String> {
         vec![
-            "Microphone Array (Intel SST)".to_string(),
-            "Headset (Boss Bose)".to_string(),
-            "Headset (Boss Bose Hands-Free)".to_string(),
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000001}".to_string(),
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000002}".to_string(),
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000003}".to_string(),
         ]
     }
 
     #[test]
     fn дефолт_не_выбирает_никого_из_списка() {
         assert_eq!(
-            pick(&имена(), &DeviceChoice::Default),
+            pick(&идентификаторы(), &DeviceChoice::Default),
             None,
             "Default означает «спросить систему», а не «взять первое из списка»"
         );
     }
 
     #[test]
-    fn именованное_устройство_ищется_точным_совпадением() {
+    fn устройство_ищется_точным_совпадением_идентификатора() {
         assert_eq!(
-            pick(&имена(), &DeviceChoice::Named("Headset (Boss Bose)".into())),
+            pick(&идентификаторы(), &DeviceChoice::Id(идентификаторы()[1].clone())),
             Some(1)
         );
     }
 
-    /// Подстрока — не совпадение. "Headset (Boss Bose)" является префиксом
-    /// "Headset (Boss Bose Hands-Free)", и матчинг по `contains`/`starts_with`
-    /// выбрал бы узкополосный HFP-профиль вместо нормального.
+    /// Префикс — не совпадение. Эндпоинт-идентификаторы WASAPI различаются
+    /// хвостом GUID, и нестрогий матчинг (`starts_with`/`contains`) выбрал бы
+    /// первое попавшееся устройство того же контейнера — молча и не то.
     #[test]
-    fn подстрока_не_считается_совпадением() {
+    fn префикс_идентификатора_не_считается_совпадением() {
         assert_eq!(
-            pick(&имена(), &DeviceChoice::Named("Headset (Boss".into())),
+            pick(&идентификаторы(), &DeviceChoice::Id("{0.0.1.00000000}".into())),
             None
         );
     }
 
     #[test]
     fn отсутствующее_устройство_даёт_none() {
-        assert_eq!(pick(&имена(), &DeviceChoice::Named("Yeti".into())), None);
+        assert_eq!(
+            pick(&идентификаторы(), &DeviceChoice::Id("{0.0.1.00000000}.{нет-такого}".into())),
+            None
+        );
     }
 
-    /// cpal не даёт стабильных идентификаторов, поэтому два одинаковых имени
-    /// различить нечем. Берём первое — детерминированно и объяснимо.
+    /// Пустая строка приходит из `resolve_input`, когда у устройства не
+    /// прочитался дескриптор. Она обязана не совпасть ни с чем, а не выбрать
+    /// случайного соседа.
     #[test]
-    fn дубликат_имени_разрешается_в_пользу_первого() {
-        let names = vec!["Yeti".to_string(), "Yeti".to_string()];
-        assert_eq!(pick(&names, &DeviceChoice::Named("Yeti".into())), Some(0));
+    fn пустой_идентификатор_ни_с_чем_не_совпадает() {
+        assert_eq!(pick(&идентификаторы(), &DeviceChoice::Id(String::new())), None);
     }
 
     #[test]
     fn пустой_список_не_паникует() {
-        assert_eq!(pick(&[], &DeviceChoice::Named("Yeti".into())), None);
+        assert_eq!(pick(&[], &DeviceChoice::Id("что-нибудь".into())), None);
         assert_eq!(pick(&[], &DeviceChoice::Default), None);
     }
 }

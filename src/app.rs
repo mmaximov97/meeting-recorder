@@ -21,7 +21,7 @@ use crate::capture::{build_loopback_capture, build_mic_capture, start_silence, D
 use crate::detector::MicSession;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
-use crate::storage::{recording_filename, Track, WavSink, SAMPLE_RATE};
+use crate::storage::{month_dir, recording_filename, Track, WavSink, SAMPLE_RATE};
 use chrono::{DateTime, Local};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -307,7 +307,8 @@ impl AudioIo for CpalAudio {
 
 pub struct App {
     machine: SessionMachine,
-    dir: PathBuf,
+    /// Корень записей. Конкретная папка считается из `started` — см. `month_dir`.
+    root: PathBuf,
     ring_mic: RingBuffer,
     ring_sys: RingBuffer,
     sink_mic: Option<Box<dyn Sink>>,
@@ -335,10 +336,10 @@ impl App {
         self.audio.fell_back_from()
     }
 
-    fn with_backends(dir: PathBuf, audio: Box<dyn AudioIo>, sinks: Box<dyn SinkFactory>) -> Self {
+    fn with_backends(root: PathBuf, audio: Box<dyn AudioIo>, sinks: Box<dyn SinkFactory>) -> Self {
         Self {
             machine: SessionMachine::new(),
-            dir,
+            root,
             ring_mic: RingBuffer::new(RING_CAPACITY),
             ring_sys: RingBuffer::new(RING_CAPACITY),
             sink_mic: None,
@@ -478,12 +479,12 @@ impl App {
     /// Открывает обе дорожки под одним, гарантированно свободным именем.
     fn open_sinks(&mut self) -> Res {
         let src = self.current_source.clone();
-        let (mic, sys) = free_name_pair(&self.dir, self.started, &src)?;
-        // Порядок важен: если вторая дорожка не открылась, первую надо
-        // закрыть, иначе на диске останется осиротевший mic-файл, а
-        // sink_mic — висеть в Some до следующего open_sinks.
-        let sink_mic = self.sinks.create(&self.dir, &mic)?;
-        match self.sinks.create(&self.dir, &sys) {
+        let dir = month_dir(&self.root, self.started);
+        let (mic, sys) = free_name_pair(&dir, self.started, &src)?;
+        // Порядок важен: если вторая дорожка не открылась, первую надо закрыть,
+        // иначе на диске останется осиротевший mic-файл.
+        let sink_mic = self.sinks.create(&dir, &mic)?;
+        match self.sinks.create(&dir, &sys) {
             Ok(sink_sys) => {
                 self.sink_mic = Some(sink_mic);
                 self.sink_sys = Some(sink_sys);
@@ -491,7 +492,7 @@ impl App {
             }
             Err(e) => {
                 let _ = sink_mic.finalize();
-                let _ = std::fs::remove_file(self.dir.join(&mic));
+                let _ = std::fs::remove_file(dir.join(&mic));
                 Err(e)
             }
         }

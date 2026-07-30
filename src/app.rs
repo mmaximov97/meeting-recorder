@@ -17,7 +17,7 @@
 //! правка остаётся зелёной. Фейки в тестах умеют падать в нужной точке —
 //! этого достаточно, чтобы каждый инвариант ловил свою мутацию.
 
-use crate::capture::{build_capture, start_silence, Source};
+use crate::capture::{build_loopback_capture, build_mic_capture, start_silence, DeviceChoice};
 use crate::detector::MicSession;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
@@ -182,10 +182,11 @@ impl AudioIo for CpalAudio {
         // дорого и непредсказуемо (loopback на спящем BT-эндпоинте — до 795 мс
         // против 20 мс на проснувшемся), и вся эта разница ушла бы прямо в
         // расхождение дорожек, стартуй мы их по очереди «открыл-запустил».
-        let mic_pending = build_capture(Source::Mic, tx_mic)?;
+        let (mic_pending, fell_back) = build_mic_capture(&DeviceChoice::Default, tx_mic)?;
         let t2 = Instant::now();
-        let sys_pending = build_capture(Source::SystemLoopback, tx_sys)?;
+        let sys_pending = build_loopback_capture(tx_sys)?;
         let t3 = Instant::now();
+        let _ = fell_back; // проводка появится в Task 3
 
         // ...и только теперь запускаем — двумя вызовами подряд, между которыми
         // не делается ничего. Отсюда и берётся остаточная Δ: это уже не

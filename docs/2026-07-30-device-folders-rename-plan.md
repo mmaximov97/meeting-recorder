@@ -1729,35 +1729,41 @@ git commit -m "feat(gui): список собирает записи из мес
 # в имени нет, остаётся в корне.
 #
 # Идемпотентен: повторный запуск ничего не делает — в корне уже пусто.
+#
+# Имена переменных ASCII (moved/skipped/month), а не кириллицей: bash не
+# поддерживает нелатинские идентификаторы ни в одной локали (проверено —
+# `перенесено=0` падает как `command not found` даже под LC_ALL=ru_RU.UTF-8).
+# Это ограничение самого bash, а не окружения. Текст сообщений — по-русски,
+# как везде в проекте.
 set -euo pipefail
 
 ROOT="${1:-/mnt/c/Users/<username>/Recordings}"
 DRY="${DRY_RUN:-0}"
 
 cd "$ROOT"
-перенесено=0
-пропущено=0
+moved=0
+skipped=0
 
 for entry in *; do
   [ -e "$entry" ] || continue
   [ -d "$entry" ] && [[ "$entry" =~ ^[0-9]{4}-[0-9]{2}$ ]] && continue
 
   if [[ "$entry" =~ ^([0-9]{4})-([0-9]{2})-[0-9]{2} ]]; then
-    месяц="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+    month="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
     if [ "$DRY" = "1" ]; then
-      echo "  $entry -> $месяц/"
+      echo "  $entry -> $month/"
     else
-      mkdir -p "$месяц"
-      mv -n -- "$entry" "$месяц/"
+      mkdir -p "$month"
+      mv -n -- "$entry" "$month/"
     fi
-    перенесено=$((перенесено + 1))
+    moved=$((moved + 1))
   else
     echo "  оставлено в корне (нет даты в имени): $entry"
-    пропущено=$((пропущено + 1))
+    skipped=$((skipped + 1))
   fi
 done
 
-echo "перенесено: $перенесено, оставлено: $пропущено"
+echo "перенесено: $moved, оставлено: $skipped"
 ```
 
 - [ ] **Step 2: Прогнать вхолостую и проверить глазами**

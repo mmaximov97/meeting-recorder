@@ -26,6 +26,28 @@ function показать_фатальную(причина) {
   $("yes").disabled = true;
 }
 
+// Приходит идентификатор эндпоинта — показывать его пользователю бессмысленно.
+// Имя берём из конфига: в системе устройства сейчас нет, спросить не у кого.
+async function показать_предупреждение_устройства(id) {
+  const el = $("devwarn");
+  el.classList.toggle("on", Boolean(id));
+  if (!id) {
+    el.textContent = "";
+    return;
+  }
+  let имя = id;
+  try {
+    const конфиг = await invoke("get_config");
+    if (конфиг.mic_device_id === id && конфиг.mic_device_name) {
+      имя = конфиг.mic_device_name;
+    }
+  } catch {
+    // Не смогли прочитать конфиг — покажем идентификатор. Предупреждение
+    // важнее его читаемости: молчать здесь нельзя.
+  }
+  el.textContent = `Микрофон «${имя}» недоступен — пишется системный по умолчанию.`;
+}
+
 async function команда(имя) {
   try {
     await invoke("send_event", { name: имя });
@@ -174,11 +196,13 @@ async function старт() {
   });
   await listen("error", (e) => показать_ошибку(String(e.payload)));
   await listen("fatal", (e) => показать_фатальную(String(e.payload)));
+  await listen("device-warning", (e) => показать_предупреждение_устройства(e.payload));
 
   try {
     const снимок = await invoke("get_state");
     применить_состояние(снимок.state);
     if (снимок.fatal) показать_фатальную(снимок.fatal);
+    показать_предупреждение_устройства(снимок.device_warning);
   } catch (e) {
     показать_ошибку(String(e));
   }

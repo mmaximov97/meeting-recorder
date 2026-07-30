@@ -65,6 +65,17 @@
       #ask p {
         margin: 0 0 10px;
       }
+      #devwarn {
+        display: none;
+        border: 1px solid #d0761a;
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        color: #d0761a;
+      }
+      #devwarn.on {
+        display: block;
+      }
       .row {
         display: flex;
         gap: 8px;
@@ -142,6 +153,8 @@
         <button id="no">Нет</button>
       </div>
     </div>
+
+    <div id="devwarn"></div>
 
     <h2>Микрофон</h2>
     <div class="row">

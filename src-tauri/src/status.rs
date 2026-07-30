@@ -37,6 +37,9 @@ pub struct Snapshot {
     /// `Some` — записи не будет до перезапуска. Не «ошибка на этом тике»
     /// (`emit("error")`), а «дальше ничего не работает».
     pub fatal: Option<String>,
+    /// `Some(имя)` — просили этот микрофон, не нашли, пишем в системный дефолт.
+    /// Не фатально (запись идёт), но молчать нельзя.
+    pub device_warning: Option<String>,
 }
 
 /// Разделяемое состояние. Живёт в `tauri::State`, пишется аудио-потоком (и теми,
@@ -83,6 +86,18 @@ impl Status {
         g.state = UiState::Idle;
         true
     }
+
+    /// `true` — изменилось, есть о чём сообщать. Снятие предупреждения — тоже
+    /// изменение: устройство могли вернуть, и висящий баннер врал бы.
+    pub fn set_device_warning(&self, w: Option<&str>) -> bool {
+        let mut g = self.lock();
+        let new = w.map(str::to_string);
+        if g.device_warning == new {
+            return false;
+        }
+        g.device_warning = new;
+        true
+    }
 }
 
 /// Сообщить о фатальной ошибке всеми каналами разом.
@@ -122,7 +137,8 @@ mod tests {
             s.snapshot(),
             Snapshot {
                 state: UiState::Idle,
-                fatal: None
+                fatal: None,
+                device_warning: None,
             }
         );
     }
@@ -167,5 +183,23 @@ mod tests {
             Some("первая причина"),
             "интересна причина, а не последствия"
         );
+    }
+
+    #[test]
+    fn предупреждение_об_устройстве_сообщается_только_об_изменении() {
+        let s = Status::default();
+        assert!(s.set_device_warning(Some("Headset (Boss Bose)")));
+        assert!(!s.set_device_warning(Some("Headset (Boss Bose)")));
+        assert!(s.set_device_warning(None), "снятие — тоже изменение");
+        assert_eq!(s.snapshot().device_warning, None);
+    }
+
+    /// Тот, кто открыл окно посреди записи, обязан увидеть предупреждение —
+    /// ровно та же причина, по которой в снимке живёт fatal.
+    #[test]
+    fn предупреждение_видно_в_снимке() {
+        let s = Status::default();
+        s.set_device_warning(Some("Yeti"));
+        assert_eq!(s.snapshot().device_warning.as_deref(), Some("Yeti"));
     }
 }

@@ -43,6 +43,8 @@
 
 ### Task 1: Чистый матчинг устройства
 
+> **Частично отменена задачей Task 2a.** Текст ниже оставлен как есть — это запись того, что было сделано. Матчинг по имени заменён на матчинг по `DeviceId`: ревью Task 2 показало, что посылка «cpal не даёт стабильных идентификаторов» ложна. Тесты и сигнатуры этой задачи переписаны в Task 2a; реализовывать её текст заново не нужно.
+
 Единственная часть выбора устройства, которую можно проверить без железа. Ошибка здесь (сравнение подстрокой вместо равенства, перепутанный порядок) даёт не отказ, а тихо не то устройство — то есть ровно тот класс бага, из-за которого спека и появилась.
 
 **Files:**
@@ -164,6 +166,8 @@ git commit -m "feat(capture): DeviceChoice и матчинг устройств�
 ---
 
 ### Task 2: Разрешение устройства и разделение build_capture
+
+> **Частично отменена задачей Task 2a.** Разделение `build_capture` на две функции остаётся в силе; `list_input_devices` и `resolve_input` переписаны в Task 2a на идентификаторы вместо имён. Текст ниже — запись сделанного, реализовывать заново не нужно.
 
 Сейчас `build_capture` — одна функция с тремя `match source` внутри; выбор устройства касается только микрофона и дал бы четвёртый матч с `unreachable` в одной ветке.
 
@@ -323,6 +327,215 @@ git commit -m "refactor(capture): разделить build_capture на mic и l
 
 ---
 
+### Task 2a: Перевод выбора устройства с имени на DeviceId
+
+Задача-исправление, заведённая по находке ревью Task 2. Первая редакция спеки опиралась на утверждение «cpal не даёт стабильных идентификаторов, имя — единственное, что есть». Оно ложно: в cpal 0.18.1 есть `DeviceTrait::id() -> Result<DeviceId, Error>`, на Windows это `IMMDevice::GetId()`, а докблок типа предписывает персистить его через `Display`/`FromStr` — ровно наш сценарий.
+
+Матчинг по имени ломается, когда устройство переименовали в системе или когда два эндпоинта названы одинаково, и ломается тихо — откатом на дефолт. Это тот же класс отказа, ради которого писалась вся правка.
+
+**Files:**
+- Modify: `src/capture/mod.rs`
+
+**Interfaces:**
+- Заменяет: `DeviceChoice::Named(String)` → `DeviceChoice::Id(String)`
+- Заменяет: `pick(names: &[String], …)` → `pick(ids: &[String], …)`
+- Заменяет: `list_input_devices() -> Result<Vec<String>, _>` → `-> Result<Vec<InputDevice>, _>`
+- Produces: `pub struct InputDevice { pub id: String, pub name: String }`
+
+- [ ] **Step 1: Переписать тесты под идентификаторы**
+
+Заменить шесть тестов, добавленных в Task 1, на эти. Идентификаторы взяты в формате реальных WASAPI-эндпоинтов, чтобы тест читался как настоящий случай, а не как абстрактная строка:
+
+```rust
+    fn идентификаторы() -> Vec<String> {
+        vec![
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000001}".to_string(),
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000002}".to_string(),
+            "{0.0.1.00000000}.{a1b2c3d4-0000-0000-0000-000000000003}".to_string(),
+        ]
+    }
+
+    #[test]
+    fn дефолт_не_выбирает_никого_из_списка() {
+        assert_eq!(
+            pick(&идентификаторы(), &DeviceChoice::Default),
+            None,
+            "Default означает «спросить систему», а не «взять первое из списка»"
+        );
+    }
+
+    #[test]
+    fn устройство_ищется_точным_совпадением_идентификатора() {
+        assert_eq!(
+            pick(&идентификаторы(), &DeviceChoice::Id(идентификаторы()[1].clone())),
+            Some(1)
+        );
+    }
+
+    /// Префикс — не совпадение. Эндпоинт-идентификаторы WASAPI различаются
+    /// хвостом GUID, и нестрогий матчинг (`starts_with`/`contains`) выбрал бы
+    /// первое попавшееся устройство того же контейнера — молча и не то.
+    #[test]
+    fn префикс_идентификатора_не_считается_совпадением() {
+        assert_eq!(
+            pick(&идентификаторы(), &DeviceChoice::Id("{0.0.1.00000000}".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn отсутствующее_устройство_даёт_none() {
+        assert_eq!(
+            pick(&идентификаторы(), &DeviceChoice::Id("{0.0.1.00000000}.{нет-такого}".into())),
+            None
+        );
+    }
+
+    /// Пустая строка приходит из `resolve_input`, когда у устройства не
+    /// прочитался дескриптор. Она обязана не совпасть ни с чем, а не выбрать
+    /// случайного соседа.
+    #[test]
+    fn пустой_идентификатор_ни_с_чем_не_совпадает() {
+        assert_eq!(pick(&идентификаторы(), &DeviceChoice::Id(String::new())), None);
+    }
+
+    #[test]
+    fn пустой_список_не_паникует() {
+        assert_eq!(pick(&[], &DeviceChoice::Id("что-нибудь".into())), None);
+        assert_eq!(pick(&[], &DeviceChoice::Default), None);
+    }
+```
+
+- [ ] **Step 2: Прогнать тесты и убедиться, что они падают**
+
+Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && cargo.exe test -p meeting-recorder pick 2>&1 | tail -20`
+
+Expected: ошибка компиляции — `no variant named 'Id' found for enum 'DeviceChoice'`.
+
+- [ ] **Step 3: Переписать типы и разрешение устройства**
+
+```rust
+/// Какой микрофон брать. `Default` — тот, что выбран в системе.
+///
+/// Идентификатор, а не имя. `DeviceTrait::id()` на Windows отдаёт
+/// `IMMDevice::GetId()` — эндпоинт-идентификатор WASAPI, стабильный между
+/// перезапусками и переименованиями; докблок `DeviceId` прямо предписывает
+/// персистить его через `Display`/`FromStr`. Имя же меняется в настройках
+/// системы и не уникально, а промах по нему выглядит как тихий откат на
+/// системный дефолт — тот самый отказ, который эта фича и устраняет.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DeviceChoice {
+    #[default]
+    Default,
+    Id(String),
+}
+
+/// Устройство записи для выпадашки: чем искать и что показать.
+///
+/// Имя здесь — исключительно для глаз. Матчинг по нему не идёт нигде, иначе
+/// хрупкость вернулась бы через чёрный ход.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub id: String,
+    pub name: String,
+}
+
+/// Индекс выбранного устройства в списке идентификаторов.
+///
+/// Сравнение строго по равенству: эндпоинт-идентификаторы разделяют префикс
+/// контейнера, и нестрогий матчинг выбрал бы соседнее устройство.
+fn pick(ids: &[String], choice: &DeviceChoice) -> Option<usize> {
+    match choice {
+        DeviceChoice::Default => None,
+        DeviceChoice::Id(want) => ids.iter().position(|id| id == want),
+    }
+}
+```
+
+Чтение идентификатора и имени — одним хелпером, чтобы `list_input_devices` и `resolve_input` не разошлись:
+
+```rust
+/// Идентификатор устройства строкой. `None` — дескриптор не читается.
+///
+/// `DeviceId` персистится через `Display`, поэтому строка — это и есть его
+/// каноническая форма, а не наше изобретение.
+fn device_id(d: &cpal::Device) -> Option<String> {
+    d.id().ok().map(|id| id.to_string())
+}
+```
+
+`list_input_devices` отдаёт пары. Устройство, у которого не читается идентификатор ИЛИ имя, пропускается: выбрать его всё равно нельзя, а показать в списке — значит предложить то, что не запомнится.
+
+```rust
+pub fn list_input_devices() -> Result<Vec<InputDevice>, CaptureError> {
+    let host = cpal::default_host();
+    Ok(host
+        .input_devices()?
+        .filter_map(|d| {
+            let id = device_id(&d)?;
+            let name = d.description().ok()?.name().to_string();
+            Some(InputDevice { id, name })
+        })
+        .collect())
+}
+```
+
+`resolve_input` ищет по идентификаторам. Длины `ids` и `devices` обязаны совпадать, поэтому здесь `map` с `unwrap_or_default`, а не `filter_map`: нечитаемый идентификатор превращается в пустую строку, которая не совпадёт ни с чем (это сторожит тест `пустой_идентификатор_ни_с_чем_не_совпадает`).
+
+```rust
+pub fn resolve_input(choice: &DeviceChoice) -> Result<Resolved, CaptureError> {
+    let host = cpal::default_host();
+    if let DeviceChoice::Id(want) = choice {
+        let devices: Vec<cpal::Device> = host.input_devices()?.collect();
+        let ids: Vec<String> = devices
+            .iter()
+            .map(|d| device_id(d).unwrap_or_default())
+            .collect();
+        if let Some(i) = pick(&ids, choice) {
+            return Ok(Resolved {
+                device: devices.into_iter().nth(i).expect("индекс из pick валиден"),
+                fell_back_from: None,
+            });
+        }
+        let device = host
+            .default_input_device()
+            .ok_or(CaptureError::NoDevice(Source::Mic))?;
+        return Ok(Resolved {
+            device,
+            fell_back_from: Some(want.clone()),
+        });
+    }
+    let device = host
+        .default_input_device()
+        .ok_or(CaptureError::NoDevice(Source::Mic))?;
+    Ok(Resolved {
+        device,
+        fell_back_from: None,
+    })
+}
+```
+
+Докблок `Resolved::fell_back_from` поправить: он несёт **идентификатор**, а человеческое имя подставляет GUI из конфига.
+
+- [ ] **Step 4: Прогнать тесты**
+
+Run: `cargo.exe test --workspace 2>&1 | tail -20`
+
+Expected: `test result: ok`, шесть переписанных тестов зелёные, остальные не тронуты. Заглушка в `src/app.rs` (`DeviceChoice::Default`) продолжает компилироваться — вариант `Default` не менялся.
+
+- [ ] **Step 5: Закоммитить**
+
+```bash
+git add src/capture/mod.rs
+git commit -m "fix(capture): искать устройство по стабильному DeviceId, а не по имени
+
+Имя ломается при переименовании устройства в системе и при двух одинаково
+названных эндпоинтах, причём тихо — откатом на дефолт. cpal 0.18.1 отдаёт
+IMMDevice::GetId() через DeviceTrait::id и предписывает персистить его."
+```
+
+---
+
 ### Task 3: App принимает выбор устройства и отдаёт предупреждение о подмене
 
 **Files:**
@@ -415,10 +628,10 @@ git commit -m "refactor(capture): разделить build_capture на mic и l
     fn выбор_устройства_доезжает_до_захвата() {
         let ж = журнал();
         let (mut app, выбор) = стенд_с_устройством(&ж, None);
-        app.set_mic_device(DeviceChoice::Named("Headset (Boss Bose)".into()));
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
         assert_eq!(
             *выбор.borrow(),
-            Some(DeviceChoice::Named("Headset (Boss Bose)".into())),
+            Some(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into())),
             "App не хранит выбор сам — он обязан уехать в AudioIo"
         );
     }
@@ -575,7 +788,7 @@ git commit -m "feat(app): выбор микрофона доезжает до з
 **Interfaces:**
 - Consumes: `App::set_mic_device`, `DeviceChoice` (Task 3), `list_input_devices` (Task 2)
 - Produces:
-  - `Config { pub mic_device: Option<String> }`, `Config::load(&AppHandle) -> Config`, `Config::save(&self, &AppHandle) -> Result<(), String>`
+  - `Config { pub mic_device_id: Option<String>, pub mic_device_name: Option<String> }`, `Config::load(&AppHandle) -> Config`, `Config::save(&self, &AppHandle) -> Result<(), String>`
   - Tauri-команды `list_mic_devices() -> Result<Vec<String>, String>`, `get_config() -> Config`, `set_mic_device(name: Option<String>) -> Result<(), String>`
   - `Ctl::SetMicDevice(DeviceChoice)`
 
@@ -602,14 +815,23 @@ mod tests {
     }
 
     #[test]
-    fn имя_устройства_превращается_в_named() {
+    fn идентификатор_устройства_превращается_в_id() {
         let c = Config {
-            mic_device: Some("Headset (Boss Bose)".into()),
+            mic_device_id: Some("{0.0.1.00000000}.{guid}".into()),
+            mic_device_name: Some("Headset (Boss Bose)".into()),
         };
-        assert_eq!(
-            c.choice(),
-            DeviceChoice::Named("Headset (Boss Bose)".into())
-        );
+        assert_eq!(c.choice(), DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+    }
+
+    /// Имя — только для показа. Конфиг с одним именем и без идентификатора
+    /// матчить нечем, и притворяться, что устройство выбрано, нельзя.
+    #[test]
+    fn одно_имя_без_идентификатора_это_дефолт() {
+        let c = Config {
+            mic_device_id: None,
+            mic_device_name: Some("Headset (Boss Bose)".into()),
+        };
+        assert_eq!(c.choice(), DeviceChoice::Default);
     }
 
     /// Битый JSON — это потерянная настройка, а не потерянная запись.
@@ -620,8 +842,9 @@ mod tests {
 
     #[test]
     fn незнакомые_поля_не_ломают_разбор() {
-        let c = Config::from_str(r#"{"mic_device":"Yeti","что_то_новое":42}"#);
-        assert_eq!(c.mic_device.as_deref(), Some("Yeti"));
+        let c = Config::from_str(r#"{"mic_device_id":"{id}","что_то_новое":42}"#);
+        assert_eq!(c.mic_device_id.as_deref(), Some("{id}"));
+        assert_eq!(c.mic_device_name, None, "отсутствующее поле — не ошибка");
     }
 }
 ```
@@ -651,14 +874,18 @@ use tauri::{AppHandle, Manager};
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// Имя устройства из `cpal`. `None` — системный дефолт.
-    pub mic_device: Option<String>,
+    /// Идентификатор эндпоинта (`DeviceId` строкой). `None` — системный дефолт.
+    pub mic_device_id: Option<String>,
+    /// Имя на момент выбора. Только для показа: подставляется в выпадашку и в
+    /// предупреждение о подмене, чтобы пользователь видел «Headset (Boss Bose)»,
+    /// а не `{0.0.1.00000000}.{guid}`. Матчинг по нему не идёт нигде.
+    pub mic_device_name: Option<String>,
 }
 
 impl Config {
     pub fn choice(&self) -> DeviceChoice {
-        match &self.mic_device {
-            Some(n) => DeviceChoice::Named(n.clone()),
+        match &self.mic_device_id {
+            Some(id) => DeviceChoice::Id(id.clone()),
             None => DeviceChoice::Default,
         }
     }
@@ -766,10 +993,27 @@ mod config;
 
 use config::Config;
 
-/// Имена доступных микрофонов для выпадашки.
+/// Доступные микрофоны для выпадашки: идентификатор и что показать.
+///
+/// `InputDevice` уже `Serialize`? Нет — он в ядре, где serde не подключён.
+/// Поэтому здесь своя DTO: тащить serde в ядро ради одной структуры значило бы
+/// расширить его зависимости под нужду GUI.
+#[derive(serde::Serialize)]
+struct MicDevice {
+    id: String,
+    name: String,
+}
+
 #[tauri::command]
-fn list_mic_devices() -> Result<Vec<String>, String> {
-    meeting_recorder::capture::list_input_devices().map_err(|e| e.to_string())
+fn list_mic_devices() -> Result<Vec<MicDevice>, String> {
+    Ok(meeting_recorder::capture::list_input_devices()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|d| MicDevice {
+            id: d.id,
+            name: d.name,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -777,14 +1021,21 @@ fn get_config(app: AppHandle) -> Config {
     Config::load(&app)
 }
 
-/// `None` — вернуться на системный дефолт.
+/// `id: None` — вернуться на системный дефолт.
+///
+/// Имя приходит вместе с идентификатором и сохраняется рядом: когда устройства
+/// не окажется в системе, показать пользователю будет нечего, кроме него.
 #[tauri::command]
 fn set_mic_device(
+    id: Option<String>,
     name: Option<String>,
     state: tauri::State<Cmd>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let cfg = Config { mic_device: name };
+    let cfg = Config {
+        mic_device_id: id,
+        mic_device_name: name,
+    };
     cfg.save(&app)?;
     state
         .send(Ctl::SetMicDevice(cfg.choice()))
@@ -829,6 +1080,9 @@ fn set_mic_device(
 `ui/main.js` — заполнение и сохранение:
 
 ```js
+// Значение <option> — идентификатор эндпоинта, подпись — имя. Пользователь
+// выбирает глазами по имени, приложение запоминает идентификатор: имя может
+// поменяться в настройках Windows, идентификатор — нет.
 async function обновить_устройства() {
   try {
     const [устройства, конфиг] = await Promise.all([
@@ -841,31 +1095,38 @@ async function обновить_устройства() {
     дефолт.value = "";
     дефолт.textContent = "Системный по умолчанию";
     sel.append(дефолт);
-    for (const имя of устройства) {
+    for (const у of устройства) {
       const o = document.createElement("option");
-      o.value = имя;
-      o.textContent = имя;
+      o.value = у.id;
+      o.textContent = у.name;
       sel.append(o);
     }
     // Сохранённое устройство может отсутствовать прямо сейчас (гарнитура
     // выключена). Показываем его как выбранное всё равно — иначе выпадашка
-    // молча «забыла» бы настройку, которая на самом деле цела.
-    const сохранено = конфиг.mic_device ?? "";
-    if (сохранено && !устройства.includes(сохранено)) {
+    // молча «забыла» бы настройку, которая на самом деле цела. Подпись берём
+    // из конфига: имени в системе сейчас нет, спросить его не у кого.
+    const сохранён = конфиг.mic_device_id ?? "";
+    if (сохранён && !устройства.some((у) => у.id === сохранён)) {
       const o = document.createElement("option");
-      o.value = сохранено;
-      o.textContent = `${сохранено} (сейчас недоступен)`;
+      o.value = сохранён;
+      o.textContent = `${конфиг.mic_device_name ?? сохранён} (сейчас недоступен)`;
       sel.append(o);
     }
-    sel.value = сохранено;
+    sel.value = сохранён;
   } catch (e) {
     показать_ошибку(String(e));
   }
 }
 
 $("mic").addEventListener("change", async (e) => {
+  const выбран = e.target.selectedOptions[0];
+  const id = e.target.value || null;
   try {
-    await invoke("set_mic_device", { name: e.target.value || null });
+    await invoke("set_mic_device", {
+      id,
+      // Дефолт («Системный по умолчанию») — не устройство, имя ему не нужно.
+      name: id ? выбран.textContent.replace(" (сейчас недоступен)", "") : null,
+    });
     показать_ошибку("");
   } catch (err) {
     показать_ошибку(String(err));
@@ -966,15 +1227,25 @@ Expected: `no method named 'set_device_warning'`.
 В `src-tauri/src/audio.rs`, функция `sync` — добавить после блока с состоянием:
 
 ```rust
+    // Наверх идёт ИДЕНТИФИКАТОР эндпоинта: аудио-поток знает только его.
+    // Человеческое имя подставляет тот, у кого есть конфиг, — окно (для баннера)
+    // и код ниже (для тоста, который до окна не доходит).
     let warn = app.device_warning();
     if status.set_device_warning(warn.as_deref()) {
         let _ = handle.emit("device-warning", warn.clone());
-        if let Some(w) = warn {
+        if let Some(id) = warn {
+            // Тост показывается и при закрытом окне, поэтому имя ему нужно
+            // здесь; конфиг читается только в момент изменения, а не каждый тик.
+            let имя = crate::config::Config::load(handle)
+                .mic_device_name
+                .unwrap_or(id);
             let _ = handle
                 .notification()
                 .builder()
                 .title("Пишется не тот микрофон")
-                .body(format!("«{w}» недоступен — запись идёт с системного по умолчанию."))
+                .body(format!(
+                    "«{имя}» недоступен — запись идёт с системного по умолчанию."
+                ))
                 .show();
         }
     }
@@ -1007,12 +1278,26 @@ Expected: `no method named 'set_device_warning'`.
 `ui/main.js`:
 
 ```js
-function показать_предупреждение_устройства(имя) {
+// Приходит идентификатор эндпоинта — показывать его пользователю бессмысленно.
+// Имя берём из конфига: в системе устройства сейчас нет, спросить не у кого.
+async function показать_предупреждение_устройства(id) {
   const el = $("devwarn");
-  el.classList.toggle("on", Boolean(имя));
-  el.textContent = имя
-    ? `Микрофон «${имя}» недоступен — пишется системный по умолчанию.`
-    : "";
+  el.classList.toggle("on", Boolean(id));
+  if (!id) {
+    el.textContent = "";
+    return;
+  }
+  let имя = id;
+  try {
+    const конфиг = await invoke("get_config");
+    if (конфиг.mic_device_id === id && конфиг.mic_device_name) {
+      имя = конфиг.mic_device_name;
+    }
+  } catch {
+    // Не смогли прочитать конфиг — покажем идентификатор. Предупреждение
+    // важнее его читаемости: молчать здесь нельзя.
+  }
+  el.textContent = `Микрофон «${имя}» недоступен — пишется системный по умолчанию.`;
 }
 ```
 

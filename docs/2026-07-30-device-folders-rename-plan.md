@@ -187,12 +187,19 @@ git commit -m "feat(capture): DeviceChoice и матчинг устройств�
 ```rust
 /// Имена всех доступных устройств записи — для выпадашки в UI.
 ///
-/// Устройство, у которого имя не читается, пропускается: `Device::name()` ходит
-/// в WASAPI и может отказать на отдельном эндпоинте, и ронять из-за него весь
-/// список неправильно — остальные устройства выбрать по-прежнему можно.
+/// Устройство, у которого имя не читается, пропускается: `Device::description()`
+/// ходит в WASAPI и может отказать на отдельном эндпоинте, и ронять из-за него
+/// весь список неправильно — остальные устройства выбрать по-прежнему можно.
+///
+/// Имя берётся через `description()`, а НЕ через `Device::name()`: в закреплённой
+/// здесь cpal 0.18.1 метода `name()` у `Device` нет, он заменён на
+/// `description() -> Result<DeviceDescription, _>` с `DeviceDescription::name()`.
 pub fn list_input_devices() -> Result<Vec<String>, CaptureError> {
     let host = cpal::default_host();
-    Ok(host.input_devices()?.filter_map(|d| d.name().ok()).collect())
+    Ok(host
+        .input_devices()?
+        .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
+        .collect())
 }
 
 /// Устройство записи плюс признак того, что взяли не то, о чём просили.
@@ -213,7 +220,11 @@ pub fn resolve_input(choice: &DeviceChoice) -> Result<Resolved, CaptureError> {
         let devices: Vec<cpal::Device> = host.input_devices()?.collect();
         let names: Vec<String> = devices
             .iter()
-            .map(|d| d.name().unwrap_or_default())
+            .map(|d| {
+                d.description()
+                    .map(|desc| desc.name().to_string())
+                    .unwrap_or_default()
+            })
             .collect();
         if let Some(i) = pick(&names, choice) {
             return Ok(Resolved {

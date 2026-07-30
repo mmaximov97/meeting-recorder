@@ -95,7 +95,9 @@ async function обновить_список() {
       мета.className = "meta";
       // Отсутствие дорожки — не косметика: пара mic+system и есть запись.
       const дорожки = [з.mic ? "mic" : null, з.system ? "system" : null].filter(Boolean);
-      мета.textContent = `${дорожки.join(" + ")} · ${размер(з.size)}`;
+      const части = [дорожки.join(" + "), размер(з.size)];
+      if (з.folder) части.unshift(з.folder);
+      мета.textContent = части.join(" · ");
       if (!з.mic || !з.system) {
         мета.classList.add("warn");
         мета.textContent += " · дорожка отсутствует";

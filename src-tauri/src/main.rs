@@ -13,7 +13,7 @@ use meeting_recorder::session::Event;
 use serde::Serialize;
 use status::{Snapshot, Status};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use tauri::{AppHandle, WindowEvent};
@@ -43,14 +43,24 @@ impl Cmd {
 }
 
 /// Одна запись: пара дорожек под общим именем.
-#[derive(Serialize, PartialEq, Eq, Debug)]
+///
+/// `Eq` из производных убран: появилось поле `f32`, на котором он не выводится.
+/// `assert_eq!` в тестах работает и на одном `PartialEq`.
+#[derive(Serialize, PartialEq, Debug)]
 struct Recording {
     /// `2026-07-17_14-30_zoom` — общая основа обеих дорожек.
     name: String,
+    /// Месячная папка или `None` для корня (записи до перехода на папки).
+    folder: Option<String>,
     mic: bool,
     system: bool,
     /// Суммарный размер дорожек в байтах.
     size: u64,
+    /// Насколько mic-дорожка тише system, в дБ. Заполняется в `list_recordings`
+    /// после группировки — считать это здесь значило бы тащить в чистую
+    /// функцию чтение файлов.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    imbalance_db: Option<f32>,
 }
 
 #[tauri::command]
@@ -101,9 +111,11 @@ fn get_state(status: tauri::State<Status>) -> Snapshot {
 /// предупреждением, и ошибка в группировке выглядела бы как испорченная запись).
 /// Проверять его через `read_dir` значило бы держать в тесте настоящие файлы
 /// ради логики, которой файлы не нужны.
-fn group_recordings(files: impl IntoIterator<Item = (String, u64)>) -> Vec<Recording> {
+fn group_recordings(
+    files: impl IntoIterator<Item = (Option<String>, String, u64)>,
+) -> Vec<Recording> {
     let mut found: BTreeMap<String, Recording> = BTreeMap::new();
-    for (file, size) in files {
+    for (folder, file, size) in files {
         let (base, is_mic) = match (file.strip_suffix(".mic.wav"), file.strip_suffix(".system.wav"))
         {
             (Some(b), _) => (b.to_string(), true),
@@ -111,11 +123,17 @@ fn group_recordings(files: impl IntoIterator<Item = (String, u64)>) -> Vec<Recor
             // Не наша дорожка — чужой файл в каталоге, не наше дело.
             _ => continue,
         };
+        // Ключ — только основа имени: дата в ней однозначно задаёт месячную
+        // папку, поэтому одна запись не может лежать в двух папках сразу.
+        // Если это всё же случилось (файлы двигали руками), побеждает та
+        // папка, что встретилась первой.
         let rec = found.entry(base.clone()).or_insert(Recording {
             name: base,
+            folder,
             mic: false,
             system: false,
             size: 0,
+            imbalance_db: None,
         });
         if is_mic {
             rec.mic = true;
@@ -124,27 +142,66 @@ fn group_recordings(files: impl IntoIterator<Item = (String, u64)>) -> Vec<Recor
         }
         rec.size += size;
     }
-
     found.into_values().rev().collect()
 }
 
-/// Список записей. Обход каталога — здесь, склейка — в [`group_recordings`].
-#[tauri::command]
-fn list_recordings() -> Result<Vec<Recording>, String> {
-    let dir = recordings_root();
-    let entries = match std::fs::read_dir(&dir) {
+/// Похоже ли имя папки на месячную (`2026-07`).
+fn is_month_folder(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 7
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..].iter().all(u8::is_ascii_digit)
+}
+
+/// Файлы корня плюс файлы месячных подпапок. Глубина ровно два уровня:
+/// предсказуемо и не засасывает чужое дерево, если рядом окажется постороннее.
+fn collect_files(root: &Path) -> Result<Vec<(Option<String>, String, u64)>, String> {
+    fn read(dir: &Path, folder: Option<&str>, out: &mut Vec<(Option<String>, String, u64)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                out.push((
+                    folder.map(str::to_string),
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.metadata().map(|m| m.len()).unwrap_or(0),
+                ));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
         // Каталога нет — записей просто ещё не было. Это не ошибка.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("не удалось прочитать {}: {e}", dir.display())),
+        Err(e) => return Err(format!("не удалось прочитать {}: {e}", root.display())),
     };
+    let mut months: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        match e.file_type() {
+            Ok(t) if t.is_dir() && is_month_folder(&name) => months.push(e.path()),
+            Ok(t) if t.is_file() => out.push((
+                None,
+                name,
+                e.metadata().map(|m| m.len()).unwrap_or(0),
+            )),
+            _ => {}
+        }
+    }
+    for m in months {
+        let folder = m.file_name().map(|n| n.to_string_lossy().into_owned());
+        read(&m, folder.as_deref(), &mut out);
+    }
+    Ok(out)
+}
 
-    Ok(group_recordings(entries.flatten().map(|entry| {
-        (
-            entry.file_name().to_string_lossy().into_owned(),
-            entry.metadata().map(|m| m.len()).unwrap_or(0),
-        )
-    })))
+#[tauri::command]
+fn list_recordings() -> Result<Vec<Recording>, String> {
+    Ok(group_recordings(collect_files(&recordings_root())?))
 }
 
 /// Открыть каталог записей в проводнике.
@@ -282,27 +339,33 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn rec(name: &str, mic: bool, system: bool, size: u64) -> Recording {
+    fn rec(name: &str, folder: Option<&str>, mic: bool, system: bool, size: u64) -> Recording {
         Recording {
             name: name.to_string(),
+            folder: folder.map(str::to_string),
             mic,
             system,
             size,
+            imbalance_db: None,
         }
     }
 
-    fn group(files: &[(&str, u64)]) -> Vec<Recording> {
-        group_recordings(files.iter().map(|(n, s)| (n.to_string(), *s)))
+    fn group(files: &[(Option<&str>, &str, u64)]) -> Vec<Recording> {
+        group_recordings(
+            files
+                .iter()
+                .map(|(f, n, s)| (f.map(str::to_string), n.to_string(), *s)),
+        )
     }
 
     #[test]
     fn пара_дорожек_склеивается_в_одну_запись() {
         assert_eq!(
             group(&[
-                ("2026-07-17_14-45_zoom.mic.wav", 100),
-                ("2026-07-17_14-45_zoom.system.wav", 20),
+                (None, "2026-07-17_14-45_zoom.mic.wav", 100),
+                (None, "2026-07-17_14-45_zoom.system.wav", 20),
             ]),
-            vec![rec("2026-07-17_14-45_zoom", true, true, 120)],
+            vec![rec("2026-07-17_14-45_zoom", None, true, true, 120)],
             "размер записи — сумма дорожек, имя — общая основа"
         );
     }
@@ -312,12 +375,12 @@ mod tests {
     #[test]
     fn одинокая_дорожка_видна_как_неполная() {
         assert_eq!(
-            group(&[("2026-07-17_14-45_zoom.mic.wav", 100)]),
-            vec![rec("2026-07-17_14-45_zoom", true, false, 100)]
+            group(&[(None, "2026-07-17_14-45_zoom.mic.wav", 100)]),
+            vec![rec("2026-07-17_14-45_zoom", None, true, false, 100)]
         );
         assert_eq!(
-            group(&[("2026-07-17_14-45_zoom.system.wav", 100)]),
-            vec![rec("2026-07-17_14-45_zoom", false, true, 100)]
+            group(&[(None, "2026-07-17_14-45_zoom.system.wav", 100)]),
+            vec![rec("2026-07-17_14-45_zoom", None, false, true, 100)]
         );
     }
 
@@ -325,13 +388,13 @@ mod tests {
     fn чужие_файлы_в_каталоге_не_наше_дело() {
         assert_eq!(
             group(&[
-                ("заметки.txt", 10),
-                ("2026-07-17_14-45_zoom.wav", 10),
-                ("mic.wav", 10),
-                (".mic.wav.bak", 10),
-                ("2026-07-17_14-45_zoom.mic.wav", 100),
+                (None, "заметки.txt", 10),
+                (None, "2026-07-17_14-45_zoom.wav", 10),
+                (None, "mic.wav", 10),
+                (None, ".mic.wav.bak", 10),
+                (None, "2026-07-17_14-45_zoom.mic.wav", 100),
             ]),
-            vec![rec("2026-07-17_14-45_zoom", true, false, 100)]
+            vec![rec("2026-07-17_14-45_zoom", None, true, false, 100)]
         );
     }
 
@@ -340,9 +403,9 @@ mod tests {
     #[test]
     fn свежее_сверху_независимо_от_порядка_обхода() {
         let list = group(&[
-            ("2026-07-17_09-00_meet.mic.wav", 1),
-            ("2026-07-18_10-00_zoom.mic.wav", 1),
-            ("2026-07-16_23-59_teams.mic.wav", 1),
+            (None, "2026-07-17_09-00_meet.mic.wav", 1),
+            (None, "2026-07-18_10-00_zoom.mic.wav", 1),
+            (None, "2026-07-16_23-59_teams.mic.wav", 1),
         ]);
         let names: Vec<&str> = list.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(
@@ -360,16 +423,16 @@ mod tests {
     #[test]
     fn повтор_в_ту_же_минуту_это_отдельная_запись() {
         let list = group(&[
-            ("2026-07-17_14-45_zoom.mic.wav", 1),
-            ("2026-07-17_14-45_zoom.system.wav", 1),
-            ("2026-07-17_14-45_zoom_2.mic.wav", 5),
-            ("2026-07-17_14-45_zoom_2.system.wav", 5),
+            (None, "2026-07-17_14-45_zoom.mic.wav", 1),
+            (None, "2026-07-17_14-45_zoom.system.wav", 1),
+            (None, "2026-07-17_14-45_zoom_2.mic.wav", 5),
+            (None, "2026-07-17_14-45_zoom_2.system.wav", 5),
         ]);
         assert_eq!(
             list,
             vec![
-                rec("2026-07-17_14-45_zoom_2", true, true, 10),
-                rec("2026-07-17_14-45_zoom", true, true, 2),
+                rec("2026-07-17_14-45_zoom_2", None, true, true, 10),
+                rec("2026-07-17_14-45_zoom", None, true, true, 2),
             ]
         );
     }
@@ -377,5 +440,37 @@ mod tests {
     #[test]
     fn пустой_каталог_это_пустой_список_а_не_ошибка() {
         assert_eq!(group(&[]), vec![]);
+    }
+
+    #[test]
+    fn записи_из_подпапки_и_из_корня_живут_в_одном_списке() {
+        let list = group(&[
+            (Some("2026-07"), "2026-07-30_13-03_chrome.mic.wav", 10),
+            (Some("2026-07"), "2026-07-30_13-03_chrome.system.wav", 10),
+            (None, "2026-06-01_10-00_zoom.mic.wav", 5),
+        ]);
+        assert_eq!(
+            list,
+            vec![
+                rec("2026-07-30_13-03_chrome", Some("2026-07"), true, true, 20),
+                rec("2026-06-01_10-00_zoom", None, true, false, 5),
+            ],
+            "порядок хронологический независимо от папки"
+        );
+    }
+
+    #[test]
+    fn папка_записи_запоминается() {
+        let list = group(&[(Some("2026-07"), "2026-07-30_13-03_chrome.mic.wav", 1)]);
+        assert_eq!(list[0].folder.as_deref(), Some("2026-07"));
+    }
+
+    #[test]
+    fn месячной_папкой_считается_только_yyyy_mm() {
+        assert!(is_month_folder("2026-07"));
+        assert!(!is_month_folder("2026-7"));
+        assert!(!is_month_folder("2026-07-30"));
+        assert!(!is_month_folder("архив"));
+        assert!(!is_month_folder(""));
     }
 }

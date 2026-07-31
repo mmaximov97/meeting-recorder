@@ -12,6 +12,10 @@
         --muted: #6b6b6b;
         --line: #e3e3e3;
         --accent: #2f6fed;
+        /* Одинаков в обеих темах: оранжевый читается и на белом, и на тёмном,
+           а второе объявление в dark-блоке только создало бы место, где эти
+           два значения однажды разъедутся. */
+        --warn: #d0761a;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -67,11 +71,11 @@
       }
       #devwarn {
         display: none;
-        border: 1px solid #d0761a;
+        border: 1px solid var(--warn);
         border-radius: 8px;
         padding: 10px 12px;
         margin-bottom: 12px;
-        color: #d0761a;
+        color: var(--warn);
       }
       #devwarn.on {
         display: block;
@@ -173,9 +177,20 @@
         flex: 1;
         min-width: 0;
       }
+      /* Кнопка есть в каждой строке, поэтому по умолчанию она молчит: шесть
+         одинаковых акцентных прямоугольников перетягивали внимание с самих
+         записей. Прятать её до наведения нельзя — потеряется доступ с
+         клавиатуры, поэтому она остаётся на месте, но проявляется по фокусу. */
       .rename {
         padding: 4px 8px;
         font-size: 12px;
+        border-color: transparent;
+        color: var(--muted);
+      }
+      .rename:hover,
+      .rename:focus-visible {
+        border-color: var(--accent);
+        color: var(--fg);
       }
       .tail-input {
         font: inherit;
@@ -200,7 +215,7 @@
         font-size: 12px;
       }
       .warn {
-        color: #d0761a;
+        color: var(--warn);
       }
       .empty,
       #err {

@@ -100,10 +100,25 @@
       select {
         font: inherit;
         flex: 1;
+        /* Без этого флекс-элемент не сжимается ниже своего содержимого: самое
+           длинное имя устройства («Microphone Array (Intel® Smart Sound
+           Technology (Intel® SST))») распирало строку, кнопка «Проверить»
+           уезжала за край окна, а внизу появлялась горизонтальная прокрутка.
+           Тот же приём уже стоит на `.grow` в списке записей. */
+        min-width: 0;
         padding: 7px 8px;
         border-radius: 6px;
         border: 1px solid var(--line);
-        background: transparent;
+        /* Не `transparent`: при прозрачном фоне нативный попап рисует себя
+           светлым, а буквы остаются цвета --fg — в тёмной теме почти белого.
+           Невыбранные пункты в таком попапе не видно. */
+        background: var(--bg);
+        color: var(--fg);
+      }
+      /* Попап рисует браузер, а не страница, и наследование цвета доходит в
+         него непоследовательно между версиями WebView2 — красим явно. */
+      option {
+        background: var(--bg);
         color: var(--fg);
       }
       .meters {
@@ -173,6 +188,12 @@
       }
       .name {
         font-variant-numeric: tabular-nums;
+        /* После переименования имя задаёт человек, и длинное распёрло бы строку
+           ровно так же, как это делала выпадашка. Полное имя остаётся в
+           подсказке — её ставит `обновить_список`. */
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .meta {
         color: var(--muted);

@@ -5,25 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Записи встреч</title>
     <style>
+      /* Палитра Tokyo Night — та же, что в терминале владельца.
+         Схема перенесена НЕ дословно: два её штатных сочетания не проходят по
+         контрасту, а это приложение на таком уже обжигалось (невидимые пункты
+         выпадашки). Заменены ровно два места, обоснование — в
+         docs/2026-08-03-tokyo-night-palette-design.md. */
       :root {
-        color-scheme: light dark;
-        --bg: #ffffff;
-        --fg: #1a1a1a;
-        --muted: #6b6b6b;
-        --line: #e3e3e3;
-        --accent: #2f6fed;
-        /* Одинаков в обеих темах: оранжевый читается и на белом, и на тёмном,
-           а второе объявление в dark-блоке только создало бы место, где эти
-           два значения однажды разъедутся. */
-        --warn: #d0761a;
-      }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #1e1e1e;
-          --fg: #eaeaea;
-          --muted: #9a9a9a;
-          --line: #333;
-        }
+        /* Не `light dark`: без явного `dark` движок рисует нативный попап
+           выпадашки светлым, и тёмные пункты в нём пропадают. */
+        color-scheme: dark;
+        --bg: #1a1b26;
+        --fg: #c0caf5;
+        /* Не комментарный #565f89 из схемы: он даёт 2.76:1 на этом фоне, а это
+           цвет мета-строки — размеры, децибелы, пометка перекоса. Здесь 4.54:1. */
+        --muted: #7982a9;
+        --line: #292e42;
+        --accent: #7aa2f7;
+        --warn: #e0af68;
+        --error: #f7768e;
+        /* Текст на акцентной кнопке. Белым по этому синему — 2.52:1, то есть
+           нечитаемая кнопка «Записать»; цветом фона схемы — 6.79:1. */
+        --on-accent: #1a1b26;
+        /* Шрифт терминала. Запасные не для красоты: 0xProto установлен для
+           пользователя, а не системно, и если DirectWrite его не отдаст, окно
+           должно остаться читаемым, а не поехать. */
+        --mono: "0xProto Nerd Font Mono", "Cascadia Mono", Consolas, monospace;
       }
       * {
         box-sizing: border-box;
@@ -46,14 +52,17 @@
         width: 10px;
         height: 10px;
         border-radius: 50%;
-        background: #888;
+        /* Покой — это и есть приглушённое состояние, поэтому тот же цвет, что у
+           второстепенного текста. Не #414868 из схемы: 1.91:1, лампочка на таком
+           фоне попросту не видна, а она несёт состояние. */
+        background: var(--muted);
         flex: none;
       }
       .lamp.armed {
-        background: #e6aa1e;
+        background: var(--warn);
       }
       .lamp.recording {
-        background: #dc3232;
+        background: var(--error);
       }
       /* Вопрос — не тост: кнопок в системном тосте на Windows нет, отвечают здесь. */
       #ask {
@@ -99,10 +108,12 @@
       button.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: #fff;
+        color: var(--on-accent);
       }
       select {
         font: inherit;
+        /* Имена устройств — данные, а не речь. */
+        font-family: var(--mono);
         flex: 1;
         /* Без этого флекс-элемент не сжимается ниже своего содержимого: самое
            длинное имя устройства («Microphone Array (Intel® Smart Sound
@@ -124,6 +135,9 @@
       option {
         background: var(--bg);
         color: var(--fg);
+        /* Шрифт задаётся явно по той же причине, что и цвета: попап рисует
+           движок, и наследование от `select` доходит в него ненадёжно. */
+        font-family: var(--mono);
       }
       /* Не предупреждение и не ошибка: приложение делает ровно то, что должно.
          Поэтому приглушённым цветом, а не --warn — это объяснение, а не тревога. */
@@ -166,6 +180,7 @@
         transition: width 0.12s linear;
       }
       h2 {
+        font-family: var(--mono);
         font-size: 13px;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -221,6 +236,11 @@
       }
       .tail-input {
         font: inherit;
+        /* Обязательно тот же, что у `.name`: при правке неизменяемый префикс и
+           редактируемый хвост стоят в одной строке, и разными шрифтами это
+           выглядит поломкой вёрстки. */
+        font-family: var(--mono);
+        font-variant-ligatures: none;
         width: 100%;
         padding: 4px 6px;
         border-radius: 4px;
@@ -229,6 +249,11 @@
         color: var(--fg);
       }
       .name {
+        font-family: var(--mono);
+        /* 0xProto склеивает последовательности вроде `->` и `==`. В имени файла
+           человек ждёт ровно те символы, что лежат на диске, а не глиф вместо
+           двух — лигатуры здесь вредны. */
+        font-variant-ligatures: none;
         font-variant-numeric: tabular-nums;
         /* После переименования имя задаёт человек, и длинное распёрло бы строку
            ровно так же, как это делала выпадашка. Полное имя остаётся в
@@ -238,6 +263,8 @@
         white-space: nowrap;
       }
       .meta {
+        font-family: var(--mono);
+        font-variant-ligatures: none;
         color: var(--muted);
         font-size: 12px;
       }
@@ -249,7 +276,7 @@
         color: var(--muted);
       }
       #err {
-        color: #dc3232;
+        color: var(--error);
         margin-top: 10px;
         min-height: 1em;
       }

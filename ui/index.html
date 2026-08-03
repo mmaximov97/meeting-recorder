@@ -125,6 +125,17 @@
         background: var(--bg);
         color: var(--fg);
       }
+      /* Не предупреждение и не ошибка: приложение делает ровно то, что должно.
+         Поэтому приглушённым цветом, а не --warn — это объяснение, а не тревога. */
+      #mic-deferred {
+        display: none;
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      #mic-deferred.on {
+        display: block;
+      }
       .meters {
         margin-top: 8px;
       }
@@ -262,6 +273,7 @@
       <select id="mic"></select>
       <button id="check">Проверить</button>
     </div>
+    <div id="mic-deferred">Применится к следующей записи — текущая пишется прежним микрофоном.</div>
     <div class="meters">
       <div class="meter"><span>Вы</span><div class="bar"><i id="lvl-mic"></i></div></div>
       <div class="meter"><span>Система</span><div class="bar"><i id="lvl-sys"></i></div></div>

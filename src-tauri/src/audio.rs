@@ -164,6 +164,13 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
                 .show();
         }
     }
+
+    // Тоста здесь нет намеренно: это не беда, а объяснение, и нужно оно ровно
+    // тому, кто прямо сейчас смотрит в выпадашку. Всплывашка поверх экрана
+    // посреди встречи была бы дороже пользы.
+    if status.set_mic_deferred(app.mic_change_deferred()) {
+        let _ = handle.emit("mic-deferred", app.mic_change_deferred());
+    }
 }
 
 /// Решение по одной команде: какое событие уходит в машину и надо ли после этого

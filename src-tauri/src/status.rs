@@ -45,6 +45,11 @@ pub struct Snapshot {
     /// конфиг, — тост в `audio.rs` и баннер в `ui/main.js`, оба через
     /// `Config::load`.
     pub device_warning: Option<String>,
+    /// `true` — устройство сменили под идущей записью, и она продолжает
+    /// писаться прежним. Не предупреждение и не ошибка: приложение делает
+    /// ровно то, что должно, — но без этой строки смена выглядит применённой,
+    /// хотя применится только к следующей записи.
+    pub mic_deferred: bool,
 }
 
 /// Разделяемое состояние. Живёт в `tauri::State`, пишется аудио-потоком (и теми,
@@ -74,6 +79,19 @@ impl Status {
             return false;
         }
         g.state = s;
+        true
+    }
+
+    /// Записать отложенность смены микрофона. `true` — изменилось, есть о чём
+    /// сообщать наружу. Снятие — тоже изменение: запись кончилась, следующая
+    /// возьмёт новое устройство, и висящая строка «применится к следующей»
+    /// стала бы враньём.
+    pub fn set_mic_deferred(&self, deferred: bool) -> bool {
+        let mut g = self.lock();
+        if g.mic_deferred == deferred {
+            return false;
+        }
+        g.mic_deferred = deferred;
         true
     }
 
@@ -144,8 +162,31 @@ mod tests {
                 state: UiState::Idle,
                 fatal: None,
                 device_warning: None,
+                mic_deferred: false,
             }
         );
+    }
+
+    /// Снятие — такое же изменение, как установка: запись кончилась, следующая
+    /// возьмёт новое устройство, и висящая строка «применится к следующей»
+    /// стала бы враньём.
+    #[test]
+    fn отложенность_смены_микрофона_сообщается_только_об_изменении() {
+        let s = Status::default();
+        assert!(s.set_mic_deferred(true));
+        assert!(!s.set_mic_deferred(true));
+        assert!(s.set_mic_deferred(false), "снятие — тоже изменение");
+        assert!(!s.snapshot().mic_deferred);
+    }
+
+    /// Тот, кто открыл окно уже после смены устройства, обязан увидеть строку:
+    /// событие к тому моменту давно ушло. Ровно та причина, по которой в этом
+    /// модуле вообще живёт снимок.
+    #[test]
+    fn отложенность_видна_в_снимке() {
+        let s = Status::default();
+        s.set_mic_deferred(true);
+        assert!(s.snapshot().mic_deferred);
     }
 
     #[test]

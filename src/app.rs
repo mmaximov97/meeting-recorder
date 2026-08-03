@@ -343,6 +343,14 @@ pub struct App {
     /// Включена ли явная проверка микрофона. Не состояние машины: она про
     /// запись, а это про «дай послушать».
     monitor: bool,
+    /// Устройство сменили, пока шла запись, — она продолжает писаться прежним.
+    ///
+    /// Флаг нужен потому, что иначе смена микрофона во время записи выглядит
+    /// выполненной: выпадашка показывает новое устройство, а дорожка пишется
+    /// старым до конца встречи. Ровно этот молчаливый разрыв между «что
+    /// показано» и «что происходит» однажды стоил сорока шести минут записи
+    /// не тем микрофоном.
+    mic_change_deferred: bool,
     level_mic: f32,
     level_sys: f32,
 }
@@ -355,8 +363,21 @@ impl App {
     }
 
     /// Сменить микрофон. Вступает в силу со следующего открытия потоков.
+    ///
+    /// Если в этот момент идёт запись (машина не в `Idle`), выбор запоминается,
+    /// но текущая дорожка продолжает писаться прежним устройством — менять его
+    /// на ходу значило бы порвать её посередине. Факт отложенности выставляется
+    /// флагом: сказать об этом обязан интерфейс, иначе смена выглядит
+    /// применённой, а не отложенной.
     pub fn set_mic_device(&mut self, choice: DeviceChoice) {
         self.audio.set_mic_device(choice);
+        self.mic_change_deferred = !matches!(self.machine.state(), State::Idle);
+    }
+
+    /// `true` — выбранное устройство ждёт следующей записи, текущая идёт на
+    /// прежнем.
+    pub fn mic_change_deferred(&self) -> bool {
+        self.mic_change_deferred
     }
 
     /// `Some(имя)` — писали не тем микрофоном, о котором просили.
@@ -422,6 +443,7 @@ impl App {
             current_source: "manual".into(),
             started: Local::now(),
             monitor: false,
+            mic_change_deferred: false,
             level_mic: 0.0,
             level_sys: 0.0,
         }
@@ -495,6 +517,7 @@ impl App {
         let _ = self.close_sinks();
         self.audio.close();
         self.monitor = false;
+        self.mic_change_deferred = false;
         self.ring_mic.drain_to_vec();
         self.ring_sys.drain_to_vec();
         self.machine = SessionMachine::new();
@@ -513,6 +536,8 @@ impl App {
                 self.ring_sys.drain_to_vec();
                 self.audio.close(); // отказ — отпускаем микрофон немедленно
                 self.monitor = false;
+                // Записи, которая шла бы на прежнем устройстве, больше нет.
+                self.mic_change_deferred = false;
             }
             Action::StartFileWrite => {
                 self.started = Local::now();
@@ -535,6 +560,9 @@ impl App {
                 let result = self.close_sinks();
                 self.audio.close();
                 self.monitor = false;
+                // Следующая запись возьмёт уже новое устройство — откладывать
+                // больше нечего.
+                self.mic_change_deferred = false;
                 // FinalizeDone обязан уйти в машину ДАЖЕ при ошибке закрытия.
                 // Иначе она навсегда останется в Finalizing, откуда единственный
                 // выход — это событие, и приложение молча перестанет записывать
@@ -1566,6 +1594,45 @@ mod tests {
             Some(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into())),
             "App не хранит выбор сам — он обязан уехать в AudioIo"
         );
+    }
+
+    /// В `Idle` смена устройства применяется к ближайшей записи, откладывать
+    /// нечего — флаг обязан остаться снятым, иначе окно соврёт наоборот.
+    #[test]
+    fn смена_устройства_в_покое_ничего_не_откладывает() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+        assert!(!app.mic_change_deferred());
+    }
+
+    /// Главный случай: под идущей записью устройство не меняется, и это должно
+    /// быть видно. Молчание здесь однажды стоило 46 минут записи не тем
+    /// микрофоном — выпадашка показывала новое устройство, дорожка писалась
+    /// прежним.
+    #[test]
+    fn смена_устройства_под_записью_откладывается_и_это_видно() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+        assert!(
+            app.mic_change_deferred(),
+            "запись идёт на прежнем устройстве — интерфейс обязан это сказать"
+        );
+    }
+
+    /// Заметка живёт ровно столько, сколько идёт запись, которая новое
+    /// устройство не использует: следующая возьмёт уже его.
+    #[test]
+    fn конец_записи_снимает_отложенность() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+        assert!(app.mic_change_deferred(), "предусловие теста");
+        app.on_event(Event::ManualStop, None).expect("стоп записи");
+        assert!(!app.mic_change_deferred());
     }
 
     #[test]

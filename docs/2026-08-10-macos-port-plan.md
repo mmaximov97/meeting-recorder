@@ -827,9 +827,60 @@ fn macos_version_supported(major: u32, minor: u32) -> bool {
 cargo test --workspace
 ```
 
-- [ ] **Шаг 5: получить реальную версию ОС и вызвать проверку в `run()`**
+- [ ] **Шаг 5: падающий тест на разбор строки версии**
 
-Версия берётся через `sysinfo::System::os_version()` (уже зависимость, кросс-платформенная, отдаёт строку вида `"14.5"` на macOS) — распарсить в `(u32, u32)` и, если не распарсилось или версия ниже поддерживаемой, вызвать `status::fatal` **до** конструирования детектора (та же точка, где сегодня падает `WindowsDetector::new()`):
+```rust
+#[cfg(target_os = "macos")]
+#[test]
+fn разбор_обычной_версии() {
+    assert_eq!(parse_major_minor("14.5"), Some((14, 5)));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn разбор_версии_с_патчем() {
+    assert_eq!(parse_major_minor("14.5.1"), Some((14, 5)));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn разбор_версии_без_минорной_части() {
+    assert_eq!(parse_major_minor("15"), None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn разбор_мусора_даёт_none() {
+    assert_eq!(parse_major_minor("garbage"), None);
+    assert_eq!(parse_major_minor(""), None);
+    assert_eq!(parse_major_minor("14.x"), None);
+}
+```
+
+- [ ] **Шаг 6: запустить, убедиться, что падает, затем реализовать**
+
+```rust
+/// `sysinfo::System::os_version()` на macOS отдаёт `"14.5"`/`"14.5.1"` —
+/// мажор и минор обязательны, патч (если есть) отбрасывается: он ни на что
+/// в этом сравнении не влияет.
+#[cfg(target_os = "macos")]
+fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+```
+
+```bash
+cargo test --workspace
+```
+
+Ожидается: все семь новых тестов (четыре на `macos_version_supported` из шага 1 плюс четыре здесь, итого их фактически восемь — пересчитать по факту) зелёные.
+
+- [ ] **Шаг 7: получить реальную версию ОС и вызвать проверку в `run()`**
+
+Место — **до** конструирования детектора (та же точка, где сегодня падает `WindowsDetector::new()`):
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -848,9 +899,7 @@ cargo test --workspace
 }
 ```
 
-Хелпер `parse_major_minor` — маленькая чистая функция (`"14.5.1"` → `Some((14, 5))`, `"garbage"` → `None`), тоже с тестами на разбор (нормальная строка, отсутствие минорной части, мусор).
-
-- [ ] **Шаг 6: commit**
+- [ ] **Шаг 8: commit**
 
 ```bash
 git add src-tauri/src/audio.rs

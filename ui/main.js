@@ -272,10 +272,27 @@ async function обновить_устройства() {
       sel.append(o);
     }
     sel.value = сохранён;
+    $("stt-url").value = конфиг.stt_gateway_url ?? "";
+    $("stt-key").value = конфиг.stt_api_key ?? "";
   } catch (e) {
     показать_ошибку(String(e));
   }
 }
+
+async function сохранить_настройки_транскрипции() {
+  try {
+    await invoke("set_transcribe_config", {
+      gatewayUrl: $("stt-url").value || null,
+      apiKey: $("stt-key").value || null,
+    });
+    показать_ошибку("");
+  } catch (e) {
+    показать_ошибку(String(e));
+  }
+}
+
+$("stt-url").addEventListener("blur", сохранить_настройки_транскрипции);
+$("stt-key").addEventListener("blur", сохранить_настройки_транскрипции);
 
 $("mic").addEventListener("change", async (e) => {
   const выбран = e.target.selectedOptions[0];

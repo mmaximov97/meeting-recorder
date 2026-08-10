@@ -1,7 +1,9 @@
+#[cfg(target_os = "windows")]
 pub mod windows;
 
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 pub use self::windows::WindowsDetector;
 
 /// Активная сессия захвата микрофона: какой-то процесс держит мик.

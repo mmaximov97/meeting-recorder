@@ -110,7 +110,9 @@
         border-color: var(--accent);
         color: var(--on-accent);
       }
-      select {
+      select,
+      input[type="text"],
+      input[type="password"] {
         font: inherit;
         /* Имена устройств — данные, а не речь. */
         font-family: var(--mono);
@@ -309,6 +311,14 @@
     <div class="row">
       <button id="toggle">Начать запись</button>
       <button id="folder">Открыть папку</button>
+    </div>
+
+    <h2>Транскрипция</h2>
+    <div class="row">
+      <input type="text" id="stt-url" placeholder="URL шлюза, например http://10.0.0.3:8080" />
+    </div>
+    <div class="row">
+      <input type="password" id="stt-key" placeholder="Ключ" />
     </div>
 
     <h2>Записи</h2>

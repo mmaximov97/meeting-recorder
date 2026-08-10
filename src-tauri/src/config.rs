@@ -18,6 +18,10 @@ pub struct Config {
     /// предупреждение о подмене, чтобы пользователь видел «Headset (Boss Bose)»,
     /// а не `{0.0.1.00000000}.{guid}`. Матчинг по нему не идёт нигде.
     pub mic_device_name: Option<String>,
+    /// Базовый URL шлюза, например `http://10.0.0.3:8080` — без хвоста
+    /// `/v1/...`, его дописывает клиент транскрипции.
+    pub stt_gateway_url: Option<String>,
+    pub stt_api_key: Option<String>,
 }
 
 impl Config {
@@ -75,6 +79,8 @@ mod tests {
         let c = Config {
             mic_device_id: Some("{0.0.1.00000000}.{guid}".into()),
             mic_device_name: Some("Headset (Boss Bose)".into()),
+            stt_gateway_url: None,
+            stt_api_key: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
     }
@@ -86,6 +92,8 @@ mod tests {
         let c = Config {
             mic_device_id: None,
             mic_device_name: Some("Headset (Boss Bose)".into()),
+            stt_gateway_url: None,
+            stt_api_key: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Default);
     }
@@ -101,5 +109,38 @@ mod tests {
         let c = Config::from_str(r#"{"mic_device_id":"{id}","что_то_новое":42}"#);
         assert_eq!(c.mic_device_id.as_deref(), Some("{id}"));
         assert_eq!(c.mic_device_name, None, "отсутствующее поле — не ошибка");
+    }
+
+    #[test]
+    fn настройки_транскрипции_переживают_сериализацию() {
+        let c = Config {
+            mic_device_id: None,
+            mic_device_name: None,
+            stt_gateway_url: Some("http://10.0.0.3:8080".to_string()),
+            stt_api_key: Some("ailab_xxx".to_string()),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    #[test]
+    fn старый_конфиг_без_настроек_транскрипции_даёт_none() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.stt_gateway_url, None);
+        assert_eq!(c.stt_api_key, None);
+    }
+
+    #[test]
+    fn смена_только_микрофонных_полей_не_трогает_остальные() {
+        let mut cfg = Config {
+            mic_device_id: None,
+            mic_device_name: None,
+            stt_gateway_url: Some("http://10.0.0.3:8080".to_string()),
+            stt_api_key: Some("secret".to_string()),
+        };
+        cfg.mic_device_id = Some("{new-id}".to_string());
+        cfg.mic_device_name = Some("Новый микрофон".to_string());
+        assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://10.0.0.3:8080"));
+        assert_eq!(cfg.stt_api_key.as_deref(), Some("secret"));
     }
 }

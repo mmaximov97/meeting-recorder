@@ -336,14 +336,25 @@ fn set_mic_device(
     state: tauri::State<Cmd>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let cfg = Config {
-        mic_device_id: id,
-        mic_device_name: name,
-    };
+    let mut cfg = Config::load(&app);
+    cfg.mic_device_id = id;
+    cfg.mic_device_name = name;
     cfg.save(&app)?;
     state
         .send(Ctl::SetMicDevice(cfg.choice()))
         .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+}
+
+#[tauri::command]
+fn set_transcribe_config(
+    gateway_url: Option<String>,
+    api_key: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.stt_gateway_url = gateway_url;
+    cfg.stt_api_key = api_key;
+    cfg.save(&app)
 }
 
 /// Включить/выключить проверку микрофона.
@@ -375,6 +386,7 @@ fn main() {
             list_mic_devices,
             get_config,
             set_mic_device,
+            set_transcribe_config,
             set_monitor,
             rename_recording
         ])

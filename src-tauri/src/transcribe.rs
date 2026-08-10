@@ -148,6 +148,55 @@ pub async fn submit_and_poll(
     Err(TranscribeError::Timeout(submit.id))
 }
 
+fn fmt_ts(seconds: f64) -> String {
+    let total = seconds.max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+fn chronological_segments<'a>(mic: &'a TrackResult, system: &'a TrackResult) -> Vec<&'a Segment> {
+    let mut all: Vec<&Segment> = mic.segments.iter().chain(system.segments.iter()).collect();
+    all.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    all
+}
+
+/// Дорожка без сегментов (диаризация не уместилась на GPU) идёт отдельным
+/// блоком в конце, а не пытается влезть в хронологию, которой для неё не
+/// существует — см. докблок задачи в дизайн-документе.
+fn tail_block(label: Label, track: &TrackResult) -> Option<String> {
+    if !track.segments.is_empty() || track.text.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "_{} (без привязки ко времени — диаризация не уместилась)_\n\n{}",
+        label.title(),
+        track.text
+    ))
+}
+
+pub fn merge_markdown(mic: &TrackResult, system: &TrackResult) -> String {
+    let mut blocks: Vec<String> = chronological_segments(mic, system)
+        .into_iter()
+        .map(|s| format!("**[{}]** _{}_ {}", fmt_ts(s.start), s.label.title(), s.text))
+        .collect();
+    blocks.extend(tail_block(Label::Owner, mic));
+    blocks.extend(tail_block(Label::Others, system));
+    blocks.join("\n\n")
+}
+
+pub fn merge_plain(mic: &TrackResult, system: &TrackResult) -> String {
+    let mut lines: Vec<String> = chronological_segments(mic, system)
+        .into_iter()
+        .map(|s| s.text.clone())
+        .collect();
+    if mic.segments.is_empty() && !mic.text.is_empty() {
+        lines.push(mic.text.clone());
+    }
+    if system.segments.is_empty() && !system.text.is_empty() {
+        lines.push(system.text.clone());
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +270,76 @@ mod tests {
     #[test]
     fn битый_json_даёт_ошибку_разбора_а_не_панику() {
         assert!(parse_job_response("не json", Label::Owner).is_err());
+    }
+
+    fn seg(start: f64, label: Label, text: &str) -> Segment {
+        Segment { start, label, text: text.to_string() }
+    }
+
+    #[test]
+    fn сегменты_двух_дорожек_сортируются_по_времени_вперемешку() {
+        let mic = TrackResult { segments: vec![seg(5.0, Label::Owner, "второе")], text: String::new() };
+        let system = TrackResult { segments: vec![seg(1.0, Label::Others, "первое")], text: String::new() };
+        let md = merge_markdown(&mic, &system);
+        assert!(md.find("первое").unwrap() < md.find("второе").unwrap());
+    }
+
+    #[test]
+    fn метки_говорящего_это_владелец_и_собеседники_а_не_speaker_id() {
+        let mic = TrackResult { segments: vec![seg(0.0, Label::Owner, "я")], text: String::new() };
+        let system = TrackResult { segments: vec![seg(1.0, Label::Others, "они")], text: String::new() };
+        let md = merge_markdown(&mic, &system);
+        assert!(md.contains("Владелец"));
+        assert!(md.contains("Собеседники"));
+        assert!(!md.contains("SPEAKER"));
+    }
+
+    #[test]
+    fn дорожка_без_сегментов_идёт_хвостовым_блоком_без_хронологии() {
+        let mic = TrackResult { segments: vec![], text: "сплошной текст владельца".to_string() };
+        let system = TrackResult {
+            segments: vec![seg(1.0, Label::Others, "у них есть таймкоды")],
+            text: String::new(),
+        };
+        let md = merge_markdown(&mic, &system);
+        assert!(md.contains("сплошной текст владельца"));
+        assert!(md.contains("без привязки ко времени"));
+    }
+
+    #[test]
+    fn обе_дорожки_без_сегментов_дают_только_текстовые_блоки() {
+        let mic = TrackResult { segments: vec![], text: "мик-текст".to_string() };
+        let system = TrackResult { segments: vec![], text: "системный текст".to_string() };
+        let md = merge_markdown(&mic, &system);
+        assert!(md.contains("мик-текст"));
+        assert!(md.contains("системный текст"));
+    }
+
+    #[test]
+    fn пустые_дорожки_не_добавляют_пустых_блоков() {
+        let md = merge_markdown(&TrackResult::default(), &TrackResult::default());
+        assert!(!md.contains("без привязки ко времени"));
+    }
+
+    #[test]
+    fn plain_текст_без_меток_говорящего_и_без_таймкодов() {
+        let mic = TrackResult { segments: vec![seg(1.0, Label::Owner, "привет")], text: String::new() };
+        let txt = merge_plain(&mic, &TrackResult::default());
+        assert_eq!(txt, "привет");
+    }
+
+    #[test]
+    fn plain_текст_тоже_хронологический() {
+        let mic = TrackResult { segments: vec![seg(5.0, Label::Owner, "второе")], text: String::new() };
+        let system = TrackResult { segments: vec![seg(1.0, Label::Others, "первое")], text: String::new() };
+        let txt = merge_plain(&mic, &system);
+        assert!(txt.find("первое").unwrap() < txt.find("второе").unwrap());
+    }
+
+    #[test]
+    fn таймкод_форматируется_как_мм_сс() {
+        assert_eq!(fmt_ts(65.0), "01:05");
+        assert_eq!(fmt_ts(0.0), "00:00");
+        assert_eq!(fmt_ts(3661.0), "61:01");
     }
 }

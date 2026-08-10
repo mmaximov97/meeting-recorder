@@ -416,7 +416,10 @@ async fn transcribe_recording(
 async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle) -> Result<(), String> {
     let cfg = Config::load(app);
     let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
-        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (u, k),
+        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (
+            u.trim().trim_end_matches('/').to_string(),
+            k.trim().to_string(),
+        ),
         _ => {
             let msg = "настройте URL и ключ шлюза";
             emit_transcribe_error(app, folder, base, msg);
@@ -432,7 +435,14 @@ async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle)
     let sys_path = dir.join(format!("{base}.system.wav"));
 
     emit_transcribe_progress(app, folder, base, "uploading");
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("не удалось создать HTTP-клиент: {e}");
+            emit_transcribe_error(app, folder, base, &msg);
+            return Err(msg);
+        }
+    };
     emit_transcribe_progress(app, folder, base, "polling");
     let (mic_res, sys_res) = tokio::join!(
         transcribe::submit_and_poll(&client, &url, &key, &mic_path, transcribe::Label::Owner),
@@ -470,7 +480,13 @@ async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle)
     if let Some(e) = &sys_err {
         md = format!("_Дорожка собеседников не транскрибирована: {e}_\n\n{md}");
     }
-    let txt = transcribe::merge_plain(&mic, &sys);
+    let mut txt = transcribe::merge_plain(&mic, &sys);
+    if let Some(e) = &mic_err {
+        txt = format!("[Дорожка владельца не транскрибирована: {e}]\n\n{txt}");
+    }
+    if let Some(e) = &sys_err {
+        txt = format!("[Дорожка собеседников не транскрибирована: {e}]\n\n{txt}");
+    }
 
     let out_dir = dir.join(format!("{base}.transcript"));
     if let Err(e) = std::fs::create_dir_all(&out_dir) {

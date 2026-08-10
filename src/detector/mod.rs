@@ -15,6 +15,7 @@ pub struct MicSession {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DetectError {
+    #[cfg(target_os = "windows")]
     #[error("ошибка COM/WASAPI: {0}")]
     Com(#[from] ::windows::core::Error),
 }

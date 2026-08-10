@@ -290,6 +290,22 @@ fn should_emit_levels(was_monitoring: bool, is_monitoring: bool, state: State) -
     was_monitoring || is_monitoring || state != State::Idle
 }
 
+/// Порог подобран по аналогии с `peak()` в этом же файле — 0..1, где 1.0 —
+/// полная шкала. 0.01 отсекает цифровой шум тишины, но ловит любую реальную
+/// речь/музыку, которая на пике даёт на порядки больше.
+#[cfg(target_os = "macos")]
+const MEETING_AUDIO_THRESHOLD: f32 = 0.01;
+
+/// На macOS «известный процесс» сам по себе ничего не значит — Zoom/Teams/Slack
+/// держатся открытыми и без звонка. Настоящий звонок отличается тем, что
+/// система при этом ещё и издаёт звук: сочетание процесса и уровня — тот же
+/// сигнал, что на Windows даёт WASAPI-сессия в состоянии Active, только
+/// собранный из двух источников вместо одного.
+#[cfg(target_os = "macos")]
+fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
+    process_detected && system_level > MEETING_AUDIO_THRESHOLD
+}
+
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
 pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
@@ -336,9 +352,25 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
                     was_active = active.is_some();
 
                     if let Some(e) = event {
-                        feed(&mut app, &handle, e, active.as_ref());
-                        if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
-                            ask(&handle, &s.process_name);
+                        // На macOS известный процесс сам по себе не значит
+                        // «идёт звонок» (Zoom/Teams/Slack держатся открытыми
+                        // и без него) — SessionAppeared дополнительно
+                        // фильтруется через звук. SessionGone гейту не
+                        // подлежит: конец звонка не должен зависеть от того,
+                        // говорит ли кто-то в конкретный тик. На Windows
+                        // `gate_ok` всегда true — poll_to_event остаётся
+                        // единственным источником решения.
+                        #[cfg(target_os = "macos")]
+                        let gate_ok = e != Event::SessionAppeared
+                            || mac_should_arm(active.is_some(), app.levels().system);
+                        #[cfg(not(target_os = "macos"))]
+                        let gate_ok = true;
+
+                        if gate_ok {
+                            feed(&mut app, &handle, e, active.as_ref());
+                            if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
+                                ask(&handle, &s.process_name);
+                            }
                         }
                     }
                 }
@@ -706,5 +738,35 @@ mod tests {
             false,
             State::Recording(Trigger::Manual)
         ));
+    }
+
+    // ---- mac_should_arm -------------------------------------------------
+    //
+    // На macOS «известный процесс» (Zoom/Teams/Slack) сам по себе не значит
+    // «идёт звонок» — эти приложения держатся открытыми и без звонка.
+    // Настоящий звонок отличается ещё и звуком: гейт требует ОБА сигнала.
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn известный_процесс_и_звук_дают_детект() {
+        assert!(mac_should_arm(true, 0.05));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn известный_процесс_без_звука_не_детектится() {
+        assert!(!mac_should_arm(true, 0.0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn звук_без_известного_процесса_не_детектится() {
+        assert!(!mac_should_arm(false, 0.5));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn порог_не_ловит_шум_на_грани_тишины() {
+        assert!(!mac_should_arm(true, 0.001));
     }
 }

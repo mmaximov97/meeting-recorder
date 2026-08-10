@@ -228,9 +228,9 @@ git commit -m "refactor(capture): вынести WASAPI loopback в capture::win
 - Изменить: `src/detector/mod.rs`
 
 **Интерфейсы:**
-- Производит: `detector::WindowsDetector` остаётся публичным реэкспортом, но теперь только под `#[cfg(target_os = "windows")]`. `MeetingDetector`, `MicSession`, `DetectError`, `POLL_INTERVAL` — без изменений, кросс-платформенные.
+- Производит: `detector::WindowsDetector` остаётся публичным реэкспортом, но теперь только под `#[cfg(target_os = "windows")]`. `MeetingDetector`, `MicSession`, `POLL_INTERVAL` — без изменений, кросс-платформенные. `DetectError` тоже остаётся кросс-платформенным типом (нужен будущему `MacDetector` в Task 5, который тоже возвращает `Result<Vec<MicSession>, DetectError>`), но его единственный сегодняшний вариант `Com` гейтится сам — см. шаг 1.
 
-- [ ] **Шаг 1: добавить `cfg` на модуль и реэкспорт**
+- [ ] **Шаг 1: добавить `cfg` на модуль, реэкспорт и Windows-специфичный вариант ошибки**
 
 В `src/detector/mod.rs` заменить:
 
@@ -258,7 +258,20 @@ pub use self::windows::WindowsDetector;
 pub use self::windows::WindowsDetector;
 ```
 
-`MicSession`, `DetectError`, `POLL_INTERVAL`, `MeetingDetector` — трейт и типы ниже в файле — остаются без `cfg`, они уже платформенно-нейтральны.
+`DetectError` сегодня не так платформенно-нейтрален, как кажется на первый взгляд: его единственный вариант `Com` ссылается на `::windows::core::Error` безусловно. Гейтить весь enum (или тем более сам трейт `MeetingDetector`) нельзя — оба нужны будущему `MacDetector` (Task 5) на любой ОС. Правильная граница — вариант, а не тип целиком; Rust это разрешает:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum DetectError {
+    #[cfg(target_os = "windows")]
+    #[error("ошибка COM/WASAPI: {0}")]
+    Com(#[from] ::windows::core::Error),
+}
+```
+
+На не-Windows платформах `DetectError` временно остаётся типом без единого варианта (сконструировать нечем) — это легальный Rust, и `Result<_, DetectError>` в сигнатуре `MeetingDetector::poll` продолжает типизироваться без проблем; пустота исчезнет сама, когда у macOS появится свой вариант ошибки (если вообще появится — `MacDetector` по плану Task 5 не падает).
+
+`MicSession`, `POLL_INTERVAL`, `MeetingDetector` — трейт и типы ниже в файле — остаются без `cfg` целиком, они действительно платформенно-нейтральны.
 
 - [ ] **Шаг 2: проверить сборку**
 

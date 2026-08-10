@@ -27,8 +27,15 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 /// консоль остаётся инструментом отладки того же ядра.
 ///
 /// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
+#[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
     PathBuf::from(r"C:\Users\<username>\Recordings")
+}
+
+#[cfg(target_os = "macos")]
+fn recordings_root() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 /// Канал в аудио-поток. `Mutex` — потому что `tauri::State` шарится между
@@ -276,10 +283,12 @@ fn open_folder() -> Result<(), String> {
     let dir = recordings_root();
     // Иначе explorer откроет «Документы» вместо пустого несуществующего пути.
     std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
-    std::process::Command::new("explorer.exe")
-        .arg(&dir)
-        .spawn()
-        .map_err(|e| format!("не удалось открыть проводник: {e}"))?;
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(&dir);
+    cmd.spawn().map_err(|e| format!("не удалось открыть Finder/проводник: {e}"))?;
     Ok(())
 }
 

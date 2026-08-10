@@ -13,7 +13,11 @@
 
 use meeting_recorder::app::{poll_to_event, App};
 use meeting_recorder::capture::DeviceChoice;
-use meeting_recorder::detector::{MeetingDetector, MicSession, WindowsDetector, POLL_INTERVAL};
+use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
+#[cfg(target_os = "windows")]
+use meeting_recorder::detector::WindowsDetector;
+#[cfg(target_os = "macos")]
+use meeting_recorder::detector::MacDetector;
 use meeting_recorder::session::{Event, State};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -343,7 +347,11 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
             return;
         }
     }
-    let det = match WindowsDetector::new() {
+    #[cfg(target_os = "windows")]
+    let det = WindowsDetector::new();
+    #[cfg(target_os = "macos")]
+    let det: Result<MacDetector, meeting_recorder::detector::DetectError> = Ok(MacDetector::new());
+    let det = match det {
         Ok(d) => d,
         Err(e) => {
             // Через status::fatal, а не голым emit: это происходит в setup(), то

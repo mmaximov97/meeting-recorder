@@ -6,7 +6,11 @@
 //! ровно то же самое.
 
 use meeting_recorder::app::{poll_to_event, App};
-use meeting_recorder::detector::{MeetingDetector, MicSession, WindowsDetector, POLL_INTERVAL};
+use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
+#[cfg(target_os = "windows")]
+use meeting_recorder::detector::WindowsDetector;
+#[cfg(target_os = "macos")]
+use meeting_recorder::detector::MacDetector;
 use meeting_recorder::session::Event;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -31,9 +35,23 @@ fn spawn_stdin() -> Receiver<String> {
     rx
 }
 
+#[cfg(target_os = "windows")]
+fn recordings_root() -> PathBuf {
+    PathBuf::from(r"C:\Users\Cypher\Recordings")
+}
+
+#[cfg(target_os = "macos")]
+fn recordings_root() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = PathBuf::from(r"C:\Users\Cypher\Recordings");
+    let root = recordings_root();
+    #[cfg(target_os = "windows")]
     let det = WindowsDetector::new()?;
+    #[cfg(target_os = "macos")]
+    let det = MacDetector::new();
     // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный
     // дефолт. Выбор устройства живёт в GUI, где его есть где хранить.
     let mut app = App::new(root, meeting_recorder::capture::DeviceChoice::Default);

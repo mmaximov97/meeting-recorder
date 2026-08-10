@@ -17,7 +17,9 @@
 //! правка остаётся зелёной. Фейки в тестах умеют падать в нужной точке —
 //! этого достаточно, чтобы каждый инвариант ловил свою мутацию.
 
-use crate::capture::{build_loopback_capture, build_mic_capture, start_silence, DeviceChoice};
+use crate::capture::{build_mic_capture, DeviceChoice};
+#[cfg(target_os = "windows")]
+use crate::capture::{build_loopback_capture, start_silence};
 use crate::detector::MicSession;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
@@ -129,6 +131,7 @@ struct Streams {
 }
 
 /// Реальный захват через cpal.
+#[cfg(target_os = "windows")]
 struct CpalAudio {
     streams: Option<Streams>,
     /// Какое устройство просить на следующем `open()`.
@@ -147,6 +150,7 @@ struct CpalAudio {
     logged_sys: bool,
 }
 
+#[cfg(target_os = "windows")]
 impl CpalAudio {
     fn new(mic: DeviceChoice) -> Self {
         Self {
@@ -161,6 +165,7 @@ impl CpalAudio {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl AudioIo for CpalAudio {
     fn open(&mut self) -> Res {
         if self.streams.is_some() {
@@ -358,6 +363,7 @@ pub struct App {
 impl App {
     /// Микрофон здесь НЕ открывается. Потоки поднимаются только по детекту,
     /// ручному старту или явной проверке — см. `Action::StartRingBuffer`.
+    #[cfg(target_os = "windows")]
     pub fn new(root: PathBuf, mic: DeviceChoice) -> Self {
         Self::with_backends(root, Box::new(CpalAudio::new(mic)), Box::new(WavSinks))
     }

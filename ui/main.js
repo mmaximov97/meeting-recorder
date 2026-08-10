@@ -15,6 +15,7 @@ const СТАДИЯ_ПОДПИСЬ = {
   uploading: "Загрузка…",
   polling: "Обработка…",
   merging: "Слияние…",
+  done: "Готово",
 };
 
 function ключ_транскрипции(folder, base) {
@@ -172,16 +173,21 @@ async function обновить_список() {
       колонка.className = "grow";
       колонка.append(имя, мета);
 
+      const ключ = ключ_транскрипции(з.folder, з.name);
+      const стадия = транскрипции.get(ключ);
+
       const кнопка = document.createElement("button");
       кнопка.className = "rename";
       кнопка.textContent = "Переименовать";
-      кнопка.addEventListener("click", () => начать_переименование(з, имя, кнопка));
+      if (стадия) {
+        кнопка.disabled = true;
+      } else {
+        кнопка.addEventListener("click", () => начать_переименование(з, имя, кнопка));
+      }
 
       if (з.mic && з.system) {
         const кнопкаТранскрипции = document.createElement("button");
         кнопкаТранскрипции.className = "rename";
-        const ключ = ключ_транскрипции(з.folder, з.name);
-        const стадия = транскрипции.get(ключ);
         if (стадия) {
           кнопкаТранскрипции.textContent = СТАДИЯ_ПОДПИСЬ[стадия] ?? "Идёт транскрипция…";
           кнопкаТранскрипции.disabled = true;
@@ -390,8 +396,13 @@ async function старт() {
     обновить_список();
   });
   await listen("transcribe-done", (e) => {
-    транскрипции.delete(ключ_транскрипции(e.payload.folder, e.payload.base));
+    const ключ = ключ_транскрипции(e.payload.folder, e.payload.base);
+    транскрипции.set(ключ, "done");
     обновить_список();
+    setTimeout(() => {
+      транскрипции.delete(ключ);
+      обновить_список();
+    }, 3000);
   });
   await listen("transcribe-error", (e) => {
     транскрипции.delete(ключ_транскрипции(e.payload.folder, e.payload.base));

@@ -18,5 +18,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hound = "3.5"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
-tokio = { version = "1", features = ["time", "fs"] }
+tokio = { version = "1", features = ["time", "fs", "macros"] }
 thiserror = "2"

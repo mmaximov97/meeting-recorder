@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use tauri::{AppHandle, WindowEvent};
+use tauri::{AppHandle, Emitter, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// Корень записей. Тот же, что у консольного бинаря (`src/main.rs`): разъедься
@@ -45,6 +45,10 @@ impl Cmd {
             .map_err(|_| "аудио-поток не отвечает".to_string())
     }
 }
+
+/// `Some(base)` — какая запись сейчас транскрибируется. Один слот на всё
+/// приложение: одновременно — только одна транскрипция, см. дизайн.
+struct Transcribing(Mutex<Option<String>>);
 
 /// Одна запись: пара дорожек под общим именем.
 ///
@@ -366,6 +370,116 @@ fn set_monitor(on: bool, state: tauri::State<Cmd>, app: AppHandle) -> Result<(),
         .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
 }
 
+fn emit_transcribe_progress(app: &AppHandle, folder: &Option<String>, base: &str, stage: &str) {
+    let _ = app.emit(
+        "transcribe-progress",
+        serde_json::json!({ "folder": folder, "base": base, "stage": stage }),
+    );
+}
+
+fn emit_transcribe_done(app: &AppHandle, folder: &Option<String>, base: &str) {
+    let _ = app.emit("transcribe-done", serde_json::json!({ "folder": folder, "base": base }));
+}
+
+fn emit_transcribe_error(app: &AppHandle, folder: &Option<String>, base: &str, message: &str) {
+    let _ = app.emit(
+        "transcribe-error",
+        serde_json::json!({ "folder": folder, "base": base, "message": message }),
+    );
+}
+
+#[tauri::command]
+async fn transcribe_recording(
+    folder: Option<String>,
+    base: String,
+    app: AppHandle,
+    state: tauri::State<'_, Transcribing>,
+) -> Result<(), String> {
+    {
+        let mut current = state.0.lock().map_err(|e| e.to_string())?;
+        if current.is_some() {
+            return Err("уже идёт транскрипция другой записи".to_string());
+        }
+        *current = Some(base.clone());
+    }
+
+    let result = run_transcription(&folder, &base, &app).await;
+
+    {
+        let mut current = state.0.lock().map_err(|e| e.to_string())?;
+        *current = None;
+    }
+
+    result
+}
+
+async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle) -> Result<(), String> {
+    let cfg = Config::load(app);
+    let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
+        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (u, k),
+        _ => {
+            let msg = "настройте URL и ключ шлюза";
+            emit_transcribe_error(app, folder, base, msg);
+            return Err(msg.to_string());
+        }
+    };
+
+    let dir = match folder {
+        Some(f) => recordings_root().join(f),
+        None => recordings_root(),
+    };
+    let mic_path = dir.join(format!("{base}.mic.wav"));
+    let sys_path = dir.join(format!("{base}.system.wav"));
+
+    emit_transcribe_progress(app, folder, base, "uploading");
+    let client = reqwest::Client::new();
+    let (mic_res, sys_res) = tokio::join!(
+        transcribe::submit_and_poll(&client, &url, &key, &mic_path, transcribe::Label::Owner),
+        transcribe::submit_and_poll(&client, &url, &key, &sys_path, transcribe::Label::Others),
+    );
+
+    let (mic, mic_err) = match mic_res {
+        Ok(r) => (Some(r), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let (sys, sys_err) = match sys_res {
+        Ok(r) => (Some(r), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+
+    if mic.is_none() && sys.is_none() {
+        let msg = format!(
+            "обе дорожки не удались — мик: {}; система: {}",
+            mic_err.unwrap_or_else(|| "?".to_string()),
+            sys_err.unwrap_or_else(|| "?".to_string())
+        );
+        emit_transcribe_error(app, folder, base, &msg);
+        return Err(msg);
+    }
+
+    emit_transcribe_progress(app, folder, base, "merging");
+    let mic = mic.unwrap_or_default();
+    let sys = sys.unwrap_or_default();
+    let mut md = transcribe::merge_markdown(&mic, &sys);
+    // Частичный отказ — не теряем то, что получилось, но явно помечаем,
+    // какая дорожка не удалась (см. Global Constraints и дизайн).
+    if let Some(e) = &mic_err {
+        md = format!("_Дорожка владельца не транскрибирована: {e}_\n\n{md}");
+    }
+    if let Some(e) = &sys_err {
+        md = format!("_Дорожка собеседников не транскрибирована: {e}_\n\n{md}");
+    }
+    let txt = transcribe::merge_plain(&mic, &sys);
+
+    let out_dir = dir.join(format!("{base}.transcript"));
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    std::fs::write(out_dir.join(format!("{base}.md")), &md).map_err(|e| e.to_string())?;
+    std::fs::write(out_dir.join(format!("{base}.txt")), &txt).map_err(|e| e.to_string())?;
+
+    emit_transcribe_done(app, folder, base);
+    Ok(())
+}
+
 fn main() {
     let (tx, rx) = channel::<Ctl>();
     let tray_tx = tx.clone();
@@ -379,6 +493,7 @@ fn main() {
         // фатальная ошибка там случается раньше, чем webview успеет подписаться.
         .manage(Status::default())
         .manage(Cache::default())
+        .manage(Transcribing(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             send_event,
             get_state,
@@ -389,7 +504,8 @@ fn main() {
             set_mic_device,
             set_transcribe_config,
             set_monitor,
-            rename_recording
+            rename_recording,
+            transcribe_recording
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -594,5 +710,26 @@ mod tests {
         assert!(!is_month_folder("2026-07-30"));
         assert!(!is_month_folder("архив"));
         assert!(!is_month_folder(""));
+    }
+
+    #[test]
+    fn второй_slot_не_занимается_пока_первый_не_освобождён() {
+        let t = Transcribing(Mutex::new(None));
+        {
+            let mut slot = t.0.lock().unwrap();
+            assert!(slot.is_none());
+            *slot = Some("2026-08-10_10-00_zoom".to_string());
+        }
+        {
+            let slot = t.0.lock().unwrap();
+            assert!(slot.is_some(), "занятый слот должен остаться занятым");
+        }
+    }
+
+    #[test]
+    fn slot_освобождается_и_снова_доступен() {
+        let t = Transcribing(Mutex::new(Some("занято".to_string())));
+        *t.0.lock().unwrap() = None;
+        assert!(t.0.lock().unwrap().is_none());
     }
 }

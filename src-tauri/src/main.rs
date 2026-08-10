@@ -7,6 +7,7 @@ mod config;
 mod imbalance;
 mod rename;
 mod status;
+mod transcribe;
 mod tray;
 
 use audio::Ctl;

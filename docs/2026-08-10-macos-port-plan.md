@@ -565,26 +565,22 @@ fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
 ```rust
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
-pub struct MacDetector {
-    sys: System,
-}
+/// Без полей: `sysinfo::System::refresh_processes` требует `&mut self`, а
+/// `MeetingDetector::poll` даёт только `&self` — хранить `System` между
+/// опросами и мутировать его через `RefCell` ради этого не стоит: пришлось
+/// бы городить внутреннюю изменяемость ради экономии, которая на POLL_INTERVAL
+/// в 2с не измерима. `new()` при этом не лишний: он даёт точку конструирования,
+/// симметричную `WindowsDetector::new()`, и именно её зовёт `audio::run()`.
+pub struct MacDetector;
 
 impl MacDetector {
     pub fn new() -> Self {
-        Self {
-            sys: System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new())),
-        }
+        Self
     }
 }
 
 impl super::MeetingDetector for MacDetector {
     fn poll(&self) -> Result<Vec<super::MicSession>, super::DetectError> {
-        // sysinfo::System не Send-agnostic по API — refresh требует &mut,
-        // а трейт даёт &self, поэтому список процессов читаем свежим вызовом
-        // System::new_with_specifics на каждый poll вместо переиспользования
-        // self.sys. Дороже, чем могло бы быть, но POLL_INTERVAL — 2с, и это
-        // не тот путь, где счёт на микросекунды: тот же компромисс, что и
-        // process_name_for в detector/windows.rs.
         let sys = System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
         Ok(sys
             .processes()
@@ -598,8 +594,6 @@ impl super::MeetingDetector for MacDetector {
     }
 }
 ```
-
-(Поле `sys` в структуре в этой версии не используется реально — оставлено для будущей оптимизации через `refresh_processes`; конструктор при этом не лишний: `MacDetector::new()` — точка, симметричная `WindowsDetector::new()`, и именно её зовёт `audio::run()`.)
 
 - [ ] **Шаг 9: гейт модуля в `detector/mod.rs`**
 

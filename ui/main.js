@@ -6,6 +6,21 @@ const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 
+// key -> "uploading" | "polling" | "merging". Переживает перерисовку списка
+// (list.innerHTML = "" на каждый обновить_список()) — состояние источник
+// правды не DOM-узел кнопки, который может быть пересоздан, а эта карта.
+const транскрипции = new Map();
+
+const СТАДИЯ_ПОДПИСЬ = {
+  uploading: "Загрузка…",
+  polling: "Обработка…",
+  merging: "Слияние…",
+};
+
+function ключ_транскрипции(folder, base) {
+  return `${folder ?? ""}::${base}`;
+}
+
 const ПОДПИСЬ = {
   idle: "Ожидание встречи",
   armed: "Похоже, встреча — записать?",
@@ -162,7 +177,22 @@ async function обновить_список() {
       кнопка.textContent = "Переименовать";
       кнопка.addEventListener("click", () => начать_переименование(з, имя, кнопка));
 
-      li.append(колонка, кнопка);
+      if (з.mic && з.system) {
+        const кнопкаТранскрипции = document.createElement("button");
+        кнопкаТранскрипции.className = "rename";
+        const ключ = ключ_транскрипции(з.folder, з.name);
+        const стадия = транскрипции.get(ключ);
+        if (стадия) {
+          кнопкаТранскрипции.textContent = СТАДИЯ_ПОДПИСЬ[стадия] ?? "Идёт транскрипция…";
+          кнопкаТранскрипции.disabled = true;
+        } else {
+          кнопкаТранскрипции.textContent = "Транскрибировать";
+          кнопкаТранскрипции.addEventListener("click", () => начать_транскрипцию(з));
+        }
+        li.append(колонка, кнопка, кнопкаТранскрипции);
+      } else {
+        li.append(колонка, кнопка);
+      }
       list.append(li);
     }
   } catch (e) {
@@ -237,6 +267,14 @@ function начать_переименование(запись, узел_име
     if (e.key === "Escape") отменить();
   });
   поле.addEventListener("blur", на_потерю_фокуса);
+}
+
+async function начать_транскрипцию(запись) {
+  try {
+    await invoke("transcribe_recording", { folder: запись.folder ?? null, base: запись.name });
+  } catch (e) {
+    показать_ошибку(String(e));
+  }
 }
 
 // Значение <option> — идентификатор эндпоинта, подпись — имя. Пользователь
@@ -347,6 +385,19 @@ async function старт() {
   await listen("device-warning", (e) => показать_предупреждение_устройства(e.payload));
   await listen("mic-deferred", (e) => показать_отложенность(Boolean(e.payload)));
   await listen("levels", (e) => применить_уровни(e.payload));
+  await listen("transcribe-progress", (e) => {
+    транскрипции.set(ключ_транскрипции(e.payload.folder, e.payload.base), e.payload.stage);
+    обновить_список();
+  });
+  await listen("transcribe-done", (e) => {
+    транскрипции.delete(ключ_транскрипции(e.payload.folder, e.payload.base));
+    обновить_список();
+  });
+  await listen("transcribe-error", (e) => {
+    транскрипции.delete(ключ_транскрипции(e.payload.folder, e.payload.base));
+    показать_ошибку(e.payload.message);
+    обновить_список();
+  });
 
   try {
     const снимок = await invoke("get_state");

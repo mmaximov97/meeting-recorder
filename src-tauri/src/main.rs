@@ -433,6 +433,7 @@ async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle)
 
     emit_transcribe_progress(app, folder, base, "uploading");
     let client = reqwest::Client::new();
+    emit_transcribe_progress(app, folder, base, "polling");
     let (mic_res, sys_res) = tokio::join!(
         transcribe::submit_and_poll(&client, &url, &key, &mic_path, transcribe::Label::Owner),
         transcribe::submit_and_poll(&client, &url, &key, &sys_path, transcribe::Label::Others),
@@ -472,9 +473,21 @@ async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle)
     let txt = transcribe::merge_plain(&mic, &sys);
 
     let out_dir = dir.join(format!("{base}.transcript"));
-    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
-    std::fs::write(out_dir.join(format!("{base}.md")), &md).map_err(|e| e.to_string())?;
-    std::fs::write(out_dir.join(format!("{base}.txt")), &txt).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        let msg = e.to_string();
+        emit_transcribe_error(app, folder, base, &msg);
+        return Err(msg);
+    }
+    if let Err(e) = std::fs::write(out_dir.join(format!("{base}.md")), &md) {
+        let msg = e.to_string();
+        emit_transcribe_error(app, folder, base, &msg);
+        return Err(msg);
+    }
+    if let Err(e) = std::fs::write(out_dir.join(format!("{base}.txt")), &txt) {
+        let msg = e.to_string();
+        emit_transcribe_error(app, folder, base, &msg);
+        return Err(msg);
+    }
 
     emit_transcribe_done(app, folder, base);
     Ok(())

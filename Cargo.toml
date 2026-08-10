@@ -39,7 +39,7 @@ chrono = "0.4"
 # осознанный, версии semver-несовместимы и мирно сосуществуют.
 cpal = "0.18"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
     "Win32_Media_Audio",

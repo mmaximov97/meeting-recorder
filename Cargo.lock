@@ -2118,6 +2118,7 @@ dependencies = [
  "meeting-recorder",
  "serde",
  "serde_json",
+ "sysinfo",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

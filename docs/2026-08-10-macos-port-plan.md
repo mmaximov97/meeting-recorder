@@ -137,7 +137,62 @@ features = [
 
 `cpal`, `sysinfo`, `thiserror`, `hound`, `chrono` остаются безусловными зависимостями — все они уже кросс-платформенные.
 
-- [ ] **Шаг 4: проверить, что крейт впервые собирается нативно на Linux**
+- [ ] **Шаг 4: гейтить `CpalAudio` в `src/app.rs` — иначе крейт всё ещё не соберётся на не-Windows**
+
+`capture::build_loopback_capture`/`capture::start_silence` теперь видны только под `cfg(target_os = "windows")` (шаг 2), но `src/app.rs` — часть той же библиотечной цели (`src/lib.rs` подключает `pub mod app;` безусловно) — использует их безусловно: `struct CpalAudio` и `impl AudioIo for CpalAudio` вызывают `start_silence()` и `build_loopback_capture(tx_sys)` внутри `CpalAudio::open()`, а `impl App { pub fn new(...) }` безусловно строит `CpalAudio::new(mic)`. Без этого шага `cargo build --lib -p meeting-recorder` упадёт с `E0432` (unresolved import) на любой не-Windows платформе — ровно то, что должен уметь именно этот таск.
+
+В начале `src/app.rs` заменить:
+
+```rust
+use crate::capture::{build_loopback_capture, build_mic_capture, start_silence, DeviceChoice};
+```
+
+на:
+
+```rust
+use crate::capture::{build_mic_capture, DeviceChoice};
+#[cfg(target_os = "windows")]
+use crate::capture::{build_loopback_capture, start_silence};
+```
+
+(`build_mic_capture`/`DeviceChoice` остаются безусловными — микрофонная дорожка общая для обеих ОС, `build_mic_capture` начнёт использоваться на macOS в Task 4, в промежутке между этим шагом и Task 4 возможно предупреждение о неиспользуемом импорте на не-Windows — это ожидаемо и самоустранится в Task 4, не годная тому, что стоит подавлять сейчас.)
+
+Добавить `#[cfg(target_os = "windows")]` непосредственно над каждым из трёх мест — без изменений тела:
+
+```rust
+#[cfg(target_os = "windows")]
+struct CpalAudio {
+    // ... как сейчас, без изменений ...
+}
+
+#[cfg(target_os = "windows")]
+impl CpalAudio {
+    // ... как сейчас, без изменений ...
+}
+
+#[cfg(target_os = "windows")]
+impl AudioIo for CpalAudio {
+    // ... как сейчас, без изменений ...
+}
+```
+
+И у самого метода `App::new` (не у всего `impl App` — блок используется и другими, платформенно-нейтральными методами):
+
+```rust
+impl App {
+    #[cfg(target_os = "windows")]
+    pub fn new(root: PathBuf, mic: DeviceChoice) -> Self {
+        Self::with_backends(root, Box::new(CpalAudio::new(mic)), Box::new(WavSinks))
+    }
+
+    // остальные методы impl App — без cfg, как сейчас
+    ...
+}
+```
+
+Публичный конструктор для macOS (`App::new_with_audio` или аналог, принимающий готовый `Box<dyn AudioIo>`) сюда не добавляется — вводить его раньше, чем появится реальный macOS-потребитель (`MacAudio` из Task 4), значит писать мёртвый код. Собственные тесты `src/app.rs` не пострадают: они конструируют `App` через `with_backends` с подставными `AudioIo`, а не через `App::new`, и `with_backends` остаётся приватным/видимым только тестам — это уже так сегодня.
+
+- [ ] **Шаг 5: проверить, что крейт впервые собирается нативно на Linux**
 
 ```bash
 cargo test --lib -p meeting-recorder
@@ -145,19 +200,21 @@ cargo test --lib -p meeting-recorder
 
 Ожидается: компилируется и проходит (раньше это было физически невозможно без Windows-таргета — `windows-rs` и WASAPI-типы были в безусловных зависимостях). Флаг `--lib` намеренно ограничивает сборку библиотечной целью — бинарь `meeting-recorder-cli` (`src/main.rs`) всё ещё зовёт `WindowsDetector` безусловно и на Linux/macOS пока не соберётся; это чинится в Task 6.
 
-- [ ] **Шаг 5: проверить, что Windows-сборка не сломалась**
+Если в этом самом окружении `cargo test` падает не на этапе типизации Rust-кода, а на этапе линковки нативной библиотеки ALSA (`libasound`) — это не относится к этой правке: `cpal` на Linux требует системные ALSA dev-заголовки, которых может не быть в свежем окружении, и на реальную цель порта (macOS, там `cpal` линкуется с CoreAudio, ALSA не участвует) это никак не влияет. Если это единственная причина отказа, зафиксировать её отдельной строкой в отчёте и как минимум подтвердить `cargo build --lib -p meeting-recorder 2>&1 | grep -i error` не показывает ошибок типизации/неразрешённых импортов Rust-уровня — это и есть цель шага.
+
+- [ ] **Шаг 6: проверить, что Windows-сборка не сломалась**
 
 ```bash
 cargo.exe build --workspace
 cargo.exe test --workspace
 ```
 
-Ожидается: тот же результат, что и до правки (170+ тестов зелёные) — это чистый рефакторинг, поведение не менялось.
+Ожидается: тот же результат, что и до правки (175 тестов зелёные, 118 в библиотеке + 57 в GUI-крейте) — это чистый рефакторинг, поведение не менялось.
 
-- [ ] **Шаг 6: commit**
+- [ ] **Шаг 7: commit**
 
 ```bash
-git add Cargo.toml src/capture/mod.rs src/capture/windows.rs
+git add Cargo.toml src/capture/mod.rs src/capture/windows.rs src/app.rs
 git commit -m "refactor(capture): вынести WASAPI loopback в capture::windows, собираться кросс-платформенно"
 ```
 
@@ -312,15 +369,27 @@ git commit -m "spike: подтверждённый вручную рецепт C
 **Файлы:**
 - Создать: `src/capture/macos.rs`
 - Изменить: `src/capture/mod.rs`
+- Изменить: `src/app.rs` (не только `src-tauri/src/audio.rs` — `AudioIo`/`CpalAudio` живут в ядре, `src/app.rs`; см. правку Task 1, добавленную после ревью)
+- Изменить: `src-tauri/src/audio.rs` (точка вызова — где строится `App` в `run()`)
 
 **Интерфейсы:**
 - Потребляет: рецепт из Task 3 (тот же вызов функций, обёрнутый в тип).
 - Производит:
   ```rust
+  // src/capture/macos.rs, реэкспорт из src/capture/mod.rs
   pub struct SystemTap { /* ... */ }
   impl SystemTap {
       pub fn start() -> Result<Self, CaptureError>;   // открывает тап+аггрегат+IOProc один раз
       pub fn drain(&mut self) -> Vec<i16>;             // всё, что накопилось с прошлого вызова, 16 кГц моно i16
+  }
+
+  // src/app.rs
+  pub struct MacAudio { /* ... */ }   // impl AudioIo for MacAudio
+  impl MacAudio {
+      pub fn new(mic: DeviceChoice, system_tap: Rc<RefCell<SystemTap>>) -> Self;
+  }
+  impl App {
+      pub fn new_with_audio(root: PathBuf, audio: Box<dyn AudioIo>) -> Self;
   }
   ```
   `drain()` возвращает сэмплы уже в формате хранения — переиспользует `Resampler`/`downmix_to_mono_i16` из `capture::mod`, как и `build_mic_capture` сегодня.
@@ -338,20 +407,38 @@ mod macos;
 pub use macos::SystemTap;
 ```
 
-- [ ] **Шаг 2: завести macOS-реализацию `AudioIo`**
+- [ ] **Шаг 2: завести macOS-реализацию `AudioIo` в `src/app.rs`**
 
-В `src-tauri/src/audio.rs` (не в ядре — `AudioIo`/`CpalAudio` уже там же живут) добавить `#[cfg(target_os = "macos")]` реализацию, структурно параллельную `CpalAudio`, но с системной дорожкой поверх уже запущенного `SystemTap`, а не открываемой заново на каждый `open()`:
+В `src/app.rs`, рядом с `CpalAudio` (которая теперь под `#[cfg(target_os = "windows")]`, см. Task 1), добавить `#[cfg(target_os = "macos")]` реализацию, структурно параллельную `CpalAudio`, но с системной дорожкой поверх уже запущенного `SystemTap`, а не открываемой заново на каждый `open()`:
 
 ```rust
+// pub — MacAudio::new вызывается из src-tauri/src/audio.rs, другого крейта;
+// поля при этом остаются приватными, наружу торчит только конструктор.
 #[cfg(target_os = "macos")]
-struct MacAudio {
+pub struct MacAudio {
     mic: Option<cpal::Stream>,
     mic_rx: Option<std::sync::mpsc::Receiver<Vec<i16>>>,
     mic_choice: DeviceChoice,
     fell_back: Option<String>,
     /// Живёт всё время процесса — сконструирован снаружи и передан сюда,
     /// а не создаётся в open()/close(). См. докблок задачи.
-    system_tap: std::rc::Rc<std::cell::RefCell<meeting_recorder::capture::SystemTap>>,
+    system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacAudio {
+    /// `system_tap` — общий на весь процесс, конструируется и передаётся
+    /// вызывающим (`audio::run()`), а не здесь: это ресурс уровня процесса,
+    /// а не уровня одной записи, см. докблок задачи.
+    pub fn new(mic: DeviceChoice, system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>) -> Self {
+        Self {
+            mic: None,
+            mic_rx: None,
+            mic_choice: mic,
+            fell_back: None,
+            system_tap,
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -361,7 +448,9 @@ impl AudioIo for MacAudio {
         // дорожка уже течёт из system_tap независимо от этого вызова.
         if self.mic.is_some() { return Ok(()); }
         let (tx, rx) = std::sync::mpsc::channel();
-        let (pending, fell_back) = meeting_recorder::capture::build_mic_capture(&self.mic_choice, tx)?;
+        // build_mic_capture уже импортирована безусловно в начале файла
+        // (правка Task 1) — на macOS у неё наконец появляется вызывающий.
+        let (pending, fell_back) = build_mic_capture(&self.mic_choice, tx)?;
         self.fell_back = fell_back;
         self.mic = Some(pending.play()?);
         self.mic_rx = Some(rx);
@@ -398,7 +487,36 @@ impl AudioIo for MacAudio {
 }
 ```
 
-`audio::run()` конструирует `SystemTap::start()` один раз до входа в основной цикл (рядом с конструированием `App`), оборачивает в `Rc<RefCell<_>>` и передаёт клон в `MacAudio` при создании `App` — сигнатура `App::new`/`with_backends` уже принимает `Box<dyn AudioIo>`, менять её не нужно, макос-специфичная сборка `Box::new(MacAudio { ... })` живёт в `audio::run()` под `#[cfg(target_os = "macos")]`, параллельно тому, как сегодня там же собирается `CpalAudio::new(mic)` под Windows.
+Рядом, в `src/app.rs`, добавить публичный конструктор для не-Windows платформ — `App::new` (Task 1) остался `#[cfg(target_os = "windows")]` и жёстко строит `CpalAudio`, поэтому macOS нужен свой вход, принимающий уже готовый `AudioIo` вместо конкретного типа:
+
+```rust
+impl App {
+    /// Для платформ, где `AudioIo` собирается снаружи (macOS — `MacAudio`
+    /// с общим на весь процесс `SystemTap`, которого `DeviceChoice` одного
+    /// не описывает). `SinkFactory` при этом всегда `WavSinks` в продакшене,
+    /// как и в `App::new` — варьируется только `AudioIo`.
+    pub fn new_with_audio(root: PathBuf, audio: Box<dyn AudioIo>) -> Self {
+        Self::with_backends(root, audio, Box::new(WavSinks))
+    }
+}
+```
+
+В `src-tauri/src/audio.rs::run()` заменить безусловное `let mut app = App::new(root, mic);` на:
+
+```rust
+#[cfg(target_os = "windows")]
+let mut app = App::new(root, mic);
+
+#[cfg(target_os = "macos")]
+let mut app = {
+    let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
+        meeting_recorder::capture::SystemTap::start().expect("Process Tap не поднялся"),
+    ));
+    App::new_with_audio(root, Box::new(meeting_recorder::app::MacAudio::new(mic, system_tap)))
+};
+```
+
+`MacAudio`/`MacAudio::new` в `src/app.rs` должны быть `pub` (сама структура и конструктор, поля — нет), чтобы быть видимыми из `src-tauri/src/audio.rs` — это внешний по отношению к ядру крейт. `.expect(...)` здесь, а не пробрасывание ошибки через `status::fatal`, как у `WindowsDetector::new()` чуть выше по этому же файлу, — временное упрощение ЭТОЙ задачи: единообразную обработку отказа детектора/тапа на старте наводит Task 7 заодно с guard'ом версии ОС, здесь достаточно не притворяться, что тап поднялся, если это не так.
 
 - [ ] **Шаг 3: ручная проверка на Mac**
 
@@ -407,7 +525,7 @@ impl AudioIo for MacAudio {
 - [ ] **Шаг 4: commit**
 
 ```bash
-git add src/capture/mod.rs src/capture/macos.rs src-tauri/src/audio.rs
+git add src/capture/mod.rs src/capture/macos.rs src/app.rs src-tauri/src/audio.rs
 git commit -m "feat(capture): системная дорожка на macOS через Core Audio Process Tap"
 ```
 

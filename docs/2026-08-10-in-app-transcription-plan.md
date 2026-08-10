@@ -757,6 +757,14 @@ struct Transcribing(Mutex<Option<String>>);
 
 - [ ] **Шаг 2: вспомогательные функции emit**
 
+`app.emit(...)` требует трейт `Emitter` в области видимости — сегодня `src-tauri/src/main.rs` импортирует только `use tauri::{AppHandle, WindowEvent};`, без него. Без этой правки `app.emit(...)` ниже не скомпилируется (метод трейта, трейт не виден). Заменить на:
+
+```rust
+use tauri::{AppHandle, Emitter, WindowEvent};
+```
+
+(`audio.rs` уже импортирует `Emitter` для того же метода — `use tauri::{AppHandle, Emitter, Manager};` — здесь та же причина.)
+
 ```rust
 fn emit_transcribe_progress(app: &AppHandle, folder: &Option<String>, base: &str, stage: &str) {
     let _ = app.emit(

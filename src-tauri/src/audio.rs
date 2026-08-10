@@ -306,10 +306,43 @@ fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
     process_detected && system_level > MEETING_AUDIO_THRESHOLD
 }
 
+/// Проверяет, поддерживается ли данная версия macOS.
+/// Минимально требуемая версия — 14.4.
+#[cfg(target_os = "macos")]
+fn macos_version_supported(major: u32, minor: u32) -> bool {
+    (major, minor) >= (14, 4)
+}
+
+/// Разбирает строку версии macOS в пару (major, minor).
+/// `sysinfo::System::os_version()` на macOS отдаёт `"14.5"`/`"14.5.1"` —
+/// мажор и минор обязательны, патч (если есть) отбрасывается: он ни на что
+/// в этом сравнении не влияет.
+#[cfg(target_os = "macos")]
+fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
 pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
     let status = handle.state::<Status>();
+    #[cfg(target_os = "macos")]
+    {
+        let unsupported = sysinfo::System::os_version()
+            .and_then(|v| parse_major_minor(&v))
+            .map(|(major, minor)| !macos_version_supported(major, minor))
+            .unwrap_or(true); // не смогли определить версию — не рискуем, отказываем
+        if unsupported {
+            status::fatal(
+                &handle,
+                "нужна macOS 14.4 или новее — используется Core Audio Process Tap API".to_string(),
+            );
+            return;
+        }
+    }
     let det = match WindowsDetector::new() {
         Ok(d) => d,
         Err(e) => {
@@ -768,5 +801,60 @@ mod tests {
     #[test]
     fn порог_не_ловит_шум_на_грани_тишины() {
         assert!(!mac_should_arm(true, 0.001));
+    }
+
+    // ---- macos_version_supported -------------------------------------------------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn версия_14_4_поддерживается() {
+        assert!(macos_version_supported(14, 4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn более_новая_минорная_версия_поддерживается() {
+        assert!(macos_version_supported(14, 9));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn следующий_мажор_поддерживается() {
+        assert!(macos_version_supported(15, 0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn версия_ниже_14_4_не_поддерживается() {
+        assert!(!macos_version_supported(14, 3));
+        assert!(!macos_version_supported(13, 9));
+    }
+
+    // ---- parse_major_minor -------------------------------------------------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn разбор_обычной_версии() {
+        assert_eq!(parse_major_minor("14.5"), Some((14, 5)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn разбор_версии_с_патчем() {
+        assert_eq!(parse_major_minor("14.5.1"), Some((14, 5)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn разбор_версии_без_минорной_части() {
+        assert_eq!(parse_major_minor("15"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn разбор_мусора_даёт_none() {
+        assert_eq!(parse_major_minor("garbage"), None);
+        assert_eq!(parse_major_minor(""), None);
+        assert_eq!(parse_major_minor("14.x"), None);
     }
 }

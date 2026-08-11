@@ -34,17 +34,18 @@ mod imp {
         kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
         kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
         kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
-        kAudioDevicePropertyDeviceUID, kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+        kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreamConfiguration,
+        kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectSystemObject,
         kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey,
         kAudioTapPropertyFormat, AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID,
         AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
         AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
-        AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectID,
-        AudioObjectPropertyAddress, CATapDescription,
+        AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+        AudioObjectID, AudioObjectPropertyAddress, CATapDescription,
     };
     use objc2_core_audio_types::{
-        kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBufferList,
+        kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBuffer, AudioBufferList,
         AudioStreamBasicDescription, AudioTimeStamp,
     };
     use objc2_core_foundation::CFDictionary;
@@ -70,18 +71,137 @@ mod imp {
         resampler: Resampler,
         samples: Vec<i16>,
         packets: u64,
-        /// Раскладка ВХОДНОГО ABL, снятая на первом пакете.
-        ///
-        /// Нужна потому, что «в ABL лежит ровно тап и ничего кроме тапа» — это
-        /// предположение, а не факт: главный саб-девайс агрегата — реальное
-        /// устройство вывода, и если у него есть собственные входные потоки
-        /// (USB-интерфейс, AirPods, iPhone как аудиоустройство), их буферы
-        /// приедут в тот же ABL рядом с тапом. Тогда сведение в моно подмешает
-        /// микрофон в системный звук, человек услышит в WAV музыку, поставит
-        /// галочку — и Task 4 унаследует ложную посылку. Сумма каналов по всем
-        /// буферам сверяется с `mChannelsPerFrame` тапа: расхождение = провал.
+        /// Раскладка ВХОДНОГО ABL, снятая на первом пакете, — для диагностики.
         abl_buffers: u32,
         abl_channels: u32,
+        /// Срез буферов ABL, опознанный как тап: `[start .. start+len)`.
+        tap_start: usize,
+        tap_len: usize,
+        /// Первая причина, по которой опознать тап не удалось. Паниковать прямо
+        /// в колбэке нельзя (разворот стека сквозь C-кадры HAL и dispatch), так
+        /// что причина копится здесь, а падает `run()` уже на своём потоке.
+        locate_error: Option<&'static str>,
+        skipped: u64,
+    }
+
+    /// ТРЕТЬЯ ловушка рецепта, не описанная в дизайн-доке (первые две — тап как
+    /// главный саб-девайс и `isExclusive`). Найдена прогоном на AirPods.
+    ///
+    /// Входной ABL агрегата содержит НЕ ТОЛЬКО тап. Главный саб-девайс — реальное
+    /// устройство вывода, и если у него есть собственные ВХОДНЫЕ потоки (у AirPods
+    /// это микрофон, у USB-интерфейса — его входы), они приезжают в тот же ABL:
+    ///
+    /// ```text
+    /// [0] mNumberChannels=1, 2048 Б  <- микрофон AirPods
+    /// [1] mNumberChannels=2, 4096 Б  <- собственно тап (48 кГц, f32, переплетённое стерео)
+    /// ```
+    ///
+    /// Смещение тапа НЕ хардкодится. Оно выводится: у устройства вывода
+    /// спрашивается, сколько входных каналов оно вносит
+    /// (`kAudioDevicePropertyStreamConfiguration` во входной области), у тапа
+    /// известно `mChannelsPerFrame`, и граница между ними проводится по
+    /// накопленной сумме каналов. Порядок «сначала саб-девайс, потом тап» —
+    /// наблюдение, а не гарантия SDK, поэтому обратный порядок и неоднозначные
+    /// раскладки распознаются отдельно и валят прогон с внятным текстом.
+    ///
+    /// Опорный факт из заголовка (`AudioHardware.h`, `FullSubDeviceList`):
+    /// «The order of the items in the array is significant and is used to
+    /// determine the order of the streams of the AudioAggregateDevice» — то есть
+    /// порядок потоков саб-девайсов задан их порядком в композиции. Про то, где
+    /// относительно них встают тапы, заголовок не говорит ничего; отсюда сверка.
+    ///
+    /// Возвращает `[start, len)` в буферах ABL.
+    fn locate_tap(
+        channels: &[u32],
+        device_in_buffers: usize,
+        device_in_channels: u32,
+        tap_channels: u32,
+    ) -> Result<(usize, usize), &'static str> {
+        let total: u32 = channels.iter().sum();
+        if total != device_in_channels + tap_channels {
+            return Err("сумма каналов ABL != каналы входа саб-девайса + каналы тапа");
+        }
+        if device_in_buffers > channels.len() {
+            return Err("во входном ABL буферов меньше, чем вносит вход саб-девайса");
+        }
+        // Вход устройства известен ДВУМЯ величинами — сколько буферов и сколько
+        // каналов. Проверять обе строго сильнее, чем одну накопленную сумму:
+        // раскладка [1кан][1кан][2кан] при входе «2 кан.» по одним каналам
+        // читается двояко, а с числом буферов — однозначно.
+        let tap_buffers = channels.len() - device_in_buffers;
+        let sum = |part: &[u32]| -> u32 { part.iter().sum() };
+
+        let forward = sum(&channels[..device_in_buffers]) == device_in_channels
+            && sum(&channels[device_in_buffers..]) == tap_channels;
+        let reverse = sum(&channels[..tap_buffers]) == tap_channels
+            && sum(&channels[tap_buffers..]) == device_in_channels;
+
+        // Вход саб-девайса пуст (встроенные динамики): тап — весь ABL, и оба
+        // прочтения вырождаются в одно. Это не неоднозначность, а тривиальный случай.
+        if device_in_buffers == 0 {
+            return Ok((0, channels.len()));
+        }
+        match (forward, reverse) {
+            (true, true) => Err("раскладка симметрична: вход саб-девайса и тап неразличимы"),
+            (true, false) => Ok((device_in_buffers, tap_buffers)),
+            (false, true) => Err("порядок обратный ожидаемому: тап идёт ПЕРЕД входом саб-девайса"),
+            (false, false) => Err("раскладка ABL не сходится ни с прямым, ни с обратным порядком"),
+        }
+    }
+
+    /// Сводит буферы ТАПА (и только их) в моно f32, уважая собственное
+    /// `mNumberChannels` каждого буфера.
+    ///
+    /// Вторая половина того же бага: `mNumberBuffers > 1` НЕ означает
+    /// «непереплетённый». Это несколько ПОТОКОВ, каждый из которых сам может быть
+    /// переплетённым. Тап отдаёт один поток с двумя переплетёнными каналами, и
+    /// старый код читал его L,R,L,R как последовательные моно-сэмплы — отсюда
+    /// алиасинг, убивший 1318.5 Гц в спектральной проверке. Правильный
+    /// различитель — `mNumberChannels` буфера, а не число буферов.
+    ///
+    /// # Safety
+    /// `bufs` должны указывать на живые буферы HAL с корректным `mDataByteSize`.
+    unsafe fn tap_to_mono(bufs: &[AudioBuffer], tap_channels: u32) -> Vec<f32> {
+        if bufs.iter().any(|b| b.mData.is_null()) {
+            return Vec::new();
+        }
+        // Один поток — общий случай для тапа: переплетённое стерео. Копии не надо.
+        if bufs.len() == 1 {
+            let b = &bufs[0];
+            let ch = b.mNumberChannels.max(1);
+            let n = b.mDataByteSize as usize / 4;
+            let samples = unsafe { std::slice::from_raw_parts(b.mData as *const f32, n) };
+            return downmix_to_mono_f32(samples, ch as u16);
+        }
+        // Несколько потоков тапа: каждый со своим числом каналов. Переплетаем в
+        // скрэтч на tap_channels каналов и сводим тем же downmix_to_mono_f32.
+        // `frames` — минимум по потокам: буферы не обязаны быть одной длины, и
+        // длина, снятая с одного, стала бы перечитом за конец другого.
+        let frames = bufs
+            .iter()
+            .map(|b| b.mDataByteSize as usize / 4 / b.mNumberChannels.max(1) as usize)
+            .min()
+            .unwrap_or(0);
+        let total = tap_channels.max(1) as usize;
+        if frames == 0 {
+            return Vec::new();
+        }
+        let mut inter = vec![0.0f32; frames * total];
+        let mut base = 0usize;
+        for b in bufs {
+            let ch = b.mNumberChannels.max(1) as usize;
+            if base + ch > total {
+                break;
+            }
+            let src = unsafe { std::slice::from_raw_parts(b.mData as *const f32, frames * ch) };
+            for f in 0..frames {
+                for c in 0..ch {
+                    inter[f * total + base + c] = src[f * ch + c];
+                }
+            }
+            base += ch;
+        }
+        downmix_to_mono_f32(&inter, total as u16)
     }
 
     pub fn run() {
@@ -207,12 +327,26 @@ mod imp {
         // Не через AVAudioEngine: он не ретаргетится на произвольный HAL-девайс —
         // `kAudioOutputUnitProperty_CurrentDevice` вернёт noErr, но движок молча
         // продолжит читать системный дефолтный ВХОД (микрофон), а не тап.
+        // Сколько ВХОДНЫХ каналов вносит в агрегат само устройство вывода. Это и
+        // есть та величина, из которой выводится смещение тапа в ABL, — вместо
+        // «пропустить первый буфер» или «тап последний», то есть вместо замены
+        // одного непроверенного допущения другим.
+        let (device_in_buffers, device_in_channels) = device_input_streams(output_device);
+        println!(
+            "вход устройства вывода вносит в агрегат: {} буфер(ов), {} кан.",
+            device_in_buffers, device_in_channels
+        );
+
         let state = Arc::new(Mutex::new(State {
             resampler: Resampler::new(tap_rate, SAMPLE_RATE),
             samples: Vec::new(),
             packets: 0,
             abl_buffers: 0,
             abl_channels: 0,
+            tap_start: 0,
+            tap_len: 0,
+            locate_error: None,
+            skipped: 0,
         }));
         let cb_state = Arc::clone(&state);
 
@@ -235,69 +369,67 @@ mod imp {
                 let st = &mut *guard;
                 st.packets += 1;
 
-                // Раскладку снимаем и печатаем ровно один раз: без этого открытый
-                // вопрос «а тап ли вообще лежит в буфере 0» уходит в Task 4
-                // непроверенным — прогон его не отвечает, потому что цифры нигде
-                // не видны. Печать в аудио-колбэке — грех, но однократный.
+                // Опознаём тап на КАЖДОМ пакете, а не только на первом: раскладка
+                // ABL не обязана быть постоянной, а стоит это десяток целочисленных
+                // операций. Ошибка не паникует здесь, а копится в состоянии.
+                let ch_counts: Vec<u32> = buffers.iter().map(|b| b.mNumberChannels).collect();
+                let located = locate_tap(
+                    &ch_counts,
+                    device_in_buffers as usize,
+                    device_in_channels,
+                    tap_channels,
+                );
+
+                // Раскладку печатаем ровно один раз: без этого открытый вопрос
+                // «а тап ли вообще лежит в буфере 0» уходит в Task 4 непроверенным.
+                // Печать в аудио-колбэке — грех, но однократный.
                 if st.packets == 1 {
                     st.abl_buffers = abl.mNumberBuffers;
-                    st.abl_channels = buffers.iter().map(|b| b.mNumberChannels).sum();
+                    st.abl_channels = ch_counts.iter().sum();
                     let layout: Vec<String> = buffers
                         .iter()
-                        .map(|b| format!("{}кан./{}Б", b.mNumberChannels, b.mDataByteSize))
+                        .enumerate()
+                        .map(|(i, b)| format!("[{i}] {}кан./{}Б", b.mNumberChannels, b.mDataByteSize))
                         .collect();
                     println!(
-                        "раскладка входного ABL: {} буфер(ов) [{}], итого {} кан.; у тапа {} кан.",
+                        "раскладка входного ABL: {} буфер(ов) {{{}}}, итого {} кан.",
                         st.abl_buffers,
                         layout.join(", "),
                         st.abl_channels,
-                        tap_channels,
                     );
+                    if let Ok((start, len)) = located {
+                        st.tap_start = start;
+                        st.tap_len = len;
+                    }
+                    match located {
+                        Ok((start, len)) => println!(
+                            "тап опознан как буфер(ы) [{}..{}) — вход устройства вывода вносит \
+                             {} кан. в {} буфер(ах), тап вносит {} кан.; граница проведена по \
+                             накопленной сумме каналов, не по фиксированному смещению",
+                            start,
+                            start + len,
+                            device_in_channels,
+                            device_in_buffers,
+                            tap_channels,
+                        ),
+                        Err(why) => eprintln!("тап в ABL НЕ опознан: {why}"),
+                    }
                 }
 
-                let mono = if count == 1 {
-                    let b = &buffers[0];
-                    if b.mData.is_null() {
+                let (start, len) = match located {
+                    Ok(slice) => slice,
+                    Err(why) => {
+                        st.locate_error.get_or_insert(why);
+                        st.skipped += 1;
                         return;
                     }
-                    let samples = unsafe {
-                        std::slice::from_raw_parts(
-                            b.mData as *const f32,
-                            b.mDataByteSize as usize / 4,
-                        )
-                    };
-                    downmix_to_mono_f32(samples, b.mNumberChannels.max(1) as u16)
-                } else {
-                    // Непереплетённый вариант: по буферу на канал. Переплетаем в
-                    // скрэтч, чтобы свести тем же downmix_to_mono_f32, а не своим.
-                    //
-                    // `frames` — МИНИМУМ по всем буферам, а не длина нулевого.
-                    // Буферы в одном ABL не обязаны быть одной длины: моно-поток
-                    // микрофона рядом со стерео-тапом даёт вдвое меньший буфер, и
-                    // длина, снятая с нулевого, стала бы двукратным перечитом за
-                    // конец чужого буфера — мусор из кучи в WAV или сегфолт.
-                    let frames = buffers
-                        .iter()
-                        .map(|b| b.mDataByteSize as usize / 4)
-                        .min()
-                        .unwrap_or(0);
-                    if frames == 0 {
-                        return;
-                    }
-                    let mut inter = vec![0.0f32; frames * count];
-                    for (ch, b) in buffers.iter().enumerate() {
-                        if b.mData.is_null() {
-                            continue;
-                        }
-                        let src =
-                            unsafe { std::slice::from_raw_parts(b.mData as *const f32, frames) };
-                        for (i, &s) in src.iter().enumerate() {
-                            inter[i * count + ch] = s;
-                        }
-                    }
-                    downmix_to_mono_f32(&inter, count as u16)
                 };
 
+                // Сводим ТОЛЬКО буферы тапа. Чужие входы не попадают в микс.
+                let mono = unsafe { tap_to_mono(&buffers[start..start + len], tap_channels) };
+                if mono.is_empty() {
+                    return;
+                }
                 let out = st.resampler.process_to_i16(&mono);
                 st.samples.extend_from_slice(&out);
             },
@@ -409,16 +541,29 @@ mod imp {
             "колбэк IOProc не вызвался ни разу — записывать нечего, рецепт не подтверждён"
         );
         assert!(
-            st.abl_channels == tap_channels,
-            "раскладка ABL не совпала с форматом тапа: в ABL {} буфер(ов) на {} кан., \
-             а у тапа {} кан. Значит, во входном буфере лежит не только тап (скорее \
-             всего рядом приехал входной поток устройства вывода), и всё, что \
-             записано в WAV, — смесь тапа с чужим источником. Галочку по этому \
-             прогону ставить нельзя: Task 4 обязан считать смещение тапа в ABL, \
-             а не полагать, что тап начинается с буфера 0.",
+            st.locate_error.is_none(),
+            "тап не удалось опознать во входном ABL: {}. В ABL было {} буфер(ов) на {} кан.; \
+             вход устройства вывода вносит {} кан., у тапа {} кан. Пропущено пакетов: {}. \
+             Записанное в WAV неполно или пусто — галочку по этому прогону ставить нельзя. \
+             Task 4 обязан разбирать этот случай, а не полагать, что тап занимает весь ABL.",
+            st.locate_error.unwrap_or(""),
             st.abl_buffers,
             st.abl_channels,
+            device_in_channels,
             tap_channels,
+            st.skipped,
+        );
+        assert!(
+            st.skipped == 0,
+            "{} пакет(ов) из {} пропущено — раскладка ABL менялась по ходу прогона",
+            st.skipped,
+            st.packets,
+        );
+        println!(
+            "раскладка подтверждена: тап = буфер(ы) [{}..{}) из {}",
+            st.tap_start,
+            st.tap_start + st.tap_len,
+            st.abl_buffers,
         );
     }
 
@@ -474,6 +619,56 @@ mod imp {
             "kAudioDevicePropertyDeviceUID",
         );
         unsafe { Retained::from_raw(uid) }.expect("устройство вернуло пустой UID")
+    }
+
+    /// Сколько буферов и каналов устройство вносит СВОИМ входом.
+    ///
+    /// `kAudioDevicePropertyStreamConfiguration` во входной области возвращает
+    /// `AudioBufferList` переменной длины — размер сначала спрашивается отдельно.
+    /// У устройства без входов (встроенные динамики) свойства может не быть
+    /// вовсе: это не ошибка, а честный ноль.
+    fn device_input_streams(device: AudioObjectID) -> (u32, u32) {
+        let mut a = AudioObjectPropertyAddress {
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let mut size: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(
+                device,
+                NonNull::from(&mut a),
+                0,
+                null(),
+                NonNull::from(&mut size),
+            )
+        };
+        if status != 0 || (size as usize) < std::mem::size_of::<AudioBufferList>() {
+            return (0, 0);
+        }
+        // Через Vec<u64>, а не Vec<u8>: в AudioBufferList есть указатель, и читать
+        // структуру с невыровненного адреса — UB. u64 даёт нужные 8 байт выравнивания.
+        let mut raw = vec![0u64; size as usize / 8 + 1];
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    device,
+                    NonNull::from(&mut a),
+                    0,
+                    null(),
+                    NonNull::from(&mut size),
+                    NonNull::new(raw.as_mut_ptr().cast()).expect("Vec дал нулевой указатель"),
+                )
+            },
+            "kAudioDevicePropertyStreamConfiguration (вход устройства вывода)",
+        );
+        let abl = unsafe { &*(raw.as_ptr() as *const AudioBufferList) };
+        let count = abl.mNumberBuffers as usize;
+        if count == 0 {
+            return (0, 0);
+        }
+        let bufs = unsafe { std::slice::from_raw_parts(abl.mBuffers.as_ptr(), count) };
+        (count as u32, bufs.iter().map(|b| b.mNumberChannels).sum())
     }
 
     fn tap_format(tap: AudioObjectID) -> AudioStreamBasicDescription {

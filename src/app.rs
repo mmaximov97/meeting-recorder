@@ -27,6 +27,10 @@ use crate::storage::{month_dir, recording_filename, Track, WavSink, SAMPLE_RATE}
 use chrono::{DateTime, Local};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
+// Только `CpalAudio` меряет стоимость открытия потоков (`MR_DEBUG_TIMING`),
+// и только на Windows: на macOS системная дорожка уже течёт к моменту open(),
+// а измерять там нечего — расхождения по построению нет.
+#[cfg(target_os = "windows")]
 use std::time::Instant;
 
 const RING_SECONDS: usize = 30;
@@ -111,6 +115,11 @@ impl SinkFactory for WavSinks {
 
 /// Живут только пока идёт детект или запись. Drop останавливает захват,
 /// поэтому индикатор микрофона в Windows гаснет сразу после Idle.
+///
+/// Windows-only вместе с `CpalAudio`, которая единственная её и строит:
+/// у `MacAudio` системная дорожка не в потоке cpal, а в общем на весь процесс
+/// `SystemTap`, и держать под неё поле здесь нечего.
+#[cfg(target_os = "windows")]
 struct Streams {
     /// Тихий render-поток: не даёт эндпоинту простаивать, иначе WASAPI loopback
     /// не отдаёт пакеты и дорожка `system` начинается не с открытия потока, а с
@@ -310,6 +319,102 @@ impl AudioIo for CpalAudio {
     }
 }
 
+/// Реальный захват на macOS: микрофон через cpal, система — через процесс-тап.
+///
+/// Структурно параллельна [`CpalAudio`], но с одним принципиальным отличием:
+/// системная дорожка НЕ открывается в `open()` и не гаснет в `close()`. Тап
+/// поднят снаружи, до `App`, и течёт всё время работы приложения — иначе
+/// сигналу активности звука, которым на macOS достраивается детект, не на чем
+/// было бы работать до первого детекта (см. докблок `capture::SystemTap`).
+///
+/// `pub` — потому что `MacAudio::new` зовётся из `src-tauri/src/audio.rs`,
+/// другого крейта. Поля при этом остаются приватными: наружу торчит только
+/// конструктор.
+#[cfg(target_os = "macos")]
+pub struct MacAudio {
+    mic: Option<cpal::Stream>,
+    mic_rx: Option<Receiver<Vec<i16>>>,
+    mic_choice: DeviceChoice,
+    fell_back: Option<String>,
+    /// Живёт всё время процесса — сконструирован снаружи и передан сюда,
+    /// а не создаётся в `open()`/`close()`.
+    system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacAudio {
+    /// `system_tap` — общий на весь процесс, конструируется и передаётся
+    /// вызывающим (`audio::run()`), а не здесь: это ресурс уровня процесса,
+    /// а не уровня одной записи.
+    pub fn new(
+        mic: DeviceChoice,
+        system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
+    ) -> Self {
+        Self {
+            mic: None,
+            mic_rx: None,
+            mic_choice: mic,
+            fell_back: None,
+            system_tap,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AudioIo for MacAudio {
+    /// Открывает ТОЛЬКО микрофон: системная дорожка течёт из `system_tap`
+    /// независимо от этого вызова.
+    ///
+    /// Разделения «открыть» и «запустить» здесь достаточно в вырожденном виде:
+    /// поток ровно один, выравнивать его не с чем — тап уже идёт, и его время
+    /// отсчитывается от старта приложения, а не от `open()`.
+    fn open(&mut self) -> Res {
+        if self.mic.is_some() {
+            return Ok(());
+        }
+        let (tx, rx) = channel();
+        let (pending, fell_back) = build_mic_capture(&self.mic_choice, tx)?;
+        self.fell_back = fell_back;
+        self.mic = Some(pending.play()?);
+        self.mic_rx = Some(rx);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.mic = None;
+        self.mic_rx = None;
+    }
+
+    /// Про микрофон — как и требует докблок трейта («горит ли индикатор»).
+    /// Системная дорожка сюда не входит: privacy-индикатора у тапа нет, и
+    /// этим методом она не гейтится.
+    fn is_open(&self) -> bool {
+        self.mic.is_some()
+    }
+
+    fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+        let mic = self
+            .mic_rx
+            .as_ref()
+            .map(|rx| rx.try_iter().flatten().collect())
+            .unwrap_or_default();
+        // Дренируется ВСЕГДА, даже когда микрофон закрыт: иначе накопленное в
+        // канале тапа росло бы без предела всё время простоя, а уровень
+        // системного звука (второй сигнал детекта на macOS) считался бы по
+        // тому, что играло минуты назад.
+        let sys = self.system_tap.borrow_mut().drain();
+        (mic, sys)
+    }
+
+    fn set_mic_device(&mut self, choice: DeviceChoice) {
+        self.mic_choice = choice;
+    }
+
+    fn fell_back_from(&self) -> Option<String> {
+        self.fell_back.clone()
+    }
+}
+
 /// Пиковый уровень по обеим дорожкам, 0..1.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Levels {
@@ -366,6 +471,19 @@ impl App {
     #[cfg(target_os = "windows")]
     pub fn new(root: PathBuf, mic: DeviceChoice) -> Self {
         Self::with_backends(root, Box::new(CpalAudio::new(mic)), Box::new(WavSinks))
+    }
+
+    /// Для платформ, где `AudioIo` собирается снаружи.
+    ///
+    /// На macOS это `MacAudio` с общим на весь процесс `SystemTap`: одним
+    /// `DeviceChoice`, который принимает `App::new`, такой захват не
+    /// описывается — тап поднимается раньше `App` и живёт дольше любой записи.
+    ///
+    /// `SinkFactory` при этом всегда `WavSinks`, как и в `App::new`:
+    /// варьируется только `AudioIo`. Подставной `SinkFactory` остаётся делом
+    /// тестов и `with_backends`.
+    pub fn new_with_audio(root: PathBuf, audio: Box<dyn AudioIo>) -> Self {
+        Self::with_backends(root, audio, Box::new(WavSinks))
     }
 
     /// Сменить микрофон. Вступает в силу со следующего открытия потоков.

@@ -47,10 +47,13 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{build_loopback_capture, start_silence};
 
-// Не `mod` + `pub use`, как у windows: в Task 4 сюда приедет `SystemTap`, и
-// потребителю (а пока — спайку `examples/mac_tap_spike.rs`) нужен сам модуль.
+// Не `mod` + `pub use`, как у windows: кроме `SystemTap`, наружу нужен и сам
+// модуль — чистые `locate_tap`/`interleave_streams` зовёт спайк
+// `examples/mac_tap_spike.rs`, оставленный как эталон рецепта.
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::SystemTap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -102,6 +105,17 @@ pub enum CaptureError {
     Cpal(#[from] cpal::Error),
     #[error("устройство отдаёт неподдерживаемый формат сэмплов: {0}")]
     UnsupportedSampleFormat(SampleFormat),
+    /// Вызов Core Audio вернул не `noErr`. Имя вызова обязательно: по одному
+    /// коду вроде `'!obj'` не понять, на каком из девяти шагов рецепта он вышел.
+    #[cfg(target_os = "macos")]
+    #[error("{what}: {}", macos::status_text(*status))]
+    CoreAudio { what: &'static str, status: i32 },
+    /// Core Audio отработал без ошибок, но отдал не то, с чем мы умеем
+    /// работать: формат тапа, пустой UID устройства. Отдельно от `CoreAudio`,
+    /// потому что кода `OSStatus` здесь нет вовсе — есть наше решение отказаться.
+    #[cfg(target_os = "macos")]
+    #[error("системный тап: {0}")]
+    Tap(String),
 }
 
 /// Клиппинг и масштабирование одного f32-сэмпла в i16.

@@ -65,6 +65,80 @@ mod imp {
     /// Фора человеку на «переключиться в плеер и нажать play» до старта записи.
     const GRACE_SECS: u64 = 3;
 
+    /// Какую композицию агрегата собирать. Выбирается аргументом командной строки.
+    ///
+    /// Обе проверяются на живом железе в один присест: спор «нужен ли в агрегате
+    /// реальный саб-девайс» решается замером, а не рассуждением.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Composition {
+        /// Композиция из плана: реальное устройство вывода главным саб-девайсом,
+        /// оно же в `SubDeviceList`, тап отдельным списком `taps`.
+        ///
+        /// Именно эта композиция подтверждена работающей на прогоне (AirPods,
+        /// пик 10732). Её словарь ниже не трогается ни на байт.
+        Plan,
+        /// Композиция «только тап»: реального саб-девайса в агрегате нет вовсе.
+        ///
+        /// Взята из `q-p/SoundPusher`, `SoundPusher/AudioTap.mm`,
+        /// `AggregateTappedDevice::AggregateTappedDevice` — словарь из четырёх
+        /// ключей: `UID`, `Name`, `IsPrivate: YES`, `TapList`. Ключи
+        /// `MainSubDevice` и `SubDeviceList` там закомментированы с авторским
+        /// комментарием «it seems we only need the tap, not the actual device in
+        /// there»; `TapAutoStart` тоже закомментирован; `IsStacked` не
+        /// используется.
+        ///
+        /// `makeusabrew/audiotee` делает то же самое иначе: пустой
+        /// `SubDeviceList: []`, устаревший `MasterSubDevice: 0` (целое!),
+        /// `IsStacked: false`, а тап привешивает ПОСЛЕ создания через
+        /// `AudioObjectSetPropertyData(kAudioAggregateDevicePropertyTapList)`.
+        /// Выбран вариант SoundPusher: он оставляет тап в словаре создания, то
+        /// есть отличается от `Plan` ровно удалением двух ключей и ничего нового
+        /// в код не приносит. Если он даст тишину, следующий кандидат —
+        /// вариант AudioTee целиком.
+        TapOnly,
+    }
+
+    impl Composition {
+        fn from_args() -> Self {
+            match std::env::args().nth(1).as_deref() {
+                None | Some("plan") => Composition::Plan,
+                Some("taponly") => Composition::TapOnly,
+                Some(other) => {
+                    eprintln!(
+                        "неизвестная композиция {other:?}\n\
+                         использование: cargo run --example mac_tap_spike -- [plan|taponly]\n\
+                         без аргумента — plan"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Composition::Plan => "plan",
+                Composition::TapOnly => "taponly",
+            }
+        }
+
+        fn description(self) -> &'static str {
+            match self {
+                Composition::Plan => "реальное устройство вывода главным саб-девайсом + тап",
+                Composition::TapOnly => "ТОЛЬКО тап, реального саб-девайса в агрегате нет",
+            }
+        }
+
+        /// Отдельное имя файла на композицию: второй прогон не должен затирать
+        /// первый, иначе спектральную проверку не с чем сравнивать.
+        /// Расширение `.wav` сохранено — `.gitignore` ловит их по `*.wav`.
+        fn wav_name(self) -> &'static str {
+            match self {
+                Composition::Plan => "mac_tap_spike.plan.wav",
+                Composition::TapOnly => "mac_tap_spike.taponly.wav",
+            }
+        }
+    }
+
     /// Состояние за одним мьютексом: ресемплер и накопитель.
     ///
     /// Ресемплер именно ОДИН на весь поток, а не новый на пакет: он stateful —
@@ -137,6 +211,15 @@ mod imp {
     }
 
     pub fn run() {
+        // Первой строкой и ничем иным: два прогона читаются подряд, и перепутать
+        // их вывод нельзя.
+        let composition = Composition::from_args();
+        println!(
+            "=== КОМПОЗИЦИЯ АГРЕГАТА: {} ({}) ===",
+            composition.label(),
+            composition.description()
+        );
+
         // --- 1. описание тапа: весь микс, никого не исключаем -----------------
         //
         // `isExclusive` руками НЕ трогаем: это флаг направления (включать
@@ -201,10 +284,32 @@ mod imp {
         // Спрашиваем ДО создания агрегата: после устройство уже в него зачислено,
         // и вопрос «а не изменился ли его собственный вход от участия в агрегате»
         // пришлось бы проверять на железе. Здесь этот вопрос просто не возникает.
-        let (device_in_buffers, device_in_channels) = device_input_streams(output_device);
+        let (device_has_buffers, device_has_channels) = device_input_streams(output_device);
         println!(
-            "вход устройства вывода вносит: {} буфер(ов), {} кан.",
-            device_in_buffers, device_in_channels
+            "собственный вход устройства вывода: {} буфер(ов), {} кан.",
+            device_has_buffers, device_has_channels
+        );
+
+        // Сколько это устройство вносит ИМЕННО В ЭТОТ агрегат — зависит от
+        // композиции, и это не одно и то же.
+        //
+        // В `taponly` устройства в агрегате нет вообще, поэтому вносит оно ноль,
+        // сколько бы своих входов у него ни было. Подставить сюда ноль — НЕ
+        // отключение проверки: `locate_tap(ch, 0, 0, tap)` требует, чтобы сумма
+        // каналов ABL в точности равнялась каналам тапа, и падает, если в ABL
+        // приехало что-то ещё. То есть в этой композиции ассерт проверяет ровно
+        // то утверждение, которое и должно быть верно: «в ABL нет ничего, кроме
+        // тапа». Ожидание — смещение 0 и длина во весь ABL, но это именно
+        // ожидание, которое проверяется, а не постулируется.
+        let (device_in_buffers, device_in_channels) = match composition {
+            Composition::Plan => (device_has_buffers, device_has_channels),
+            Composition::TapOnly => (0, 0),
+        };
+        println!(
+            "вносит в агрегат при композиции {}: {} буфер(ов), {} кан.",
+            composition.label(),
+            device_in_buffers,
+            device_in_channels
         );
 
         // --- 4. словарь агрегированного устройства ----------------------------
@@ -231,30 +336,48 @@ mod imp {
         let sub_devices = NSArray::from_retained_slice(&[sub_device]);
         let sub_taps = NSArray::from_retained_slice(&[sub_tap]);
 
-        let keys = [
-            ns(kAudioAggregateDeviceNameKey),
-            ns(kAudioAggregateDeviceUIDKey),
-            ns(kAudioAggregateDeviceMainSubDeviceKey),
-            ns(kAudioAggregateDeviceIsPrivateKey),
-            ns(kAudioAggregateDeviceIsStackedKey),
-            ns(kAudioAggregateDeviceTapAutoStartKey),
-            ns(kAudioAggregateDeviceSubDeviceListKey),
-            ns(kAudioAggregateDeviceTapListKey),
-        ];
         let agg_name = NSString::from_str("meeting-recorder spike aggregate");
-        let values: [&AnyObject; 8] = [
-            &agg_name,
-            &agg_uid,
-            &output_uid,
-            &yes,
-            &no,
-            &yes,
-            &sub_devices,
-            &sub_taps,
-        ];
-        let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
-        let agg_dict: Retained<NSDictionary<NSString, AnyObject>> =
-            NSDictionary::from_slices(&key_refs, &values);
+        let agg_dict: Retained<NSDictionary<NSString, AnyObject>> = match composition {
+            // Ровно тот словарь, что был до появления вариантов: восемь ключей,
+            // те же значения, тот же порядок. Эта ветка не менялась.
+            Composition::Plan => {
+                let keys = [
+                    ns(kAudioAggregateDeviceNameKey),
+                    ns(kAudioAggregateDeviceUIDKey),
+                    ns(kAudioAggregateDeviceMainSubDeviceKey),
+                    ns(kAudioAggregateDeviceIsPrivateKey),
+                    ns(kAudioAggregateDeviceIsStackedKey),
+                    ns(kAudioAggregateDeviceTapAutoStartKey),
+                    ns(kAudioAggregateDeviceSubDeviceListKey),
+                    ns(kAudioAggregateDeviceTapListKey),
+                ];
+                let values: [&AnyObject; 8] = [
+                    &agg_name,
+                    &agg_uid,
+                    &output_uid,
+                    &yes,
+                    &no,
+                    &yes,
+                    &sub_devices,
+                    &sub_taps,
+                ];
+                let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+                NSDictionary::from_slices(&key_refs, &values)
+            }
+            // SoundPusher, AudioTap.mm: UID, Name, IsPrivate, TapList — и всё.
+            // Ни MainSubDevice, ни SubDeviceList, ни IsStacked, ни TapAutoStart.
+            Composition::TapOnly => {
+                let keys = [
+                    ns(kAudioAggregateDeviceNameKey),
+                    ns(kAudioAggregateDeviceUIDKey),
+                    ns(kAudioAggregateDeviceIsPrivateKey),
+                    ns(kAudioAggregateDeviceTapListKey),
+                ];
+                let values: [&AnyObject; 4] = [&agg_name, &agg_uid, &yes, &sub_taps];
+                let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+                NSDictionary::from_slices(&key_refs, &values)
+            }
+        };
 
         // --- 5. создать агрегированное устройство ------------------------------
         //
@@ -474,13 +597,55 @@ mod imp {
             );
         }
 
-        let mut sink = WavSink::create(Path::new("."), "mac_tap_spike.wav").expect("создать WAV");
+        let mut sink =
+            WavSink::create(Path::new("."), composition.wav_name()).expect("создать WAV");
         sink.write(&st.samples).expect("записать сэмплы");
         let path = sink.finalize().expect("закрыть WAV");
         println!(
             "Записано в {} — прослушай и подтверди, что там системный звук",
             path.display()
         );
+
+        // --- итог: ошибка Core Audio или «всё удалось, но звука нет» ------------
+        //
+        // Дизайн-док предупреждает, что тап в неверной структурной позиции даёт
+        // ТИШИНУ, а не ошибку. Значит, два исхода надо развести явно, иначе по
+        // выводу не понять, что именно произошло.
+        //
+        // Ошибка Core Audio сюда просто не доходит: `check` валит прогон в точке
+        // вызова с текстом «<функция> упал: OSStatus N ('4cc')». Раз мы здесь —
+        // ни один вызов не сбоил, и остаётся только вопрос про данные.
+        println!("--- ИТОГ ({}) ---", composition.label());
+        println!("Core Audio: ошибок нет, все вызовы вернули noErr.");
+        if st.packets == 0 {
+            println!(
+                "Данные: IOProc НЕ ВЫЗВАЛСЯ НИ РАЗУ. Агрегат создался, но поток не пошёл."
+            );
+        } else if st.null_data > 0 && st.samples.is_empty() {
+            println!(
+                "Данные: IOProc вызвался {} раз, но во всех пакетах у тапа mData == NULL — \
+                 поток числится НЕиспользуемым.",
+                st.packets
+            );
+        } else if peak == 0 {
+            println!(
+                "Данные: IOProc вызвался {} раз, буферы приходили, но все сэмплы нулевые — \
+                 ровно та ТИШИНА БЕЗ ОШИБКИ, о которой предупреждает дизайн-док.",
+                st.packets
+            );
+        } else {
+            println!(
+                "Данные: IOProc вызвался {} раз, пик {peak}. ЗВУК ЕСТЬ.",
+                st.packets
+            );
+        }
+        if peak == 0 && composition == Composition::TapOnly {
+            println!(
+                "Для композиции taponly тишина без ошибок — ЗАКОННЫЙ результат эксперимента, \
+                 а не обязательно баг в коде: она и означает, что тап в этой структурной \
+                 позиции не отдаёт данных."
+            );
+        }
 
         // Вердикт по раскладке — ПОСЛЕ записи WAV и разбора устройств, но до
         // выхода с нулевым кодом. Порядок именно такой: файл и вся диагностика
@@ -493,7 +658,10 @@ mod imp {
         // Тут это обычная паника на обычном потоке.
         assert!(
             st.packets > 0,
-            "колбэк IOProc не вызвался ни разу — записывать нечего, рецепт не подтверждён"
+            "колбэк IOProc не вызвался ни разу при композиции {} — записывать нечего. \
+             Это НЕ ошибка Core Audio (все вызовы вернули noErr), а отсутствие потока: \
+             для plan это провал рецепта, для taponly — результат эксперимента.",
+            composition.label(),
         );
         assert!(
             st.locate_error.is_none(),

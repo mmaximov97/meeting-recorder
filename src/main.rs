@@ -46,7 +46,39 @@ fn recordings_root() -> PathBuf {
     PathBuf::from(home).join("Recordings")
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Тонкая обёртка над [`run`] ради ОДНОЙ вещи: печати ошибки через `Display`.
+///
+/// `fn main() -> Result<_, _>` печатает `Error: {:?}`, то есть `Debug`. У
+/// `CaptureError` вся человеческая форма живёт в `Display` (там `OSStatus`
+/// превращается в четырёхсимвольный код вроде `'!obj'` через `status_text`), а
+/// `Debug` отдаёт голое число. Самый вероятный отказ этого бинаря на macOS —
+/// отказ пользователя в диалоге TCC, и получить на него `CoreAudio { status:
+/// 1852797029 }` в единственном инструменте, который существует ради диагностики
+/// Core Audio, было бы издевательством.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ошибка: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Тот же guard, что в GUI (`src-tauri/src/audio.rs::run`), и та же функция:
+    // без него консоль на macOS 13 упала бы с сырым отказом Core Audio вместо
+    // объяснения — причём именно она и нужна человеку, когда «что-то со звуком».
+    //
+    // Guard работает: символы тапа биндятся ЛЕНИВО (проверено `dyld_info
+    // -fixups` по собранному бинарю — они лежат в `__la_symbol_ptr` с
+    // `lazy-bind`), поэтому процесс на старой системе доживает до этой строки и
+    // печатает объяснение, а не падает в dyld до `main`.
+    #[cfg(target_os = "macos")]
+    if let Some(why) = meeting_recorder::capture::macos::unsupported_reason() {
+        return Err(why.into());
+    }
+
     let root = recordings_root();
     #[cfg(target_os = "windows")]
     let det = WindowsDetector::new()?;

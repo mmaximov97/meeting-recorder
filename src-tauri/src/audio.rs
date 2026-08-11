@@ -310,42 +310,17 @@ fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
     process_detected && system_level > MEETING_AUDIO_THRESHOLD
 }
 
-/// Проверяет, поддерживается ли данная версия macOS.
-/// Минимально требуемая версия — 14.4.
-#[cfg(target_os = "macos")]
-fn macos_version_supported(major: u32, minor: u32) -> bool {
-    (major, minor) >= (14, 4)
-}
-
-/// Разбирает строку версии macOS в пару (major, minor).
-/// `sysinfo::System::os_version()` на macOS отдаёт `"14.5"`/`"14.5.1"` —
-/// мажор и минор обязательны, патч (если есть) отбрасывается: он ни на что
-/// в этом сравнении не влияет.
-#[cfg(target_os = "macos")]
-fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
-    let mut parts = v.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
-}
-
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
 pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
     let status = handle.state::<Status>();
+    // Решение живёт в ядре (`capture::macos`), а не здесь: требование к версии —
+    // свойство Process Tap API, и отказывать по нему обязаны оба бинаря
+    // одинаково и одними словами. Консоль зовёт ту же функцию.
     #[cfg(target_os = "macos")]
-    {
-        let unsupported = sysinfo::System::os_version()
-            .and_then(|v| parse_major_minor(&v))
-            .map(|(major, minor)| !macos_version_supported(major, minor))
-            .unwrap_or(true); // не смогли определить версию — не рискуем, отказываем
-        if unsupported {
-            status::fatal(
-                &handle,
-                "нужна macOS 14.4 или новее — используется Core Audio Process Tap API".to_string(),
-            );
-            return;
-        }
+    if let Some(why) = meeting_recorder::capture::macos::unsupported_reason() {
+        status::fatal(&handle, why);
+        return;
     }
     #[cfg(target_os = "windows")]
     let det = WindowsDetector::new();
@@ -519,6 +494,13 @@ mod tests {
     /// `App::new` жёстко строила `CpalAudio`. `App::new_with_audio` (Task 4)
     /// именно эту дверь и открывает — трейт `AudioIo` публичный, реализовать
     /// его из другого крейта можно.
+    ///
+    /// ВНИМАНИЕ на будущее: `set_mic_device` здесь НЕ переопределён, то есть
+    /// работает пустая реализация по умолчанию из трейта. Тест, который решит
+    /// проверять проводку выбора устройства через этот фейк, пройдёт
+    /// впустую — он не сможет отличить «выбор доехал» от «выбор потерян».
+    /// Такому тесту нужен фейк с полем под последний выбор, как `ФейкAudio`
+    /// в `src/app.rs`.
     #[derive(Default)]
     struct ФейкЗахват {
         открыт: bool,
@@ -543,21 +525,105 @@ mod tests {
         }
     }
 
+    /// Захват, который всегда отказывает на `open()`, — «устройство занято
+    /// другим приложением». Ровно тот же приём, что у `МикЗанят` в
+    /// `src/app.rs`, и нужен он здесь ради ветки, которую иначе не пройти:
+    /// отказ проверки микрофона обязан доехать до окна (см. докблок
+    /// `drain_ctl`).
+    struct ЗахватЗанят;
+
+    impl meeting_recorder::app::AudioIo for ЗахватЗанят {
+        fn open(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            Err(Box::new(std::io::Error::other(
+                "микрофон занят другим приложением",
+            )))
+        }
+
+        fn close(&mut self) {}
+
+        fn is_open(&self) -> bool {
+            false
+        }
+
+        fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+            (Vec::new(), Vec::new())
+        }
+    }
+
+    /// Уникальный временный каталог, удаляется в Drop.
+    ///
+    /// Та же конвенция, что в `src/app.rs`, `rename.rs` и `storage.rs`:
+    /// pid + наносекунды + счётчик. Фиксированное имя в `$TMPDIR` не годится
+    /// по двум причинам сразу — оно течёт (никто не убирает) и оно общее, то
+    /// есть два параллельных теста (а `cargo test` многопоточен по умолчанию)
+    /// подрались бы за один каталог.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path =
+                std::env::temp_dir().join(format!("meeting-recorder-gui-{tag}-{pid}-{nanos}-{n}"));
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// `App` в тесте — не подвиг: захват здесь подставной, а `App` сам по себе
     /// микрофон не открывает (инвариант 1, потоки поднимаются только на
     /// `Action::StartRingBuffer`).
     ///
-    /// Корень — во временном каталоге, а не в заведомо несуществующем пути.
-    /// Ни один тест этого файла до файловой системы не доходит (все они
-    /// подставляют свой `feed` и в машину ничего не заводят, а `SinkFactory`
-    /// в `App::new_with_audio` жёстко `WavSinks`), но если однажды дойдёт —
-    /// пусть пишет в `$TMPDIR`, а не в рабочий каталог и тем более не в
-    /// настоящие записи пользователя.
-    fn app() -> App {
-        App::new_with_audio(
-            std::env::temp_dir().join("meeting-recorder-gui-tests"),
-            Box::new(ФейкЗахват::default()),
-        )
+    /// Корень — уникальный временный каталог. Ни один тест этого файла до
+    /// файловой системы не доходит (все они подставляют свой `feed` и в машину
+    /// ничего не заводят, а `SinkFactory` в `App::new_with_audio` жёстко
+    /// `WavSinks`), поэтому каталог даже не создаётся; но если однажды дойдёт —
+    /// запись уедет в `$TMPDIR` и будет убрана, а не осядет в рабочем каталоге
+    /// и тем более не в настоящих записях пользователя.
+    ///
+    /// `App` держится вместе со своим временным корнем, а не отдельно от него:
+    /// `ScratchDir` удаляет каталог в Drop, и брось мы его сразу — корень
+    /// исчез бы из-под ещё живого `App`. `DerefMut` нужен, чтобы вызывающие
+    /// писали привычное `&mut app()`, а не разбирали пару.
+    struct Стенд {
+        app: App,
+        _dir: ScratchDir,
+    }
+
+    impl std::ops::Deref for Стенд {
+        type Target = App;
+        fn deref(&self) -> &App {
+            &self.app
+        }
+    }
+
+    impl std::ops::DerefMut for Стенд {
+        fn deref_mut(&mut self) -> &mut App {
+            &mut self.app
+        }
+    }
+
+    fn app_с_захватом(audio: Box<dyn meeting_recorder::app::AudioIo>) -> Стенд {
+        let dir = ScratchDir::new("audio");
+        Стенд {
+            app: App::new_with_audio(dir.0.clone(), audio),
+            _dir: dir,
+        }
+    }
+
+    fn app() -> Стенд {
+        app_с_захватом(Box::new(ФейкЗахват::default()))
     }
 
     fn session(pid: u32) -> MicSession {
@@ -745,6 +811,49 @@ mod tests {
         assert!(seen.is_empty(), "уехало в машину: {seen:?}");
     }
 
+    /// Обратная сторона того же перехвата: `Ctl::Monitor` не кормит машину, но
+    /// ОТКАЗ проверки обязан доехать до окна.
+    ///
+    /// Это ровно тот инвариант, который декларирует докблок `drain_ctl`
+    /// («отказ проверки обязан дойти до окна, а не только в stderr»), и до сих
+    /// пор его не проверял никто: с боевым захватом отказ `open()` зависел от
+    /// того, занят ли микрофон на машине тестировщика, поэтому все прогоны
+    /// глотали ошибку через `on_error: |_| {}`. С подставным захватом,
+    /// который отказывает всегда, ветка стала детерминированной.
+    ///
+    /// Проверяется и то, что причина доехала ЦЕЛИКОМ: и наш префикс, и текст
+    /// исходной ошибки. Без второй половины сообщение «проверка микрофона: »
+    /// не сказало бы человеку ничего.
+    #[test]
+    fn отказ_проверки_микрофона_доезжает_до_окна() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::Monitor(true)).unwrap();
+
+        let mut seen = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        let quit = drain_ctl(
+            &mut app_с_захватом(Box::new(ЗахватЗанят)),
+            &rx,
+            None,
+            |_, e, _| seen.push(e),
+            |msg| errors.push(msg),
+        );
+
+        assert!(!quit);
+        assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+        assert_eq!(errors.len(), 1, "ошибки: {errors:?}");
+        assert!(
+            errors[0].contains("проверка микрофона"),
+            "человек должен понять, ЧТО не получилось: {}",
+            errors[0]
+        );
+        assert!(
+            errors[0].contains("занят другим приложением"),
+            "причина обязана доехать целиком, а не только наш префикс: {}",
+            errors[0]
+        );
+    }
+
     /// Симметрично `монитор_не_кормит_машину_событиями`: смена микрофона тоже
     /// не событие машины — состояние записи от выбора устройства не меняется.
     /// Закрепляет инвариант, ради которого `ctl_to_event` отдаёт `None` вместо
@@ -859,60 +968,5 @@ mod tests {
     #[test]
     fn порог_не_ловит_шум_на_грани_тишины() {
         assert!(!mac_should_arm(true, 0.001));
-    }
-
-    // ---- macos_version_supported -------------------------------------------------
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn версия_14_4_поддерживается() {
-        assert!(macos_version_supported(14, 4));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn более_новая_минорная_версия_поддерживается() {
-        assert!(macos_version_supported(14, 9));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn следующий_мажор_поддерживается() {
-        assert!(macos_version_supported(15, 0));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn версия_ниже_14_4_не_поддерживается() {
-        assert!(!macos_version_supported(14, 3));
-        assert!(!macos_version_supported(13, 9));
-    }
-
-    // ---- parse_major_minor -------------------------------------------------
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn разбор_обычной_версии() {
-        assert_eq!(parse_major_minor("14.5"), Some((14, 5)));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn разбор_версии_с_патчем() {
-        assert_eq!(parse_major_minor("14.5.1"), Some((14, 5)));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn разбор_версии_без_минорной_части() {
-        assert_eq!(parse_major_minor("15"), None);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn разбор_мусора_даёт_none() {
-        assert_eq!(parse_major_minor("garbage"), None);
-        assert_eq!(parse_major_minor(""), None);
-        assert_eq!(parse_major_minor("14.x"), None);
     }
 }

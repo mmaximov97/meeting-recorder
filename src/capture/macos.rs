@@ -147,6 +147,56 @@ pub fn interleave_streams(streams: &[(u32, &[f32])], total_channels: u32) -> Vec
     out
 }
 
+/// Минимальная macOS, на которой Core Audio Process Tap существует вообще.
+///
+/// Живёт здесь, а не у вызывающих: требование к версии — свойство именно этого
+/// API, а не GUI или консоли. Потребителей у него два (`src-tauri/src/audio.rs`
+/// и `src/main.rs`), они в разных крейтах, и общего места ниже ядра у них нет.
+pub const MIN_MACOS: (u32, u32) = (14, 4);
+
+/// Поддерживается ли эта версия. Сравнение лексикографическое по паре.
+pub fn version_supported(major: u32, minor: u32) -> bool {
+    (major, minor) >= MIN_MACOS
+}
+
+/// Разбирает строку версии macOS в пару (major, minor).
+///
+/// `sysinfo::System::os_version()` на macOS отдаёт `"14.5"`/`"14.5.1"` — мажор и
+/// минор обязательны, патч (если есть) отбрасывается: на это сравнение он не
+/// влияет.
+pub fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Решение по строке версии. `None` — тап поднимать можно.
+///
+/// Отделено от [`unsupported_reason`] ради тестируемости: ветка «версию
+/// определить не удалось» иначе не проверяется вовсе, а именно она принимает
+/// самое рискованное решение из трёх.
+fn reason_for(version: Option<&str>) -> Option<String> {
+    const NEED: &str = "нужна macOS 14.4 или новее — используется Core Audio Process Tap API";
+    match version.and_then(parse_major_minor) {
+        Some((major, minor)) if version_supported(major, minor) => None,
+        Some((major, minor)) => Some(format!("{NEED} (система сообщает {major}.{minor})")),
+        // Не смогли определить версию — не рискуем. Отказ честнее попытки:
+        // символы тапа НЕ weak-import (проверено `dyld_info -fixups` по
+        // собранному бинарю), поэтому первый же вызов на системе без них
+        // положит процесс через dyld, а не вернёт ошибку.
+        None => Some(format!("{NEED} (версию определить не удалось)")),
+    }
+}
+
+/// `Some(текст)` — эта система тап не поднимет, и вот почему.
+///
+/// Единственный источник этого решения на оба бинаря: и GUI, и консоль обязаны
+/// отказывать одинаково и одними словами.
+pub fn unsupported_reason() -> Option<String> {
+    reason_for(sysinfo::System::os_version().as_deref())
+}
+
 /// Сколько ПОЛНЫХ кадров несёт поток из `len` сэмплов при `channels` каналах.
 ///
 /// Отдельной функцией, потому что делить приходится в трёх местах, и ошибка
@@ -1258,6 +1308,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- версия ОС ---
+    //
+    // Переехали сюда из `src-tauri/src/audio.rs` вместе с самими функциями:
+    // потребителей у них стало двое в разных крейтах, а тесты обязаны лежать
+    // там же, где решение, а не у одного из вызывающих.
+
+    #[test]
+    fn версия_14_4_поддерживается() {
+        assert!(version_supported(14, 4));
+    }
+
+    #[test]
+    fn более_новая_минорная_версия_поддерживается() {
+        assert!(version_supported(14, 9));
+    }
+
+    #[test]
+    fn следующий_мажор_поддерживается() {
+        assert!(version_supported(15, 0));
+    }
+
+    #[test]
+    fn версия_ниже_14_4_не_поддерживается() {
+        assert!(!version_supported(14, 3));
+        assert!(!version_supported(13, 9));
+    }
+
+    #[test]
+    fn разбор_обычной_версии() {
+        assert_eq!(parse_major_minor("14.5"), Some((14, 5)));
+    }
+
+    #[test]
+    fn разбор_версии_с_патчем() {
+        assert_eq!(parse_major_minor("14.5.1"), Some((14, 5)));
+    }
+
+    #[test]
+    fn разбор_версии_без_минорной_части() {
+        assert_eq!(parse_major_minor("15"), None);
+    }
+
+    #[test]
+    fn разбор_мусора_даёт_none() {
+        assert_eq!(parse_major_minor("garbage"), None);
+        assert_eq!(parse_major_minor(""), None);
+        assert_eq!(parse_major_minor("14.x"), None);
+    }
+
+    #[test]
+    fn поддерживаемая_версия_не_даёт_причины_отказать() {
+        assert_eq!(reason_for(Some("14.4")), None);
+        assert_eq!(reason_for(Some("26.5.2")), None);
+    }
+
+    /// Отказ обязан назвать и требование, и то, что увидел: иначе человек на
+    /// старой машине не поймёт, ЧТО у него не так.
+    #[test]
+    fn старая_версия_даёт_причину_с_обоими_числами() {
+        let why = reason_for(Some("13.6")).expect("13.6 тап не поднимет");
+        assert!(why.contains("14.4"), "{why}");
+        assert!(why.contains("13.6"), "{why}");
+    }
+
+    /// Самая рискованная ветка: версию определить не удалось. Отказываем —
+    /// символы тапа не weak-import, и попытка на системе без них кладёт процесс
+    /// через dyld, а не возвращает ошибку.
+    #[test]
+    fn неопределимая_версия_это_отказ_а_не_разрешение() {
+        assert!(reason_for(None).is_some());
+        assert!(reason_for(Some("мусор")).is_some());
     }
 
     // --- status_text ---

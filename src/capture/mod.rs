@@ -496,6 +496,34 @@ where
 mod tests {
     use super::*;
 
+    /// Гвоздь под обёртку `main` в `src/main.rs`: человеческая форма ошибки
+    /// живёт ТОЛЬКО в `Display`, и печатать надо именно её.
+    ///
+    /// `fn main() -> Result<_, _>` печатает `Debug`, то есть голое число вместо
+    /// `'!obj'`, — и это в единственном бинаре, который существует ради
+    /// диагностики Core Audio. Верни кто-нибудь `main` к прямому `?` — этот
+    /// тест не упадёт (он про сам тип), но объяснит в одном месте, зачем
+    /// обёртка нужна, и зафиксирует, что разница между формами реальна.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn читаемый_код_ошибки_есть_в_display_и_нет_в_debug() {
+        let e = CaptureError::CoreAudio {
+            what: "AudioHardwareCreateProcessTap",
+            status: i32::from_be_bytes(*b"!obj"),
+        };
+        let display = e.to_string();
+        assert!(
+            display.contains("AudioHardwareCreateProcessTap"),
+            "по одному коду не понять, какой из девяти шагов упал: {display}"
+        );
+        assert!(display.contains("'!obj'"), "{display}");
+        assert!(
+            !format!("{e:?}").contains("'!obj'"),
+            "если Debug научился печатать 4CC — обёртка main больше не нужна, \
+             но это надо заметить и решить, а не обнаружить случайно"
+        );
+    }
+
     #[test]
     fn моно_проходит_насквозь() {
         let out = downmix_to_mono_i16(&[0.0, 1.0, -1.0], 1);

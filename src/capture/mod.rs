@@ -47,6 +47,11 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{build_loopback_capture, start_silence};
 
+// Не `mod` + `pub use`, как у windows: в Task 4 сюда приедет `SystemTap`, и
+// потребителю (а пока — спайку `examples/mac_tap_spike.rs`) нужен сам модуль.
+#[cfg(target_os = "macos")]
+pub mod macos;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Mic,

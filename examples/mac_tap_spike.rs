@@ -24,6 +24,9 @@ fn main() {
 mod imp {
     use block2::RcBlock;
     use dispatch2::DispatchQueue;
+    // Чистая часть разбора ABL живёт в библиотеке и покрыта тестами
+    // (`cargo test --lib`), а не дублируется здесь: Task 4 поднимает её как есть.
+    use meeting_recorder::capture::macos::{interleave_streams, locate_tap};
     use meeting_recorder::capture::{downmix_to_mono_f32, Resampler};
     use meeting_recorder::storage::{WavSink, SAMPLE_RATE};
     use objc2::rc::Retained;
@@ -82,88 +85,33 @@ mod imp {
         /// что причина копится здесь, а падает `run()` уже на своём потоке.
         locate_error: Option<&'static str>,
         skipped: u64,
-    }
-
-    /// ТРЕТЬЯ ловушка рецепта, не описанная в дизайн-доке (первые две — тап как
-    /// главный саб-девайс и `isExclusive`). Найдена прогоном на AirPods.
-    ///
-    /// Входной ABL агрегата содержит НЕ ТОЛЬКО тап. Главный саб-девайс — реальное
-    /// устройство вывода, и если у него есть собственные ВХОДНЫЕ потоки (у AirPods
-    /// это микрофон, у USB-интерфейса — его входы), они приезжают в тот же ABL:
-    ///
-    /// ```text
-    /// [0] mNumberChannels=1, 2048 Б  <- микрофон AirPods
-    /// [1] mNumberChannels=2, 4096 Б  <- собственно тап (48 кГц, f32, переплетённое стерео)
-    /// ```
-    ///
-    /// Смещение тапа НЕ хардкодится. Оно выводится: у устройства вывода
-    /// спрашивается, сколько входных каналов оно вносит
-    /// (`kAudioDevicePropertyStreamConfiguration` во входной области), у тапа
-    /// известно `mChannelsPerFrame`, и граница между ними проводится по
-    /// накопленной сумме каналов. Порядок «сначала саб-девайс, потом тап» —
-    /// наблюдение, а не гарантия SDK, поэтому обратный порядок и неоднозначные
-    /// раскладки распознаются отдельно и валят прогон с внятным текстом.
-    ///
-    /// Опорный факт из заголовка (`AudioHardware.h`, `FullSubDeviceList`):
-    /// «The order of the items in the array is significant and is used to
-    /// determine the order of the streams of the AudioAggregateDevice» — то есть
-    /// порядок потоков саб-девайсов задан их порядком в композиции. Про то, где
-    /// относительно них встают тапы, заголовок не говорит ничего; отсюда сверка.
-    ///
-    /// Возвращает `[start, len)` в буферах ABL.
-    fn locate_tap(
-        channels: &[u32],
-        device_in_buffers: usize,
-        device_in_channels: u32,
-        tap_channels: u32,
-    ) -> Result<(usize, usize), &'static str> {
-        let total: u32 = channels.iter().sum();
-        if total != device_in_channels + tap_channels {
-            return Err("сумма каналов ABL != каналы входа саб-девайса + каналы тапа");
-        }
-        if device_in_buffers > channels.len() {
-            return Err("во входном ABL буферов меньше, чем вносит вход саб-девайса");
-        }
-        // Вход устройства известен ДВУМЯ величинами — сколько буферов и сколько
-        // каналов. Проверять обе строго сильнее, чем одну накопленную сумму:
-        // раскладка [1кан][1кан][2кан] при входе «2 кан.» по одним каналам
-        // читается двояко, а с числом буферов — однозначно.
-        let tap_buffers = channels.len() - device_in_buffers;
-        let sum = |part: &[u32]| -> u32 { part.iter().sum() };
-
-        let forward = sum(&channels[..device_in_buffers]) == device_in_channels
-            && sum(&channels[device_in_buffers..]) == tap_channels;
-        let reverse = sum(&channels[..tap_buffers]) == tap_channels
-            && sum(&channels[tap_buffers..]) == device_in_channels;
-
-        // Вход саб-девайса пуст (встроенные динамики): тап — весь ABL, и оба
-        // прочтения вырождаются в одно. Это не неоднозначность, а тривиальный случай.
-        if device_in_buffers == 0 {
-            return Ok((0, channels.len()));
-        }
-        match (forward, reverse) {
-            (true, true) => Err("раскладка симметрична: вход саб-девайса и тап неразличимы"),
-            (true, false) => Ok((device_in_buffers, tap_buffers)),
-            (false, true) => Err("порядок обратный ожидаемому: тап идёт ПЕРЕД входом саб-девайса"),
-            (false, false) => Err("раскладка ABL не сходится ни с прямым, ни с обратным порядком"),
-        }
+        /// Пакеты, в которых буфер тапа приехал с `mData == NULL`.
+        ///
+        /// Отдельный счётчик, а не тихий `return`: по `AudioHardware.h` так
+        /// выглядит НЕиспользуемый поток, то есть «тап есть, данных нет». Без
+        /// счётчика оператор увидел бы `пакетов: 464, пик: 0` при трёх зелёных
+        /// ассертах и подсказку про тишину, указывающую на три неверные причины.
+        null_data: u64,
     }
 
     /// Сводит буферы ТАПА (и только их) в моно f32, уважая собственное
     /// `mNumberChannels` каждого буфера.
     ///
-    /// Вторая половина того же бага: `mNumberBuffers > 1` НЕ означает
-    /// «непереплетённый». Это несколько ПОТОКОВ, каждый из которых сам может быть
-    /// переплетённым. Тап отдаёт один поток с двумя переплетёнными каналами, и
-    /// старый код читал его L,R,L,R как последовательные моно-сэмплы — отсюда
-    /// алиасинг, убивший 1318.5 Гц в спектральной проверке. Правильный
-    /// различитель — `mNumberChannels` буфера, а не число буферов.
+    /// Небезопасная обвязка вокруг чистых `interleave_streams` +
+    /// `downmix_to_mono_f32`: всё, что можно проверить без железа, живёт в
+    /// библиотеке и покрыто тестами, здесь остаётся только построение срезов из
+    /// сырых указателей HAL.
+    ///
+    /// `None` — в срезе есть буфер с нулевым `mData`. По `AudioHardware.h`
+    /// (описание `AudioDeviceIOProc`) неиспользуемый поток приезжает именно так:
+    /// `mData == NULL` при осмысленном `mDataByteSize`. Это не «тихий пакет», а
+    /// отсутствие данных, и вызывающий обязан посчитать такой пакет отдельно.
     ///
     /// # Safety
     /// `bufs` должны указывать на живые буферы HAL с корректным `mDataByteSize`.
-    unsafe fn tap_to_mono(bufs: &[AudioBuffer], tap_channels: u32) -> Vec<f32> {
+    unsafe fn tap_to_mono(bufs: &[AudioBuffer], tap_channels: u32) -> Option<Vec<f32>> {
         if bufs.iter().any(|b| b.mData.is_null()) {
-            return Vec::new();
+            return None;
         }
         // Один поток — общий случай для тапа: переплетённое стерео. Копии не надо.
         if bufs.len() == 1 {
@@ -171,37 +119,21 @@ mod imp {
             let ch = b.mNumberChannels.max(1);
             let n = b.mDataByteSize as usize / 4;
             let samples = unsafe { std::slice::from_raw_parts(b.mData as *const f32, n) };
-            return downmix_to_mono_f32(samples, ch as u16);
+            return Some(downmix_to_mono_f32(samples, ch as u16));
         }
-        // Несколько потоков тапа: каждый со своим числом каналов. Переплетаем в
-        // скрэтч на tap_channels каналов и сводим тем же downmix_to_mono_f32.
-        // `frames` — минимум по потокам: буферы не обязаны быть одной длины, и
-        // длина, снятая с одного, стала бы перечитом за конец другого.
-        let frames = bufs
+        // Несколько потоков тапа: сшиваем чистой interleave_streams, она же
+        // отвечает за минимум по длине и за отказ вылезти за кадр.
+        let streams: Vec<(u32, &[f32])> = bufs
             .iter()
-            .map(|b| b.mDataByteSize as usize / 4 / b.mNumberChannels.max(1) as usize)
-            .min()
-            .unwrap_or(0);
-        let total = tap_channels.max(1) as usize;
-        if frames == 0 {
-            return Vec::new();
-        }
-        let mut inter = vec![0.0f32; frames * total];
-        let mut base = 0usize;
-        for b in bufs {
-            let ch = b.mNumberChannels.max(1) as usize;
-            if base + ch > total {
-                break;
-            }
-            let src = unsafe { std::slice::from_raw_parts(b.mData as *const f32, frames * ch) };
-            for f in 0..frames {
-                for c in 0..ch {
-                    inter[f * total + base + c] = src[f * ch + c];
-                }
-            }
-            base += ch;
-        }
-        downmix_to_mono_f32(&inter, total as u16)
+            .map(|b| {
+                let ch = b.mNumberChannels.max(1);
+                let n = b.mDataByteSize as usize / 4;
+                let data = unsafe { std::slice::from_raw_parts(b.mData as *const f32, n) };
+                (ch, data)
+            })
+            .collect();
+        let inter = interleave_streams(&streams, tap_channels);
+        Some(downmix_to_mono_f32(&inter, tap_channels.max(1) as u16))
     }
 
     pub fn run() {
@@ -260,6 +192,20 @@ mod imp {
         // --- 3. UID текущего дефолтного устройства вывода ---------------------
         let output_device = default_output_device();
         let output_uid = device_uid(output_device);
+
+        // Сколько ВХОДНЫХ каналов вносит само устройство вывода. Из этой величины
+        // выводится смещение тапа в ABL — вместо «пропустить первый буфер» или
+        // «тап последний», то есть вместо замены одного непроверенного допущения
+        // другим.
+        //
+        // Спрашиваем ДО создания агрегата: после устройство уже в него зачислено,
+        // и вопрос «а не изменился ли его собственный вход от участия в агрегате»
+        // пришлось бы проверять на железе. Здесь этот вопрос просто не возникает.
+        let (device_in_buffers, device_in_channels) = device_input_streams(output_device);
+        println!(
+            "вход устройства вывода вносит: {} буфер(ов), {} кан.",
+            device_in_buffers, device_in_channels
+        );
 
         // --- 4. словарь агрегированного устройства ----------------------------
         //
@@ -327,16 +273,6 @@ mod imp {
         // Не через AVAudioEngine: он не ретаргетится на произвольный HAL-девайс —
         // `kAudioOutputUnitProperty_CurrentDevice` вернёт noErr, но движок молча
         // продолжит читать системный дефолтный ВХОД (микрофон), а не тап.
-        // Сколько ВХОДНЫХ каналов вносит в агрегат само устройство вывода. Это и
-        // есть та величина, из которой выводится смещение тапа в ABL, — вместо
-        // «пропустить первый буфер» или «тап последний», то есть вместо замены
-        // одного непроверенного допущения другим.
-        let (device_in_buffers, device_in_channels) = device_input_streams(output_device);
-        println!(
-            "вход устройства вывода вносит в агрегат: {} буфер(ов), {} кан.",
-            device_in_buffers, device_in_channels
-        );
-
         let state = Arc::new(Mutex::new(State {
             resampler: Resampler::new(tap_rate, SAMPLE_RATE),
             samples: Vec::new(),
@@ -347,6 +283,7 @@ mod imp {
             tap_len: 0,
             locate_error: None,
             skipped: 0,
+            null_data: 0,
         }));
         let cb_state = Arc::clone(&state);
 
@@ -426,7 +363,11 @@ mod imp {
                 };
 
                 // Сводим ТОЛЬКО буферы тапа. Чужие входы не попадают в микс.
-                let mono = unsafe { tap_to_mono(&buffers[start..start + len], tap_channels) };
+                let Some(mono) = (unsafe { tap_to_mono(&buffers[start..start + len], tap_channels) })
+                else {
+                    st.null_data += 1;
+                    return;
+                };
                 if mono.is_empty() {
                     return;
                 }
@@ -508,9 +449,23 @@ mod imp {
             st.samples.len(),
             st.samples.len() as f64 / SAMPLE_RATE as f64,
         );
+        // Пустой указатель в буфере тапа — не «тихий пакет», а отсутствие данных.
+        // Молчать о нём нельзя: иначе тишина выглядит как исправная запись
+        // тишины, и подсказка ниже уводит в три заведомо неверные стороны.
+        if st.null_data > 0 {
+            eprintln!(
+                "ВНИМАНИЕ: в {} пакет(ах) из {} у тапа был mData == NULL — HAL отдавал \
+                 поток как НЕиспользуемый, данных в нём не было вовсе. Это не тишина \
+                 в звуке, а отсутствие звука в буфере: причину надо искать в тапе и \
+                 композиции агрегата, а не в том, что играло.",
+                st.null_data, st.packets,
+            );
+        }
         if peak == 0 {
             eprintln!(
                 "ТИШИНА. По порядку, от самого частого к самому редкому:\n\
+                 0) если выше есть строка про mData == NULL — начинай с неё, \
+                 остальные три причины к этому случаю не относятся;\n\
                  1) ...или ничего не играло — проверь, что звук действительно шёл \
                  эти {RECORD_SECS} с (успел ли ты нажать play за {GRACE_SECS} с отсчёта, \
                  не был ли звук выключен или выведен на другое устройство);\n\

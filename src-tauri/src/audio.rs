@@ -361,7 +361,27 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
             return;
         }
     };
+    #[cfg(target_os = "windows")]
     let mut app = App::new(root, mic);
+    // Тап поднимается ЗДЕСЬ, до `App`, и живёт до выхода из процесса: системная
+    // дорожка на macOS — ресурс уровня процесса, а не записи (см. докблок
+    // `capture::SystemTap`). `App::new` для этого не годится — она принимает
+    // один `DeviceChoice`, которым такой захват не описывается.
+    //
+    // `.expect(...)`, а не `status::fatal`, как у детектора выше, — временное
+    // упрощение: единообразную обработку отказа детектора и тапа на старте
+    // наводит Task 7 заодно с guard'ом версии ОС. Здесь достаточно не
+    // притворяться, что тап поднялся, если это не так.
+    #[cfg(target_os = "macos")]
+    let mut app = {
+        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
+            meeting_recorder::capture::SystemTap::start().expect("Process Tap не поднялся"),
+        ));
+        App::new_with_audio(
+            root,
+            Box::new(meeting_recorder::app::MacAudio::new(mic, system_tap)),
+        )
+    };
     let me = std::process::id();
     let mut was_active = false;
     let mut active: Option<MicSession> = None;

@@ -54,7 +54,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let det = MacDetector::new();
     // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный
     // дефолт. Выбор устройства живёт в GUI, где его есть где хранить.
+    #[cfg(target_os = "windows")]
     let mut app = App::new(root, meeting_recorder::capture::DeviceChoice::Default);
+    // На macOS захват собирается снаружи — тем же способом, что в
+    // `src-tauri/src/audio.rs::run()`: системная дорожка это ресурс уровня
+    // процесса, и одним `DeviceChoice`, который принимает `App::new`, она не
+    // описывается.
+    //
+    // Отсюда следствие, которого у консоли раньше не было: она поднимает
+    // процесс-тап, а значит при первом запуске покажет системный диалог
+    // разрешения на захват звука и будет держать приватное агрегированное
+    // устройство всё время работы. Это осознанно: бинарь существует ровно
+    // затем, чтобы прогнать детект и запись без webview, а консоль, не умеющая
+    // писать системную дорожку, эту работу не выполняет.
+    #[cfg(target_os = "macos")]
+    let mut app = {
+        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
+            meeting_recorder::capture::SystemTap::start()?,
+        ));
+        App::new_with_audio(
+            root,
+            Box::new(meeting_recorder::app::MacAudio::new(
+                meeting_recorder::capture::DeviceChoice::Default,
+                system_tap,
+            )),
+        )
+    };
     let input = spawn_stdin();
     let me = std::process::id();
     // Живой звонок отлаживать нечем, кроме глаз: MR_DEBUG_POLL=1 печатает,

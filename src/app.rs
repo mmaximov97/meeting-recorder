@@ -27,10 +27,6 @@ use crate::storage::{month_dir, recording_filename, Track, WavSink, SAMPLE_RATE}
 use chrono::{DateTime, Local};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-// Только `CpalAudio` меряет стоимость открытия потоков (`MR_DEBUG_TIMING`),
-// и только на Windows: на macOS системная дорожка уже течёт к моменту open(),
-// а измерять там нечего — расхождения по построению нет.
-#[cfg(target_os = "windows")]
 use std::time::Instant;
 
 const RING_SECONDS: usize = 30;
@@ -339,6 +335,21 @@ pub struct MacAudio {
     /// Живёт всё время процесса — сконструирован снаружи и передан сюда,
     /// а не создаётся в `open()`/`close()`.
     system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
+    /// `MR_DEBUG_TIMING=1` — то же, что у `CpalAudio`, и по той же причине:
+    /// живого звонка отладчиком не поймать, а расхождение старта дорожек видно
+    /// только на числах.
+    ///
+    /// Мерить здесь есть что, хотя системная дорожка и не открывается: вопрос
+    /// «сколько микрофон догоняет уже идущий тап» — это ровно то, что ручная
+    /// проверка на macOS и должна увидеть. Переменная обязана работать на обеих
+    /// платформах: инструкция к проверке одна, и молчащий на macOS
+    /// `MR_DEBUG_TIMING` человек прочитал бы как отказ сборки, а не как «эта
+    /// платформа ничего не печатает».
+    timing: bool,
+    /// Начало `open()` — точка отсчёта для дорожки микрофона.
+    opened_at: Option<Instant>,
+    logged_mic: bool,
+    logged_sys: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -356,6 +367,10 @@ impl MacAudio {
             mic_choice: mic,
             fell_back: None,
             system_tap,
+            timing: std::env::var_os("MR_DEBUG_TIMING").is_some(),
+            opened_at: None,
+            logged_mic: false,
+            logged_sys: false,
         }
     }
 }
@@ -373,9 +388,23 @@ impl AudioIo for MacAudio {
             return Ok(());
         }
         let (tx, rx) = channel();
+        let t0 = Instant::now();
         let (pending, fell_back) = build_mic_capture(&self.mic_choice, tx)?;
         self.fell_back = fell_back;
+        let t1 = Instant::now();
         self.mic = Some(pending.play()?);
+        let t2 = Instant::now();
+        if self.timing {
+            eprintln!("[timing] build(mic)              = {:?}", t1 - t0);
+            eprintln!("[timing] play(mic)               = {:?}", t2 - t1);
+            eprintln!(
+                "[timing] системная дорожка      = уже идёт (тап поднят при старте \
+                 приложения, открывать нечего)"
+            );
+        }
+        self.opened_at = Some(t0);
+        self.logged_mic = false;
+        self.logged_sys = false;
         self.mic_rx = Some(rx);
         Ok(())
     }
@@ -383,6 +412,7 @@ impl AudioIo for MacAudio {
     fn close(&mut self) {
         self.mic = None;
         self.mic_rx = None;
+        self.opened_at = None;
     }
 
     /// Про микрофон — как и требует докблок трейта («горит ли индикатор»).
@@ -393,7 +423,7 @@ impl AudioIo for MacAudio {
     }
 
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
-        let mic = self
+        let mic: Vec<i16> = self
             .mic_rx
             .as_ref()
             .map(|rx| rx.try_iter().flatten().collect())
@@ -403,6 +433,23 @@ impl AudioIo for MacAudio {
         // системного звука (второй сигнал детекта на macOS) считался бы по
         // тому, что играло минуты назад.
         let sys = self.system_tap.borrow_mut().drain();
+        if self.timing {
+            // Замер грубый: drain зовётся из цикла раз в 200 мс, так что
+            // «первый чанк» округлён вверх до тика. Отсчёт — от open(), то есть
+            // от взятия микрофона; для системной дорожки это ответ на вопрос
+            // «сколько её уже было к моменту, когда включился микрофон», а не
+            // «сколько она поднималась».
+            if let Some(t0) = self.opened_at {
+                if !self.logged_mic && !mic.is_empty() {
+                    eprintln!("[timing] первый чанк mic      = +{:?}", t0.elapsed());
+                    self.logged_mic = true;
+                }
+                if !self.logged_sys && !sys.is_empty() {
+                    eprintln!("[timing] первый чанк system   = +{:?}", t0.elapsed());
+                    self.logged_sys = true;
+                }
+            }
+        }
         (mic, sys)
     }
 

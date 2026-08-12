@@ -152,6 +152,43 @@ pub fn interleave_streams(streams: &[(u32, &[f32])], total_channels: u32) -> Vec
 /// Живёт здесь, а не у вызывающих: требование к версии — свойство именно этого
 /// API, а не GUI или консоли. Потребителей у него два (`src-tauri/src/audio.rs`
 /// и `src/main.rs`), они в разных крейтах, и общего места ниже ядра у них нет.
+///
+/// # Это число НЕЛЬЗЯ переносить в `bundle.macOS.minimumSystemVersion`
+///
+/// В `src-tauri/tauri.conf.json` стоит `"minimumSystemVersion": "11.0"`, и это
+/// расхождение с 14.4 — не недосмотр. JSON комментариев не держит, поэтому
+/// причина записана здесь, в единственном месте, куда точно заглянет тот, кто
+/// решит «исправить несоответствие».
+///
+/// В Tauri 2 этот ключ задаёт не только `LSMinimumSystemVersion` в `Info.plist`
+/// (гейт Finder'а), но и `MACOSX_DEPLOYMENT_TARGET` для сборки cargo — см.
+/// докблок поля `minimum_system_version` в `tauri-utils`. А ld при deployment
+/// target **12.0 и выше** переключается на chained fixups, где ленивого
+/// связывания нет вообще. Замерено на этой машине минимальным C-пробником,
+/// ссылающимся на `AudioHardwareCreateProcessTap`:
+///
+/// ```text
+/// min=11.0  lazy_binds=1  __DATA __la_symbol_ptr  lazy-bind  _AudioHardwareCreateProcessTap
+/// min=11.5  lazy_binds=1  __DATA __la_symbol_ptr  lazy-bind  _AudioHardwareCreateProcessTap
+/// min=12.0  lazy_binds=0  __DATA_CONST __got           bind  _AudioHardwareCreateProcessTap
+/// min=14.4  lazy_binds=0  __DATA_CONST __got           bind  _AudioHardwareCreateProcessTap
+/// ```
+///
+/// Символы тапа **не** weak-import (см. комментарий в `reason_for` ниже). Пока они
+/// связываются лениво, процесс на старой macOS доходит до `main`, зовёт
+/// [`unsupported_reason`] и объясняет человеку, что нужна 14.4. Как только
+/// связывание становится жадным, dyld убивает процесс с
+/// `Symbol not found: _AudioHardwareCreateProcessTap` **до `main`** — и весь
+/// guard в этом файле превращается в мёртвый код, причём молча: все тесты
+/// проходят, сборка проходит, `.dmg` уезжает.
+///
+/// Порог 12.0 стоит на один минорный шаг выше нашего 11.0. Любая правка этого
+/// ключа вверх — от 12.0 и дальше — ломает отказ. Проверять после сборки:
+/// `scripts/check-tap-lazy-bind.sh` (скрипт падает, если ленивое связывание
+/// пропало). Если версию гейта в `Info.plist` когда-нибудь всё же понадобится
+/// поднять, сперва нужно сделать импорты weak (`-weak_framework`/
+/// `-weak-l`-линковка CoreAudio) — тогда отсутствующий символ станет нулевым
+/// указателем, а не смертью процесса, — и только потом двигать конфиг.
 pub const MIN_MACOS: (u32, u32) = (14, 4);
 
 /// Поддерживается ли эта версия. Сравнение лексикографическое по паре.

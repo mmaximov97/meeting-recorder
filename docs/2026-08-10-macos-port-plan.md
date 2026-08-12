@@ -699,6 +699,18 @@ fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
 
 Место вызова — в цикле `run()`, там же, где сегодня `let (found, event) = poll_to_event(was_active, sessions, me);`: на macOS решение о `SessionAppeared` дополнительно фильтруется через `mac_should_arm(active.is_some(), app.levels().system)` перед тем, как звать `feed`/`ask` (на Windows эта строка не меняется — `poll_to_event` остаётся единственным источником решения).
 
+> **Правка по итогам финального ревью (2026-08-12). Абзац выше описывает БАГУ — так делать нельзя.** Гейт на СОБЫТИИ `SessionAppeared` не откладывает детект, а уничтожает его: `poll_to_event` выдаёт это событие только на фронте «сессий не было → сессия есть», а `was_active` защёлкивается строкой раньше по НЕгейтованному опросу. Zoom, открытый в 09:00 без звонка, поднимает `was_active` в `true`, единственное `SessionAppeared` выбрасывается за отсутствием звука, и звонок в 09:30 не детектится уже никогда — до перезапуска самого Zoom. Дизайн-документ формулирует это верно («оба условия обязаны совпасть, чтобы `MeetingDetector::poll()` вернул **сессию**»): гейт принадлежит **входу** `poll_to_event`, то есть списку сессий, а не его выходу:
+>
+> ```rust
+> #[cfg(target_os = "macos")]
+> let sessions = if mac_should_arm(!sessions.is_empty(), app.levels().system) {
+>     sessions
+> } else { Vec::new() };
+> let (found, event) = poll_to_event(was_active, sessions, me);
+> ```
+>
+> Из переноса гейта на вход следует второе требование, которого в плане не было вовсе: **гистерезис**. Тишина на входе неотличима от «процесс закрыт», поэтому пауза в разговоре длиной в один опрос дала бы `SessionGone` — то есть выброшенное кольцо в `Armed` или остановленную запись в `Recording(Auto)`. Реализовано асимметрично: восходящий фронт требует звука немедленно, нисходящий — минуты тишины подряд (`MAC_SILENT_POLLS_BEFORE_DROP`). И третье: `was_active` обязан жить рядом с гейтом, а не отдельной переменной цикла, иначе проводка снова окажется непокрытой. См. `Detect` в `src-tauri/src/audio.rs` и тесты `звонок_через_полчаса_после_запуска_zoom_всё_равно_детектится`, `пауза_в_разговоре_не_обрывает_идущий_звонок`, `минута_тишины_завершает_звонок`.
+
 - [ ] **Шаг 8: `MacDetector` — обёртка над sysinfo**
 
 ```rust
@@ -1088,41 +1100,65 @@ git commit -m "feat: явный отказ на старте при macOS < 14.4
     ],
     "macOS": {
       "signingIdentity": "-",
+      "hardenedRuntime": false,
       "entitlements": null,
-      "minimumSystemVersion": "14.4"
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist"
     }
   }
 }
 ```
+
+> **Правка по итогам выполнения (2026-08-12).** Здесь стояло `"minimumSystemVersion": "14.4"` —
+> то есть настоящее требование приложения. **Это значение ставить нельзя.** В Tauri 2 ключ
+> задаёт не только `LSMinimumSystemVersion`, но и `MACOSX_DEPLOYMENT_TARGET`, а ld при
+> deployment target **12.0 и выше** переключается на chained fixups, где ленивого связывания
+> нет. Символы Process Tap не weak-import — значит, на macOS старее 14.4 dyld убивает процесс
+> с `Symbol not found: _AudioHardwareCreateProcessTap` **до `main`**, и весь guard версии
+> (Task 7) превращается в мёртвый код: вместо читаемого сообщения человек получает падение
+> загрузчика. Замеры порога, полное рассуждение и путь наверх (сперва weak-импорты, потом
+> ключ) — в докблоке `MIN_MACOS` (`src/capture/macos.rs`) и в
+> `docs/2026-08-10-macos-port-design.md`. Значение стережёт юнит-тест
+> `минимальная_версия_macos_в_бандле_осталась_11_0` (`src-tauri/src/main.rs`), проверка на
+> собранном бандле — `npm run check-tap-lazy-bind`.
+>
+> Заодно: `hardenedRuntime: false` — обязателен. С включённым hardened runtime и без файла
+> entitlements macOS закрывает доступ к микрофону молча, ни диалога, ни ошибки. Цена —
+> нотаризация в таком виде невозможна.
 
 `signingIdentity: "-"` — ad-hoc подпись средствами `codesign` (бесплатная, без Apple Developer аккаунта); без неё TCC-диалог на `AudioHardwareCreateProcessTap` не появится вообще (см. `docs/2026-08-10-macos-port-design.md`, раздел «Упаковка Tauri»). Точный ключ конфигурации сверить с версией Tauri в `src-tauri/Cargo.toml` (`tauri = "2"`) на момент выполнения — в Tauri v2 signing настраивается через `bundle.macOS.signingIdentity`, но конкретное имя поля стоит перепроверить по `tauri info`/официальной схеме `$schema` в начале файла, если сборка ругнётся на неизвестный ключ.
 
 - [ ] **Шаг 3: `Info.plist` — usage descriptions**
 
-Tauri генерирует `Info.plist` из `tauri.conf.json` (`bundle.macOS.infoPlist` — точный путь конфигурации тоже сверить по схеме) плюс собственные ключи. Добавить:
+Tauri мержит `Info.plist` бандла с файлом, на который указывает `bundle.macOS.infoPlist`. Ключ `bundle.macOS.info`, который стоял в этом шаге раньше, **в схеме Tauri 2 не существует вовсе** — конфиг с ним не собирается. Usage descriptions живут отдельным файлом.
 
-```json
-{
-  "bundle": {
-    "macOS": {
-      "info": {
-        "NSMicrophoneUsageDescription": "Запись микрофона нужна, чтобы сохранить вашу часть разговора на встрече.",
-        "NSAudioCaptureUsageDescription": "Захват системного звука нужен, чтобы записать голоса собеседников во время встречи."
-      }
-    }
-  }
-}
+Создать `src-tauri/Info.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Запись микрофона нужна, чтобы сохранить вашу часть разговора на встрече.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Захват системного звука нужен, чтобы записать голоса собеседников во время встречи.</string>
+</dict>
+</plist>
 ```
 
-Если у используемой версии `tauri-cli` нет прямой поддержки произвольных `Info.plist`-ключей через конфиг — добавить `src-tauri/Info.plist` (или `Info.macos.plist`, в зависимости от того, что подхватывает бандлер) с этими двумя ключами вручную; проверить по официальной документации Tauri v2 bundler на момент выполнения (страница `Configuration` → `bundle.macOS`), не полагаться на память.
+и сослаться на него из `tauri.conf.json` — `"infoPlist": "Info.plist"` в блоке `bundle.macOS` (путь относительно `src-tauri/`), как показано в шаге 2.
 
 - [ ] **Шаг 4: собрать и проверить на Mac**
 
 ```bash
-cargo tauri build
+npm install                        # @tauri-apps/cli из package.json
+npx tauri build
 ```
 
-Ожидается: собирается `.app` и `.dmg` в `src-tauri/target/release/bundle/macos/` и `.../dmg/`. Запустить `.app` напрямую, начать первую запись (или явную проверку микрофона) — должны появиться ДВА системных диалога разрешения (микрофон — `NSMicrophoneUsageDescription`, системный звук — `NSAudioCaptureUsageDescription`), каждый с текстом из шага 3, а не с общей/пустой формулировкой.
+Именно `npx tauri`, а не `cargo tauri`: CLI живёт в `package.json`, отдельной подкомандой `cargo` он здесь не установлен.
+
+Ожидается: собирается `.app` и `.dmg` в `target/release/bundle/macos/` и `target/release/bundle/dmg/` — `target/` у воркспейса один, в корне репозитория, а не внутри `src-tauri/`. Сразу после сборки прогнать `npm run check-tap-lazy-bind` (см. правку к шагу 2). Запустить `.app` напрямую, начать первую запись (или явную проверку микрофона) — должны появиться ДВА системных диалога разрешения (микрофон — `NSMicrophoneUsageDescription`, системный звук — `NSAudioCaptureUsageDescription`), каждый с текстом из шага 3, а не с общей/пустой формулировкой.
 
 Заодно проверить то, что design-документ отметил как «ожидается рабочим без переписывания логики» (раздел «Упаковка Tauri»), но что раньше никогда не запускалось на macOS: значок в трее появляется и открывает окно со списком записей; хоткей **Ctrl+Shift+R** переключает запись при свёрнутом окне; тост «Похоже, встреча» появляется поверх других окон и не блокируется чем-то вроде Do Not Disturb; закрытие окна крестиком прячет его, а не завершает процесс (процесс остаётся в трее). Любое расхождение — заводить как отдельный баг, не блокируя эту задачу, если сама сборка/подпись/permissions работают.
 
@@ -1153,8 +1189,10 @@ git commit -m "build(macos): bundle targets, ad-hoc подпись, usage descri
 
 \`\`\`bash
 cargo build --workspace            # debug
-cargo tauri build                  # релизный .app/.dmg, см. src-tauri/tauri.conf.json
 cargo test --workspace
+
+npm install                        # @tauri-apps/cli из package.json
+npx tauri build                    # релизные .app и .dmg в target/release/bundle/
 \`\`\`
 
 Минимальная версия — macOS 14.4 (нужен Core Audio Process Tap API для записи

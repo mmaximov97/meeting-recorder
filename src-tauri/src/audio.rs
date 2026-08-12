@@ -310,6 +310,129 @@ fn mac_should_arm(process_detected: bool, system_level: f32) -> bool {
     process_detected && system_level > MEETING_AUDIO_THRESHOLD
 }
 
+/// Сколько тихих опросов подряд гейт терпит, прежде чем признать звонок
+/// законченным. 30 × `POLL_INTERVAL` (2 с) = минута тишины.
+///
+/// Гистерезис здесь несимметричен намеренно, и вот почему. Гейт стоит на СПИСКЕ
+/// сессий (см. `Detect::gate`), то есть тишина для него неотличима от «процесс
+/// закрыт»: провались уровень ниже порога на один опрос — и `poll_to_event`
+/// выдал бы `SessionGone`, то есть в `Armed` выбросил бы кольцо, а в
+/// `Recording(Auto)` остановил бы идущую запись. Пауза в разговоре длиннее
+/// одного-двух опросов — норма, а не редкость: `level_sys` затухает в 0.7 за
+/// тик 200 мс, так что три секунды, пока никто не говорит, уже дают уровень
+/// ниже порога. Запись, которая обрывается, потому что собеседник замолчал, —
+/// беда хуже той, ради которой гейт вообще существует.
+///
+/// Цена терпения — обратная: настоящий конец звонка на macOS виден только по
+/// звуку (Zoom/Teams/Slack остаются открытыми), поэтому автозапись переживёт
+/// конец встречи на эту же минуту и допишет минуту тишины в хвост файла. Хвост
+/// тишины стоит места на диске, оборванная запись — самой встречи; выбор
+/// сделан в пользу первого. Ручной стоп (кнопка/хоткей/трей) работает всё это
+/// время как обычно и ждать минуту не заставляет.
+///
+/// Минуту, а не «пока процесс жив»: без верхней границы автозапись шла бы до
+/// выхода из Zoom, а его держат открытым весь рабочий день.
+#[cfg(target_os = "macos")]
+const MAC_SILENT_POLLS_BEFORE_DROP: u32 = 30;
+
+/// Вся память детекта между опросами: «была ли сессия на прошлом опросе» и —
+/// только на macOS — счётчик тихих опросов подряд.
+///
+/// Существует отдельной структурой не ради порядка, а потому, что здесь жила
+/// ошибка, которую невозможно было увидеть тестом. `was_active` раньше был
+/// локальной переменной цикла [`run`], и защёлкивался он ДО того, как
+/// применялся гейт по звуку:
+///
+/// ```text
+/// let (found, event) = poll_to_event(was_active, sessions, me);
+/// was_active = active.is_some();        // защёлкнуто по НЕгейтованному опросу
+/// if let Some(e) = event { if gate_ok { feed(...) } }   // гейт — на событии
+/// ```
+///
+/// `poll_to_event` выдаёт `SessionAppeared` только на фронте «сессий не было →
+/// сессия есть». Гейт на событии этот фронт не откладывал, а уничтожал: Zoom,
+/// открытый в 09:00 без звонка, поднимал `was_active` в `true` навсегда, а
+/// единственное `SessionAppeared` выбрасывалось за отсутствием звука. В 09:30
+/// человек заходил в настоящий звонок — и `poll_to_event(true, [zoom], me)`
+/// молчал до самого закрытия Zoom. Авто-детект, то есть главная функция
+/// приложения на этой платформе, не срабатывал никогда.
+///
+/// Дизайн-документ говорит ровно обратное («оба условия обязаны совпасть,
+/// чтобы `MeetingDetector::poll()` вернул сессию») — гейт принадлежит ВХОДУ
+/// `poll_to_event`, а не его выходу. Отсюда и форма этого типа: `was_active`
+/// не переменная цикла, а поле, которое обновляется в том же месте, где
+/// применяется гейт, — [`Detect::step`]. Разъехаться им теперь негде, а тест
+/// может прогнать хоть сто опросов подряд без Tauri, детектора и Core Audio.
+/// Это та же болезнь «хелпер покрыт, проводка нет», о которой предупреждают
+/// докблоки `poll_to_event` и `drain_ctl`.
+#[derive(Default)]
+struct Detect {
+    was_active: bool,
+    #[cfg(target_os = "macos")]
+    silent_polls: u32,
+}
+
+impl Detect {
+    /// Решение по одному опросу детектора: кто теперь активная сессия и какое
+    /// событие из этого следует. Вся межопросная память — внутри.
+    fn step(
+        &mut self,
+        sessions: Vec<MicSession>,
+        system_level: f32,
+        me: u32,
+    ) -> (Option<MicSession>, Option<Event>) {
+        // Гейт — ДО `poll_to_event`, иначе он не откладывает решение, а
+        // отменяет его (см. докблок типа).
+        let sessions = self.gate(sessions, system_level);
+        let (active, event) = poll_to_event(self.was_active, sessions, me);
+        self.was_active = active.is_some();
+        (active, event)
+    }
+
+    /// На Windows гейта нет: WASAPI-сессия в состоянии Active — это уже полный
+    /// сигнал «микрофон держат», второго источника ему не нужно.
+    #[cfg(not(target_os = "macos"))]
+    fn gate(&mut self, sessions: Vec<MicSession>, _system_level: f32) -> Vec<MicSession> {
+        sessions
+    }
+
+    /// На macOS «известный процесс» сам по себе ничего не значит: Zoom/Teams/
+    /// Slack держатся открытыми и без звонка. Сессия доезжает до
+    /// `poll_to_event` только вместе со звуком — но НЕ пропадает от первой же
+    /// паузы в разговоре (см. [`MAC_SILENT_POLLS_BEFORE_DROP`]).
+    #[cfg(target_os = "macos")]
+    fn gate(&mut self, sessions: Vec<MicSession>, system_level: f32) -> Vec<MicSession> {
+        // Процесса нет — решать нечего и гейту незачем вмешиваться: пустой
+        // список сам по себе означает конец звонка, и задержать этот вывод
+        // значило бы держать запись после выхода из Zoom.
+        if sessions.is_empty() {
+            self.silent_polls = 0;
+            return sessions;
+        }
+        // Звук есть: и восходящий фронт, и продолжение звонка — счётчик тишины
+        // обнуляется, список проходит как есть.
+        if mac_should_arm(true, system_level) {
+            self.silent_polls = 0;
+            return sessions;
+        }
+        // Тишина. На восходящем фронте это отказ: «Zoom открыт» — не повод
+        // предлагать запись. Решение при этом не теряется, а откладывается —
+        // `was_active` останется `false`, и первый же звучащий опрос даст
+        // честный `SessionAppeared`, хоть через полчаса.
+        if !self.was_active {
+            return Vec::new();
+        }
+        // Звонок уже идёт: терпим тишину до минуты, потом считаем его
+        // законченным.
+        self.silent_polls += 1;
+        if self.silent_polls >= MAC_SILENT_POLLS_BEFORE_DROP {
+            Vec::new()
+        } else {
+            sessions
+        }
+    }
+}
+
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
 pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
@@ -358,7 +481,8 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
         )
     };
     let me = std::process::id();
-    let mut was_active = false;
+    // Память детекта между опросами живёт здесь целиком — см. докблок `Detect`.
+    let mut detect = Detect::default();
     let mut active: Option<MicSession> = None;
     // None — «ещё не опрашивали», первый опрос идёт сразу. Считать
     // `Instant::now() - POLL_INTERVAL` нельзя: вычитание у Instant паникует,
@@ -379,34 +503,20 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
             last_poll = Some(Instant::now());
             match det.poll() {
                 Ok(sessions) => {
-                    // poll_to_event фильтрует НАШ pid: без этого приложение
-                    // детектит само себя (мы держим мик в Armed и в записи),
-                    // SessionGone не приходит никогда, запись не
-                    // останавливается по концу звонка.
-                    let (found, event) = poll_to_event(was_active, sessions, me);
+                    // `Detect::step` фильтрует НАШ pid (через `poll_to_event`):
+                    // без этого приложение детектит само себя (мы держим мик в
+                    // Armed и в записи), SessionGone не приходит никогда,
+                    // запись не останавливается по концу звонка. Он же на
+                    // macOS применяет гейт по звуку — до `poll_to_event`, а не
+                    // после, иначе гейт не откладывает детект, а отменяет его
+                    // (см. докблок `Detect`).
+                    let (found, event) = detect.step(sessions, app.levels().system, me);
                     active = found;
-                    was_active = active.is_some();
 
                     if let Some(e) = event {
-                        // На macOS известный процесс сам по себе не значит
-                        // «идёт звонок» (Zoom/Teams/Slack держатся открытыми
-                        // и без него) — SessionAppeared дополнительно
-                        // фильтруется через звук. SessionGone гейту не
-                        // подлежит: конец звонка не должен зависеть от того,
-                        // говорит ли кто-то в конкретный тик. На Windows
-                        // `gate_ok` всегда true — poll_to_event остаётся
-                        // единственным источником решения.
-                        #[cfg(target_os = "macos")]
-                        let gate_ok = e != Event::SessionAppeared
-                            || mac_should_arm(active.is_some(), app.levels().system);
-                        #[cfg(not(target_os = "macos"))]
-                        let gate_ok = true;
-
-                        if gate_ok {
-                            feed(&mut app, &handle, e, active.as_ref());
-                            if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
-                                ask(&handle, &s.process_name);
-                            }
+                        feed(&mut app, &handle, e, active.as_ref());
+                        if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
+                            ask(&handle, &s.process_name);
                         }
                     }
                 }
@@ -968,5 +1078,194 @@ mod tests {
     #[test]
     fn порог_не_ловит_шум_на_грани_тишины() {
         assert!(!mac_should_arm(true, 0.001));
+    }
+
+    // ---- Detect: проводка детекта ------------------------------------------
+    //
+    // `mac_should_arm` покрыт выше как чистая функция — и ровно этого было
+    // недостаточно. Бага C1 жила не в пороге, а в том, КУДА он подставлен:
+    // гейт стоял на событии `SessionAppeared`, а `was_active` защёлкивался
+    // строкой раньше по НЕгейтованному опросу, из-за чего фронт «сессии нет →
+    // сессия есть» сгорал впустую и второй раз не наступал никогда. Это тот
+    // самый разрыв «хелпер покрыт, проводка нет», о котором предупреждает
+    // докблок `drain_ctl`. Тесты ниже гоняют именно проводку — по нескольку
+    // опросов подряд, через `Detect::step`, где память состояния и гейт живут
+    // в одном месте.
+    //
+    // Наш собственный pid — не 0 и не 1; `me` берём заведомо чужим, чтобы
+    // фильтр своего pid не мешал (у него свой тест ниже).
+    const ЧУЖОЙ_ME: u32 = 999_999;
+
+    /// Пустой опрос — «известных процессов не видно».
+    fn нет_сессий() -> Vec<MicSession> {
+        Vec::new()
+    }
+
+    /// Уровень, заведомо проходящий порог на macOS; на Windows игнорируется.
+    const ЗВУЧИТ: f32 = 0.5;
+    /// Уровень тишины. Только для macOS: на Windows гейта нет вовсе, и
+    /// непокрытая cfg'ом константа стала бы там мёртвым кодом.
+    #[cfg(target_os = "macos")]
+    const ТИХО: f32 = 0.0;
+
+    /// База на обеих платформах: фронты считаются по опросам, а не по одному
+    /// вызову, и повтор того же состояния событий не порождает.
+    #[test]
+    fn фронты_считаются_между_опросами_а_повтор_молчит() {
+        let mut d = Detect::default();
+
+        let (active, event) = d.step(нет_сессий(), ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert!(active.is_none());
+        assert_eq!(event, None, "сессий не было и нет — событию взяться неоткуда");
+
+        let (active, event) = d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert_eq!(active.map(|s| s.pid), Some(7));
+        assert_eq!(event, Some(Event::SessionAppeared));
+
+        let (active, event) = d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert_eq!(active.map(|s| s.pid), Some(7));
+        assert_eq!(event, None, "та же сессия на втором опросе — не новое событие");
+
+        let (active, event) = d.step(нет_сессий(), ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert!(active.is_none());
+        assert_eq!(event, Some(Event::SessionGone));
+    }
+
+    /// Фильтр своего pid обязан работать и через `step`: иначе приложение
+    /// детектит само себя, и `SessionGone` не приходит никогда.
+    #[test]
+    fn свой_pid_не_считается_сессией_и_через_step() {
+        let мы = std::process::id();
+        let mut d = Detect::default();
+        let (active, event) = d.step(vec![session(мы)], ЗВУЧИТ, мы);
+        assert!(active.is_none());
+        assert_eq!(event, None);
+    }
+
+    /// **Регресс C1.** Zoom открыт в 09:00 без звонка, звонок начинается в
+    /// 09:30. Гейт обязан ОТЛОЖИТЬ детект, а не отменить его.
+    ///
+    /// Против прежней проводки этот тест красный: там первый же тихий опрос
+    /// защёлкивал `was_active = true`, единственное `SessionAppeared`
+    /// выбрасывалось гейтом, и на звучащем опросе `poll_to_event(true, …)`
+    /// возвращал `None` — до самого закрытия Zoom.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn звонок_через_полчаса_после_запуска_zoom_всё_равно_детектится() {
+        let mut d = Detect::default();
+
+        // 09:00–09:30: процесс есть, звука нет. 900 опросов по 2 с — полчаса.
+        for опрос in 0..900 {
+            let (active, event) = d.step(vec![session(7)], ТИХО, ЧУЖОЙ_ME);
+            assert!(
+                active.is_none(),
+                "опрос {опрос}: открытый Zoom без звука — ещё не звонок"
+            );
+            assert_eq!(event, None, "опрос {опрос}: предлагать запись нечего");
+        }
+
+        // 09:30: человек зашёл в звонок — в системе появился звук.
+        let (active, event) = d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert_eq!(active.map(|s| s.pid), Some(7));
+        assert_eq!(
+            event,
+            Some(Event::SessionAppeared),
+            "звук пришёл позже процесса — детект обязан сработать именно сейчас, \
+             а не быть съеденным первым тихим опросом"
+        );
+    }
+
+    /// Обратная сторона того же гейта: взвод происходит на ЗВУЧАЩЕМ опросе, а
+    /// не на первом тихом. Минимальная форма — два опроса.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn взвод_приходится_на_звучащий_опрос_а_не_на_первый_тихий() {
+        let mut d = Detect::default();
+        assert_eq!(d.step(vec![session(7)], ТИХО, ЧУЖОЙ_ME).1, None);
+        assert_eq!(
+            d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME).1,
+            Some(Event::SessionAppeared)
+        );
+    }
+
+    /// Гистерезис. Пауза в разговоре — не конец встречи: `SessionGone` на
+    /// первом же тихом опросе выбросил бы кольцо в `Armed` и остановил идущую
+    /// авто-запись.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn пауза_в_разговоре_не_обрывает_идущий_звонок() {
+        let mut d = Detect::default();
+        assert_eq!(
+            d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME).1,
+            Some(Event::SessionAppeared)
+        );
+
+        // Терпим на один опрос меньше порога — событий быть не должно вовсе.
+        for опрос in 0..(MAC_SILENT_POLLS_BEFORE_DROP - 1) {
+            let (active, event) = d.step(vec![session(7)], ТИХО, ЧУЖОЙ_ME);
+            assert_eq!(active.map(|s| s.pid), Some(7), "тихий опрос {опрос}");
+            assert_eq!(
+                event, None,
+                "тихий опрос {опрос}: собеседник просто молчит, встреча идёт"
+            );
+        }
+
+        // Заговорили снова — счётчик тишины обнуляется, и следующая пауза
+        // отсчитывается заново, а не добирает старую.
+        assert_eq!(d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME).1, None);
+        for опрос in 0..(MAC_SILENT_POLLS_BEFORE_DROP - 1) {
+            assert_eq!(
+                d.step(vec![session(7)], ТИХО, ЧУЖОЙ_ME).1,
+                None,
+                "тишина после возобновления разговора, опрос {опрос}"
+            );
+        }
+    }
+
+    /// Верхняя граница терпения: минута полной тишины — это уже конец звонка.
+    /// Без неё авто-запись шла бы до выхода из Zoom, то есть весь рабочий день.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn минута_тишины_завершает_звонок() {
+        let mut d = Detect::default();
+        d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME);
+
+        // Собираем НОМЕР опроса вместе с событием: важно не только «звонок
+        // однажды кончился», но и что это случилось ровно на пороге. Без
+        // номера тест остался бы зелёным и в отсутствие гистерезиса вообще —
+        // одно `SessionGone` там приходит на первом же тихом опросе.
+        let mut события = Vec::new();
+        for опрос in 1..=MAC_SILENT_POLLS_BEFORE_DROP {
+            if let (_, Some(e)) = d.step(vec![session(7)], ТИХО, ЧУЖОЙ_ME) {
+                события.push((опрос, e));
+            }
+        }
+        assert_eq!(
+            события,
+            vec![(MAC_SILENT_POLLS_BEFORE_DROP, Event::SessionGone)],
+            "ровно одно событие и ровно на {MAC_SILENT_POLLS_BEFORE_DROP}-м тихом опросе"
+        );
+
+        // После конца звонка приложение снова готово к следующему: звук в том
+        // же процессе даёт честный новый `SessionAppeared`.
+        assert_eq!(
+            d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME).1,
+            Some(Event::SessionAppeared)
+        );
+    }
+
+    /// Уход процесса гейту не подлежит: Zoom закрыли — звонок кончился, ждать
+    /// минуту тишины незачем. Проверяется при заведомо звучащей системе, чтобы
+    /// уровень не мог случайно оказаться причиной.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn закрытие_звонилки_завершает_звонок_сразу() {
+        let mut d = Detect::default();
+        d.step(vec![session(7)], ЗВУЧИТ, ЧУЖОЙ_ME);
+        assert_eq!(
+            d.step(нет_сессий(), ЗВУЧИТ, ЧУЖОЙ_ME).1,
+            Some(Event::SessionGone),
+            "процесса нет — решать нечего, гейт вмешиваться не должен"
+        );
     }
 }

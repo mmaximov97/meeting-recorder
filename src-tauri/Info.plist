@@ -6,5 +6,19 @@
 	<string>Запись микрофона нужна, чтобы сохранить вашу часть разговора на встрече.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Захват системного звука нужен, чтобы записать голоса собеседников во время встречи.</string>
+	<!-- Приложение живёт в строке меню, а не в Dock: окно стартует скрытым
+	     ("visible": false), крестик его прячет, а не выходит, и единственная
+	     всегда видимая часть GUI - трей. Без этого ключа двойной клик в Finder
+	     давал бы прыгающую иконку в Dock и пустой запуск, а клик по иконке
+	     потом не делал бы ничего - обработчика Reopen у приложения нет.
+
+	     ОДНОГО ЭТОГО КЛЮЧА НЕ ХВАТАЕТ. tao на applicationDidFinishLaunching
+	     безусловно зовёт setActivationPolicy своим значением, а его дефолт -
+	     Regular (tao 0.35.3, app_state.rs: launched -> apply_activation_policy),
+	     то есть иконка в Dock вернулась бы сразу после запуска. Парная строка -
+	     app.set_activation_policy(Accessory) в setup() в src-tauri/src/main.rs;
+	     ключ здесь нужен, чтобы Dock не мигнул ещё ДО этого момента. -->
+	<key>LSUIElement</key>
+	<true/>
 </dict>
 </plist>

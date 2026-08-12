@@ -466,15 +466,26 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
     // `capture::SystemTap`). `App::new` для этого не годится — она принимает
     // один `DeviceChoice`, которым такой захват не описывается.
     //
-    // `.expect(...)`, а не `status::fatal`, как у детектора выше, — временное
-    // упрощение: единообразную обработку отказа детектора и тапа на старте
-    // наводит Task 7 заодно с guard'ом версии ОС. Здесь достаточно не
-    // притворяться, что тап поднялся, если это не так.
+    // Отказ обрабатывается тем же способом, что отказ детектора двадцатью
+    // строками выше, и по той же причине. `.expect(...)` здесь означал панику
+    // в единственном потоке, который умеет писать на диск, — причём тихую:
+    // `status::fatal` не звался, `get_state` продолжал отдавать здоровое
+    // состояние, окно скрыто (`"visible": false`), приложение —
+    // `ActivationPolicy::Accessory`, паника уходит в unified log, а не в
+    // терминал, которого у релиза нет. Человек, отказавший в разрешении на
+    // захват системного звука (диалог липкий, снимается только `tccutil`),
+    // получал внешне живое приложение, которое ничего не пишет, и узнавал об
+    // этом на следующем нажатии хоткея.
     #[cfg(target_os = "macos")]
     let mut app = {
-        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
-            meeting_recorder::capture::SystemTap::start().expect("Process Tap не поднялся"),
-        ));
+        let tap = match meeting_recorder::capture::SystemTap::start() {
+            Ok(t) => t,
+            Err(e) => {
+                status::fatal(&handle, format!("системный звук не захватывается: {e}"));
+                return;
+            }
+        };
+        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(tap));
         App::new_with_audio(
             root,
             Box::new(meeting_recorder::app::MacAudio::new(mic, system_tap)),

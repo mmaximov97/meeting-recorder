@@ -388,6 +388,28 @@ fn main() {
             rename_recording
         ])
         .setup(move |app| {
+            // Приложение строки меню, а не Dock: окно стартует скрытым, крестик
+            // его прячет, а не выходит, — иконка в Dock, за которой нет окна и
+            // по клику на которую ничего не происходит (обработчика Reopen у
+            // нас нет), только вводила бы в заблуждение.
+            //
+            // Парная половина решения — `LSUIElement` в `src-tauri/Info.plist`.
+            // Нужны обе, и вот почему ни одной по отдельности не хватает:
+            // `LSUIElement` убирает Dock на момент запуска, но tao на
+            // `applicationDidFinishLaunching` безусловно зовёт
+            // `setActivationPolicy` своим значением, а его дефолт — `Regular`
+            // (tao 0.35.3, `app_state.rs`: `launched` → `apply_activation_policy`),
+            // и иконка вернулась бы. Эта строка задаёт tao нужное значение ДО
+            // старта цикла событий, но сама по себе успела бы дать Dock'у
+            // мигнуть.
+            //
+            // На показ окна из `status::fatal` это не влияет: `set_focus()` в
+            // tao — это `makeKeyAndOrderFront` + `activateIgnoringOtherApps`,
+            // то есть явная активация, которую accessory-приложению как раз и
+            // положено делать самому.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let handle = app.handle().clone();
             tray::build(&handle, tray_tx)?;
 

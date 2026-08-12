@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Запись микрофона нужна, чтобы сохранить вашу часть разговора на встрече.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Захват системного звука нужен, чтобы записать голоса собеседников во время встречи.</string>
+</dict>
+</plist>

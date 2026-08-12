@@ -4,7 +4,8 @@
   "private": true,
   "description": "Tauri-оболочка записи встреч: трей, тост, хоткей, список записей",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check-tap-lazy-bind": "scripts/check-tap-lazy-bind.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

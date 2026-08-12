@@ -613,4 +613,71 @@ mod tests {
         assert!(!is_month_folder("архив"));
         assert!(!is_month_folder(""));
     }
+
+    // ---- tauri.conf.json ----------------------------------------------------
+
+    /// Караул при значении, которое выглядит опечаткой и ею не является.
+    ///
+    /// `bundle.macOS.minimumSystemVersion` стоит `11.0`, хотя приложению нужна
+    /// macOS 14.4, — и это единственная причина, по которой отказ на старой
+    /// системе вообще доходит до человека. Рассуждение записано в пяти местах
+    /// (докблок `MIN_MACOS` в `src/capture/macos.rs`, design-документ, план,
+    /// README, `scripts/check-tap-lazy-bind.sh`), и ни одно из них не лежит
+    /// внутри `src-tauri/` — то есть там, куда смотрит человек, решивший
+    /// «привести в соответствие». JSON комментариев не держит; этот тест —
+    /// единственный комментарий, который правка не сможет не заметить.
+    ///
+    /// Файл берётся `include_str!`, а не чтением с диска: так тест не зависит
+    /// ни от рабочего каталога, ни от платформы, а расхождение всплывает уже
+    /// при компиляции, если файл вообще исчезнет. `cfg` на нём нет намеренно —
+    /// ключ правят чаще всего как раз не с macOS.
+    #[test]
+    fn минимальная_версия_macos_в_бандле_осталась_11_0() {
+        const CONF: &str = include_str!("../tauri.conf.json");
+        let conf: serde_json::Value =
+            serde_json::from_str(CONF).expect("src-tauri/tauri.conf.json — не валидный JSON");
+
+        assert_eq!(
+            conf["bundle"]["macOS"]["minimumSystemVersion"].as_str(),
+            Some("11.0"),
+            "\n\
+             bundle.macOS.minimumSystemVersion обязан остаться \"11.0\".\n\
+             \n\
+             Расхождение с настоящим требованием (macOS 14.4) выглядит \
+             недосмотром, но им не является.\n\
+             \n\
+             МЕХАНИЗМ. В Tauri 2 этот ключ задаёт не только LSMinimumSystemVersion \
+             в Info.plist,\n\
+             но и MACOSX_DEPLOYMENT_TARGET для сборки cargo. А ld при deployment \
+             target 12.0\n\
+             и выше переключается на chained fixups, где ленивого связывания нет \
+             вообще.\n\
+             \n\
+             ЗАМЕР (минимальный C-пробник на AudioHardwareCreateProcessTap, \
+             докблок MIN_MACOS\n\
+             в src/capture/macos.rs):\n\
+             \x20   min=11.0  lazy_binds=1  __DATA __la_symbol_ptr  lazy-bind\n\
+             \x20   min=11.5  lazy_binds=1  __DATA __la_symbol_ptr  lazy-bind\n\
+             \x20   min=12.0  lazy_binds=0  __DATA_CONST __got           bind\n\
+             \x20   min=14.4  lazy_binds=0  __DATA_CONST __got           bind\n\
+             Порог — ровно 12.0, на один минорный шаг выше нашего 11.0.\n\
+             \n\
+             ПОСЛЕДСТВИЕ. Символы тапа не weak-import. Пока они связываются \
+             лениво, процесс\n\
+             на старой macOS доходит до main, зовёт unsupported_reason() и \
+             объясняет человеку,\n\
+             что нужна 14.4. Со жадным связыванием dyld убивает процесс с\n\
+             \"Symbol not found: _AudioHardwareCreateProcessTap\" ДО main: вместо \
+             читаемого\n\
+             сообщения — падение загрузчика, а весь guard версии превращается в \
+             мёртвый код.\n\
+             Молча: тесты зелёные, сборка проходит, .dmg уезжает.\n\
+             \n\
+             Если гейт в Info.plist всё же надо поднять — сперва сделать импорты \
+             weak\n\
+             (-weak_framework CoreAudio), и только потом двигать этот ключ. \
+             Проверка\n\
+             на собранном бандле: npm run check-tap-lazy-bind\n"
+        );
+    }
 }

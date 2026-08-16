@@ -292,6 +292,38 @@ fn open_folder() -> Result<(), String> {
     Ok(())
 }
 
+/// Открыть раздел настроек, где выдают разрешение на захват системного звука.
+///
+/// Тем же способом, что `open_folder`, и по той же причине: одна строка вместо
+/// плагина с правами в capabilities.
+///
+/// Раздел — «Запись экрана и звука» (`Privacy_ScreenCapture`): Process Tap
+/// живёт именно там, хотя usage description у него свой
+/// (`NSAudioCaptureUsageDescription`). Отдельного якоря под захват звука в
+/// схеме `x-apple.systempreferences` нет.
+///
+/// Кнопка нужна не для красоты: путь до этого переключателя человек по памяти
+/// не наберёт, а предупреждение, которое говорит «разрешите в настройках» и не
+/// показывает где, перекладывает поиск на того, кто и так уже споткнулся.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn open_privacy_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn()
+        .map_err(|e| format!("не удалось открыть Системные настройки: {e}"))?;
+    Ok(())
+}
+
+/// На Windows этой кнопки нет — как нет и разрешения, которое она открывает:
+/// WASAPI loopback его не требует. Команда существует только затем, чтобы
+/// `invoke` из общего `main.js` не падал в ненайденную команду.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn open_privacy_settings() -> Result<(), String> {
+    Ok(())
+}
+
 /// Доступные микрофоны для выпадашки: идентификатор и что показать.
 ///
 /// `InputDevice` уже `Serialize`? Нет — он в ядре, где serde не подключён.
@@ -381,6 +413,7 @@ fn main() {
             get_state,
             list_recordings,
             open_folder,
+            open_privacy_settings,
             list_mic_devices,
             get_config,
             set_mic_device,

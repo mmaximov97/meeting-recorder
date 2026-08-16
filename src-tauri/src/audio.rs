@@ -13,11 +13,11 @@
 
 use meeting_recorder::app::{poll_to_event, App, Levels};
 use meeting_recorder::capture::DeviceChoice;
-use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
-#[cfg(target_os = "windows")]
-use meeting_recorder::detector::WindowsDetector;
 #[cfg(target_os = "macos")]
 use meeting_recorder::detector::MacDetector;
+#[cfg(target_os = "windows")]
+use meeting_recorder::detector::WindowsDetector;
+use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
 use meeting_recorder::session::{Event, State};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -488,9 +488,8 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
     // `capture::SystemTap`). `App::new` для этого не годится — она принимает
     // один `DeviceChoice`, которым такой захват не описывается.
     //
-    // Отказ обрабатывается тем же способом, что отказ детектора двадцатью
-    // строками выше, и по той же причине. `.expect(...)` здесь означал панику
-    // в единственном потоке, который умеет писать на диск, — причём тихую:
+    // Отказ здесь НЕ фатален, хотя раньше был. `.expect(...)` означал панику в
+    // единственном потоке, который умеет писать на диск, — причём тихую:
     // `status::fatal` не звался, `get_state` продолжал отдавать здоровое
     // состояние, окно скрыто (`"visible": false`), приложение —
     // `ActivationPolicy::Accessory`, паника уходит в unified log, а не в
@@ -498,20 +497,30 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
     // захват системного звука (диалог липкий, снимается только `tccutil`),
     // получал внешне живое приложение, которое ничего не пишет, и узнавал об
     // этом на следующем нажатии хоткея.
+    //
+    // Сменивший панику `status::fatal` был честен, но всё ещё строг не по делу:
+    // микрофон-то захватывается, и приложение, которое отказывается писать хоть
+    // что-то, полезнее не становится. Дизайн-документ обещает ровно обратное —
+    // деградацию с видимым предупреждением, — и теперь так и сделано.
+    //
+    // Цена режима не в одной дорожке, а в автодетекте: `mac_should_arm`
+    // требует системного звука, которого без тапа не будет никогда, то есть
+    // взвода не случится ни разу. Поэтому предупреждение говорит именно это
+    // (см. `status::NO_SYSTEM_AUDIO`), а не «нет второй дорожки».
     #[cfg(target_os = "macos")]
     let mut app = {
-        let tap = match meeting_recorder::capture::SystemTap::start() {
-            Ok(t) => t,
-            Err(e) => {
-                status::fatal(&handle, format!("системный звук не захватывается: {e}"));
-                return;
-            }
-        };
-        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(tap));
-        App::new_with_audio(
-            root,
-            Box::new(meeting_recorder::app::MacAudio::new(mic, system_tap)),
-        )
+        let audio: Box<dyn meeting_recorder::app::AudioIo> =
+            match meeting_recorder::capture::SystemTap::start() {
+                Ok(tap) => Box::new(meeting_recorder::app::MacAudio::new(
+                    mic,
+                    std::rc::Rc::new(std::cell::RefCell::new(tap)),
+                )),
+                Err(e) => {
+                    status::no_system_audio(&handle, e.to_string());
+                    Box::new(meeting_recorder::app::MacAudio::new_mic_only(mic))
+                }
+            };
+        App::new_with_audio(root, audio)
     };
     let me = std::process::id();
     // Память детекта между опросами живёт здесь целиком — см. докблок `Detect`.
@@ -1067,8 +1076,14 @@ mod tests {
     /// событие шлётся в обоих случаях.
     #[test]
     fn идущая_проверка_шлёт_событие_независимо_от_того_когда_она_включилась() {
-        assert!(should_emit_levels(false, true, State::Idle), "включилась только что в этом тике");
-        assert!(should_emit_levels(true, true, State::Idle), "шла уже и до этого тика");
+        assert!(
+            should_emit_levels(false, true, State::Idle),
+            "включилась только что в этом тике"
+        );
+        assert!(
+            should_emit_levels(true, true, State::Idle),
+            "шла уже и до этого тика"
+        );
     }
 
     /// Запись сама по себе — повод слать уровни, даже если проверку никто не
@@ -1165,7 +1180,10 @@ mod tests {
 
         let (active, event) = d.step(нет_сессий(), ЗВОНОК_СЛЫШЕН, ЧУЖОЙ_ME);
         assert!(active.is_none());
-        assert_eq!(event, None, "сессий не было и нет — событию взяться неоткуда");
+        assert_eq!(
+            event, None,
+            "сессий не было и нет — событию взяться неоткуда"
+        );
 
         let (active, event) = d.step(vec![session(7)], ЗВОНОК_СЛЫШЕН, ЧУЖОЙ_ME);
         assert_eq!(active.map(|s| s.pid), Some(7));
@@ -1173,7 +1191,10 @@ mod tests {
 
         let (active, event) = d.step(vec![session(7)], ЗВОНОК_СЛЫШЕН, ЧУЖОЙ_ME);
         assert_eq!(active.map(|s| s.pid), Some(7));
-        assert_eq!(event, None, "та же сессия на втором опросе — не новое событие");
+        assert_eq!(
+            event, None,
+            "та же сессия на втором опросе — не новое событие"
+        );
 
         let (active, event) = d.step(нет_сессий(), ЗВОНОК_СЛЫШЕН, ЧУЖОЙ_ME);
         assert!(active.is_none());

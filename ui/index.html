@@ -89,6 +89,22 @@
       #devwarn.on {
         display: block;
       }
+      /* Тот же вид, что у #devwarn: оба — «работает, но не полностью». Живёт
+         до перезапуска (тап поднимается один раз), поэтому текст длиннее и
+         набран мельче — его читают один раз, а видят потом каждый день. */
+      #nosysaudio {
+        display: none;
+        border: 1px solid var(--warn);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        color: var(--warn);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      #nosysaudio.on {
+        display: block;
+      }
       .row {
         display: flex;
         gap: 8px;
@@ -294,6 +310,7 @@
     </div>
 
     <div id="devwarn"></div>
+    <div id="nosysaudio"></div>
 
     <h2>Микрофон</h2>
     <div class="row">

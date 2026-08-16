@@ -6,11 +6,11 @@
 //! ровно то же самое.
 
 use meeting_recorder::app::{poll_to_event, App};
-use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
-#[cfg(target_os = "windows")]
-use meeting_recorder::detector::WindowsDetector;
 #[cfg(target_os = "macos")]
 use meeting_recorder::detector::MacDetector;
+#[cfg(target_os = "windows")]
+use meeting_recorder::detector::WindowsDetector;
+use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
 use meeting_recorder::session::Event;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -99,6 +99,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // устройство всё время работы. Это осознанно: бинарь существует ровно
     // затем, чтобы прогнать детект и запись без webview, а консоль, не умеющая
     // писать системную дорожку, эту работу не выполняет.
+    //
+    // Поэтому отказ здесь остаётся отказом (`?` — выход с текстом), тогда как
+    // GUI на том же отказе продолжает работать одним микрофоном
+    // (`audio::run` → `MacAudio::new_mic_only`). Расхождение намеренное и
+    // держится на разнице назначений: у GUI задача — записать встречу хоть
+    // как-то, у консоли — проверить, что системная дорожка берётся. Консоль,
+    // которая на отказе тихо запишет половину, эту проверку не провалит, а
+    // подделает; вдобавок ей есть куда сказать правду — терминал, которого у
+    // релизного GUI нет.
     #[cfg(target_os = "macos")]
     let mut app = {
         let system_tap = std::rc::Rc::new(std::cell::RefCell::new(

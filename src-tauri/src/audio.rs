@@ -455,6 +455,33 @@ impl Detect {
     }
 }
 
+/// Поднять тап — или сообщить, почему не вышло.
+///
+/// `MR_FORCE_NO_SYSTEM_AUDIO=1` заставляет его «не подняться», не трогая при
+/// этом ни одного разрешения в системе. Тот же приём, что `MR_DEBUG_TIMING` и
+/// `MR_DEBUG_POLL`: живого отказа не поймать иначе как отказавшись руками, а
+/// путь, который включается один раз на первом запуске, обязан быть проверяем
+/// не один раз.
+///
+/// Заведено не для красоты. `tccutil reset` оказался ненадёжным способом
+/// вернуться к «разрешение ещё не спрашивали»: сброс и `ScreenCapture`, и
+/// `AudioCapture` для нашего bundle id отрабатывает с «Successfully reset», а
+/// тап после этого поднимается как ни в чём не бывало — то есть настоящая
+/// запись разрешения живёт где-то ещё (ad-hoc подпись, cdhash, чужой client
+/// id), и добраться до неё снаружи не удалось. Без этой переменной весь режим
+/// одного микрофона — ветка, которую нельзя запустить ни в тесте, ни руками.
+///
+/// Опасности для релиза нет ровно в той же мере, что у соседних `MR_DEBUG_*`:
+/// переменная включает деградацию, а не отключает проверку, — включивший её
+/// получит громкое предупреждение на весь экран, а не тихо испорченную запись.
+#[cfg(target_os = "macos")]
+fn start_system_tap() -> Result<meeting_recorder::capture::SystemTap, String> {
+    if std::env::var_os("MR_FORCE_NO_SYSTEM_AUDIO").is_some() {
+        return Err("захват выключен вручную (MR_FORCE_NO_SYSTEM_AUDIO)".to_string());
+    }
+    meeting_recorder::capture::SystemTap::start().map_err(|e| e.to_string())
+}
+
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
 pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
@@ -509,17 +536,16 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
     // (см. `status::NO_SYSTEM_AUDIO`), а не «нет второй дорожки».
     #[cfg(target_os = "macos")]
     let mut app = {
-        let audio: Box<dyn meeting_recorder::app::AudioIo> =
-            match meeting_recorder::capture::SystemTap::start() {
-                Ok(tap) => Box::new(meeting_recorder::app::MacAudio::new(
-                    mic,
-                    std::rc::Rc::new(std::cell::RefCell::new(tap)),
-                )),
-                Err(e) => {
-                    status::no_system_audio(&handle, e.to_string());
-                    Box::new(meeting_recorder::app::MacAudio::new_mic_only(mic))
-                }
-            };
+        let audio: Box<dyn meeting_recorder::app::AudioIo> = match start_system_tap() {
+            Ok(tap) => Box::new(meeting_recorder::app::MacAudio::new(
+                mic,
+                std::rc::Rc::new(std::cell::RefCell::new(tap)),
+            )),
+            Err(why) => {
+                status::no_system_audio(&handle, why);
+                Box::new(meeting_recorder::app::MacAudio::new_mic_only(mic))
+            }
+        };
         App::new_with_audio(root, audio)
     };
     let me = std::process::id();

@@ -70,10 +70,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // без него консоль на macOS 13 упала бы с сырым отказом Core Audio вместо
     // объяснения — причём именно она и нужна человеку, когда «что-то со звуком».
     //
-    // Guard работает: символы тапа биндятся ЛЕНИВО (проверено `dyld_info
-    // -fixups` по собранному бинарю — они лежат в `__la_symbol_ptr` с
-    // `lazy-bind`), поэтому процесс на старой системе доживает до этой строки и
-    // печатает объяснение, а не падает в dyld до `main`.
+    // Guard работает: CoreAudio линкуется слабо (`-Wl,-weak_framework,CoreAudio`
+    // из `build.rs`, проверено `dyld_info -fixups` по собранному бинарю —
+    // `[weak-import]`), поэтому отсутствующий символ тапа становится нулевым
+    // указателем, процесс на старой системе доживает до этой строки и печатает
+    // объяснение, а не падает в dyld до `main`.
     #[cfg(target_os = "macos")]
     if let Some(why) = meeting_recorder::capture::macos::unsupported_reason() {
         return Err(why.into());

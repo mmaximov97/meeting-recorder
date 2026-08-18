@@ -6,7 +6,11 @@
 //! ровно то же самое.
 
 use meeting_recorder::app::{poll_to_event, App};
-use meeting_recorder::detector::{MeetingDetector, MicSession, WindowsDetector, POLL_INTERVAL};
+#[cfg(target_os = "macos")]
+use meeting_recorder::detector::MacDetector;
+#[cfg(target_os = "windows")]
+use meeting_recorder::detector::WindowsDetector;
+use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
 use meeting_recorder::session::Event;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -31,16 +35,98 @@ fn spawn_stdin() -> Receiver<String> {
     rx
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Без этого log::error!/warn! из ядра (watchdog system-дорожки, ошибки
-    // потоков захвата) молча проглатываются фасадом — у консоли есть
-    // терминал, но не логгер, пока его явно не назначили.
+#[cfg(target_os = "windows")]
+fn recordings_root() -> PathBuf {
+    PathBuf::from(r"C:\Users\<username>\Recordings")
+}
+
+#[cfg(target_os = "macos")]
+fn recordings_root() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
+}
+
+/// Тонкая обёртка над [`run`] ради ОДНОЙ вещи: печати ошибки через `Display`.
+///
+/// `fn main() -> Result<_, _>` печатает `Error: {:?}`, то есть `Debug`. У
+/// `CaptureError` вся человеческая форма живёт в `Display` (там `OSStatus`
+/// превращается в четырёхсимвольный код вроде `'!obj'` через `status_text`), а
+/// `Debug` отдаёт голое число. Самый вероятный отказ этого бинаря на macOS —
+/// отказ пользователя в диалоге TCC, и получить на него `CoreAudio { status:
+/// 1852797029 }` в единственном инструменте, который существует ради диагностики
+/// Core Audio, было бы издевательством.
+fn main() -> std::process::ExitCode {
+    // Первой строкой, до любого другого кода (включая TCC-guard ниже): без
+    // этого log::error!/warn! из ядра (watchdog system-дорожки, ошибки потоков
+    // захвата) молча проглатываются фасадом — у консоли есть терминал, но не
+    // логгер, пока его явно не назначили.
     env_logger::init();
-    let root = PathBuf::from(r"C:\Users\<username>\Recordings");
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ошибка: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Тот же guard, что в GUI (`src-tauri/src/audio.rs::run`), и та же функция:
+    // без него консоль на macOS 13 упала бы с сырым отказом Core Audio вместо
+    // объяснения — причём именно она и нужна человеку, когда «что-то со звуком».
+    //
+    // Guard работает: CoreAudio линкуется слабо (`-Wl,-weak_framework,CoreAudio`
+    // из `build.rs`, проверено `dyld_info -fixups` по собранному бинарю —
+    // `[weak-import]`), поэтому отсутствующий символ тапа становится нулевым
+    // указателем, процесс на старой системе доживает до этой строки и печатает
+    // объяснение, а не падает в dyld до `main`.
+    #[cfg(target_os = "macos")]
+    if let Some(why) = meeting_recorder::capture::macos::unsupported_reason() {
+        return Err(why.into());
+    }
+
+    let root = recordings_root();
+    #[cfg(target_os = "windows")]
     let det = WindowsDetector::new()?;
+    #[cfg(target_os = "macos")]
+    let det = MacDetector::new();
     // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный
     // дефолт. Выбор устройства живёт в GUI, где его есть где хранить.
+    #[cfg(target_os = "windows")]
     let mut app = App::new(root, meeting_recorder::capture::DeviceChoice::Default);
+    // На macOS захват собирается снаружи — тем же способом, что в
+    // `src-tauri/src/audio.rs::run()`: системная дорожка это ресурс уровня
+    // процесса, и одним `DeviceChoice`, который принимает `App::new`, она не
+    // описывается.
+    //
+    // Отсюда следствие, которого у консоли раньше не было: она поднимает
+    // процесс-тап, а значит при первом запуске покажет системный диалог
+    // разрешения на захват звука и будет держать приватное агрегированное
+    // устройство всё время работы. Это осознанно: бинарь существует ровно
+    // затем, чтобы прогнать детект и запись без webview, а консоль, не умеющая
+    // писать системную дорожку, эту работу не выполняет.
+    //
+    // Поэтому отказ здесь остаётся отказом (`?` — выход с текстом), тогда как
+    // GUI на том же отказе продолжает работать одним микрофоном
+    // (`audio::run` → `MacAudio::new_mic_only`). Расхождение намеренное и
+    // держится на разнице назначений: у GUI задача — записать встречу хоть
+    // как-то, у консоли — проверить, что системная дорожка берётся. Консоль,
+    // которая на отказе тихо запишет половину, эту проверку не провалит, а
+    // подделает; вдобавок ей есть куда сказать правду — терминал, которого у
+    // релизного GUI нет.
+    #[cfg(target_os = "macos")]
+    let mut app = {
+        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
+            meeting_recorder::capture::SystemTap::start()?,
+        ));
+        App::new_with_audio(
+            root,
+            Box::new(meeting_recorder::app::MacAudio::new(
+                meeting_recorder::capture::DeviceChoice::Default,
+                system_tap,
+            )),
+        )
+    };
     let input = spawn_stdin();
     let me = std::process::id();
     // Живой звонок отлаживать нечем, кроме глаз: MR_DEBUG_POLL=1 печатает,

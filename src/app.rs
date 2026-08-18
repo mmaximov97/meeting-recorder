@@ -17,7 +17,9 @@
 //! правка остаётся зелёной. Фейки в тестах умеют падать в нужной точке —
 //! этого достаточно, чтобы каждый инвариант ловил свою мутацию.
 
-use crate::capture::{build_loopback_capture, build_mic_capture, start_silence, DeviceChoice};
+#[cfg(target_os = "windows")]
+use crate::capture::{build_loopback_capture, start_silence};
+use crate::capture::{build_mic_capture, DeviceChoice};
 use crate::detector::MicSession;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
@@ -114,8 +116,33 @@ pub trait AudioIo {
     /// где нужна (тест самого watchdog), фейк её переопределяет и считает
     /// вызовы. `CpalAudio` — единственная реализация, которой есть что
     /// пересобирать.
+    ///
+    /// На `has_system() == false` (см. ниже) watchdog не имеет права звать эту
+    /// функцию вовсе — там дорожки нет легитимно, не по обрыву, пересборка
+    /// звонила бы в пустоту каждые `SYS_WATCHDOG_TICKS`.
     fn reopen_loopback(&mut self) -> Res {
         Ok(())
+    }
+
+    /// Есть ли вообще вторая дорожка. `false` — системный звук захватить нечем,
+    /// и запись обязана состоять из одного микрофона.
+    ///
+    /// Существует только ради macOS, где захват системного звука спрашивают у
+    /// человека и он вправе отказать (см. `MacAudio::new_mic_only`). На Windows
+    /// loopback-эндпоинт разрешения не требует, поэтому дефолт — `true`.
+    ///
+    /// Спрашивается в `open_sinks`, а не при записи: пустой `sys` из `drain`
+    /// сам по себе неотличим от тишины, и без этого вопроса на диск ложился бы
+    /// второй WAV, который открывается, играет тишину и выглядит как поломка
+    /// записи, а не как отсутствие разрешения. Дорожки, которой нет, не должно
+    /// быть и в файлах.
+    ///
+    /// Watchdog system-дорожки (`App::check_sys_watchdog`) тоже спрашивает
+    /// именно это, а не только `is_open()` — по той же причине: без разрешения
+    /// на macOS дорожки нет легитимно, и это не обрыв, который лечится
+    /// переподключением.
+    fn has_system(&self) -> bool {
+        true
     }
 }
 
@@ -140,6 +167,11 @@ impl SinkFactory for WavSinks {
 
 /// Живут только пока идёт детект или запись. Drop останавливает захват,
 /// поэтому индикатор микрофона в Windows гаснет сразу после Idle.
+///
+/// Windows-only вместе с `CpalAudio`, которая единственная её и строит:
+/// у `MacAudio` системная дорожка не в потоке cpal, а в общем на весь процесс
+/// `SystemTap`, и держать под неё поле здесь нечего.
+#[cfg(target_os = "windows")]
 struct Streams {
     /// Тихий render-поток: не даёт эндпоинту простаивать, иначе WASAPI loopback
     /// не отдаёт пакеты и дорожка `system` начинается не с открытия потока, а с
@@ -165,6 +197,7 @@ struct Streams {
 }
 
 /// Реальный захват через cpal.
+#[cfg(target_os = "windows")]
 struct CpalAudio {
     streams: Option<Streams>,
     /// Какое устройство просить на следующем `open()`.
@@ -183,6 +216,7 @@ struct CpalAudio {
     logged_sys: bool,
 }
 
+#[cfg(target_os = "windows")]
 impl CpalAudio {
     fn new(mic: DeviceChoice) -> Self {
         Self {
@@ -197,6 +231,7 @@ impl CpalAudio {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl AudioIo for CpalAudio {
     fn open(&mut self) -> Res {
         if self.streams.is_some() {
@@ -253,7 +288,11 @@ impl AudioIo for CpalAudio {
             eprintln!(
                 "[timing] start_silence           = {:?}{}",
                 t1.duration_since(t0),
-                if _silence.is_some() { "" } else { " (НЕ ПОДНЯЛСЯ)" }
+                if _silence.is_some() {
+                    ""
+                } else {
+                    " (НЕ ПОДНЯЛСЯ)"
+                }
             );
             eprintln!(
                 "[timing] build(mic)              = {:?}",
@@ -278,7 +317,10 @@ impl AudioIo for CpalAudio {
                 "[timing] ожидаемая Δ дорожек     = {:?}",
                 t4.duration_since(t3)
             );
-            eprintln!("[timing] open_streams всего      = {:?}", t5.duration_since(t0));
+            eprintln!(
+                "[timing] open_streams всего      = {:?}",
+                t5.duration_since(t0)
+            );
         }
         self.opened_at = Some(t0);
         self.logged_mic = false;
@@ -389,6 +431,189 @@ impl AudioIo for CpalAudio {
     }
 }
 
+/// Реальный захват на macOS: микрофон через cpal, система — через процесс-тап.
+///
+/// Структурно параллельна [`CpalAudio`], но с одним принципиальным отличием:
+/// системная дорожка НЕ открывается в `open()` и не гаснет в `close()`. Тап
+/// поднят снаружи, до `App`, и течёт всё время работы приложения — иначе
+/// сигналу активности звука, которым на macOS достраивается детект, не на чем
+/// было бы работать до первого детекта (см. докблок `capture::SystemTap`).
+///
+/// `pub` — потому что `MacAudio::new` зовётся из `src-tauri/src/audio.rs`,
+/// другого крейта. Поля при этом остаются приватными: наружу торчит только
+/// конструктор.
+#[cfg(target_os = "macos")]
+pub struct MacAudio {
+    mic: Option<cpal::Stream>,
+    mic_rx: Option<Receiver<Vec<i16>>>,
+    mic_choice: DeviceChoice,
+    fell_back: Option<String>,
+    /// Живёт всё время процесса — сконструирован снаружи и передан сюда,
+    /// а не создаётся в `open()`/`close()`.
+    ///
+    /// `None` — человек отказал в разрешении на захват системного звука
+    /// (см. `new_mic_only`). Приложение при этом продолжает работать, но пишет
+    /// одну дорожку и теряет автодетект: на macOS звонок отличается от просто
+    /// открытого Zoom ровно тем, что система при нём звучит, а без тапа этот
+    /// сигнал не с чего взять.
+    system_tap: Option<std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>>,
+    /// `MR_DEBUG_TIMING=1` — то же, что у `CpalAudio`, и по той же причине:
+    /// живого звонка отладчиком не поймать, а расхождение старта дорожек видно
+    /// только на числах.
+    ///
+    /// Мерить здесь есть что, хотя системная дорожка и не открывается: вопрос
+    /// «сколько микрофон догоняет уже идущий тап» — это ровно то, что ручная
+    /// проверка на macOS и должна увидеть. Переменная обязана работать на обеих
+    /// платформах: инструкция к проверке одна, и молчащий на macOS
+    /// `MR_DEBUG_TIMING` человек прочитал бы как отказ сборки, а не как «эта
+    /// платформа ничего не печатает».
+    timing: bool,
+    /// Начало `open()` — точка отсчёта для дорожки микрофона.
+    opened_at: Option<Instant>,
+    logged_mic: bool,
+    logged_sys: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl MacAudio {
+    /// `system_tap` — общий на весь процесс, конструируется и передаётся
+    /// вызывающим (`audio::run()`), а не здесь: это ресурс уровня процесса,
+    /// а не уровня одной записи.
+    pub fn new(
+        mic: DeviceChoice,
+        system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
+    ) -> Self {
+        Self::with_tap(mic, Some(system_tap))
+    }
+
+    /// Без системной дорожки: тап не поднялся, потому что человек отказал в
+    /// разрешении на захват звука.
+    ///
+    /// Отдельный конструктор, а не `new(mic, None)`, чтобы вызов читался как
+    /// решение («пишем только микрофон»), а не как забытый аргумент. Цена этого
+    /// режима не в одной дорожке, а в автодетекте — он перестаёт срабатывать
+    /// совсем, и сказать об этом человеку обязан тот, кто сюда попал
+    /// (`audio::run`), потому что отсюда до UI не дотянуться.
+    pub fn new_mic_only(mic: DeviceChoice) -> Self {
+        Self::with_tap(mic, None)
+    }
+
+    fn with_tap(
+        mic: DeviceChoice,
+        system_tap: Option<std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>>,
+    ) -> Self {
+        Self {
+            mic: None,
+            mic_rx: None,
+            mic_choice: mic,
+            fell_back: None,
+            system_tap,
+            timing: std::env::var_os("MR_DEBUG_TIMING").is_some(),
+            opened_at: None,
+            logged_mic: false,
+            logged_sys: false,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AudioIo for MacAudio {
+    /// Открывает ТОЛЬКО микрофон: системная дорожка течёт из `system_tap`
+    /// независимо от этого вызова.
+    ///
+    /// Разделения «открыть» и «запустить» здесь достаточно в вырожденном виде:
+    /// поток ровно один, выравнивать его не с чем — тап уже идёт, и его время
+    /// отсчитывается от старта приложения, а не от `open()`.
+    fn open(&mut self) -> Res {
+        if self.mic.is_some() {
+            return Ok(());
+        }
+        let (tx, rx) = channel();
+        let t0 = Instant::now();
+        let (pending, fell_back) = build_mic_capture(&self.mic_choice, tx)?;
+        self.fell_back = fell_back;
+        let t1 = Instant::now();
+        self.mic = Some(pending.play()?);
+        let t2 = Instant::now();
+        if self.timing {
+            eprintln!("[timing] build(mic)              = {:?}", t1 - t0);
+            eprintln!("[timing] play(mic)               = {:?}", t2 - t1);
+            eprintln!(
+                "[timing] системная дорожка      = уже идёт (тап поднят при старте \
+                 приложения, открывать нечего)"
+            );
+        }
+        self.opened_at = Some(t0);
+        self.logged_mic = false;
+        self.logged_sys = false;
+        self.mic_rx = Some(rx);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.mic = None;
+        self.mic_rx = None;
+        self.opened_at = None;
+    }
+
+    /// Про микрофон — как и требует докблок трейта («горит ли индикатор»).
+    /// Системная дорожка сюда не входит: privacy-индикатора у тапа нет, и
+    /// этим методом она не гейтится.
+    fn is_open(&self) -> bool {
+        self.mic.is_some()
+    }
+
+    fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+        let mic: Vec<i16> = self
+            .mic_rx
+            .as_ref()
+            .map(|rx| rx.try_iter().flatten().collect())
+            .unwrap_or_default();
+        // Дренируется ВСЕГДА, даже когда микрофон закрыт: иначе накопленное в
+        // канале тапа росло бы без предела всё время простоя, а уровень
+        // системного звука (второй сигнал детекта на macOS) считался бы по
+        // тому, что играло минуты назад.
+        //
+        // Без тапа — пустой вектор, то есть ровно то же, что «тап есть, но
+        // сейчас тихо». Разница между этими случаями видна не здесь, а в
+        // `has_system`: тишина пишется в файл, отсутствие дорожки — нет.
+        let sys = match self.system_tap.as_ref() {
+            Some(t) => t.borrow_mut().drain(),
+            None => Vec::new(),
+        };
+        if self.timing {
+            // Замер грубый: drain зовётся из цикла раз в 200 мс, так что
+            // «первый чанк» округлён вверх до тика. Отсчёт — от open(), то есть
+            // от взятия микрофона; для системной дорожки это ответ на вопрос
+            // «сколько её уже было к моменту, когда включился микрофон», а не
+            // «сколько она поднималась».
+            if let Some(t0) = self.opened_at {
+                if !self.logged_mic && !mic.is_empty() {
+                    eprintln!("[timing] первый чанк mic      = +{:?}", t0.elapsed());
+                    self.logged_mic = true;
+                }
+                if !self.logged_sys && !sys.is_empty() {
+                    eprintln!("[timing] первый чанк system   = +{:?}", t0.elapsed());
+                    self.logged_sys = true;
+                }
+            }
+        }
+        (mic, sys)
+    }
+
+    fn set_mic_device(&mut self, choice: DeviceChoice) {
+        self.mic_choice = choice;
+    }
+
+    fn fell_back_from(&self) -> Option<String> {
+        self.fell_back.clone()
+    }
+
+    fn has_system(&self) -> bool {
+        self.system_tap.is_some()
+    }
+}
+
 /// Пиковый уровень по обеим дорожкам, 0..1.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Levels {
@@ -446,8 +671,22 @@ pub struct App {
 impl App {
     /// Микрофон здесь НЕ открывается. Потоки поднимаются только по детекту,
     /// ручному старту или явной проверке — см. `Action::StartRingBuffer`.
+    #[cfg(target_os = "windows")]
     pub fn new(root: PathBuf, mic: DeviceChoice) -> Self {
         Self::with_backends(root, Box::new(CpalAudio::new(mic)), Box::new(WavSinks))
+    }
+
+    /// Для платформ, где `AudioIo` собирается снаружи.
+    ///
+    /// На macOS это `MacAudio` с общим на весь процесс `SystemTap`: одним
+    /// `DeviceChoice`, который принимает `App::new`, такой захват не
+    /// описывается — тап поднимается раньше `App` и живёт дольше любой записи.
+    ///
+    /// `SinkFactory` при этом всегда `WavSinks`, как и в `App::new`:
+    /// варьируется только `AudioIo`. Подставной `SinkFactory` остаётся делом
+    /// тестов и `with_backends`.
+    pub fn new_with_audio(root: PathBuf, audio: Box<dyn AudioIo>) -> Self {
+        Self::with_backends(root, audio, Box::new(WavSinks))
     }
 
     /// Сменить микрофон. Вступает в силу со следующего открытия потоков.
@@ -551,6 +790,43 @@ impl App {
         self.audio.drain()
     }
 
+    /// Выбросить всё, что уже лежит в каналах захвата, — «запись начинается
+    /// отсюда».
+    ///
+    /// # Зачем
+    ///
+    /// `pump_audio` дренирует каналы РАНЬШЕ, чем смотрит на состояние машины, и
+    /// пишет всё, что вынул, если состояние — `Recording`. На тике, где случился
+    /// переход `Idle → Recording`, «всё, что вынул» — это ещё и звук, пришедший
+    /// ДО нажатия: до тика проходит до 200 мс, и на macOS системный тап течёт
+    /// непрерывно, поэтому эти 200 мс там всегда есть и всегда непустые.
+    ///
+    /// Ловится это только на живой машине: ручная проверка Task 4 дала
+    /// системную дорожку на 5119 сэмплов (0.32 с) длиннее микрофонной при
+    /// одновременном закрытии обеих. Часть той разницы — вот эта.
+    ///
+    /// Две беды сразу, и вторая хуже первой:
+    ///
+    /// 1. **Расхождение дорожек.** Раздельные дорожки существуют, чтобы их можно
+    ///    было сопоставлять; лишние 200 мс в начале одной из них это ломают.
+    /// 2. **Звук до согласия.** В файл попадает то, что звучало до того, как
+    ///    человек решил записывать. Для системной дорожки это нарушение
+    ///    обещания дизайн-дока; для микрофонной (когда до старта была включена
+    ///    проверка микрофона, и канал уже полон) — это ещё и запись голоса,
+    ///    которую никто не просил.
+    ///
+    /// # Почему только на ручном старте
+    ///
+    /// Это `Action::StartFileWrite`, то есть `Idle → Recording` — единственный
+    /// путь, где запись начинается «с этого мгновения». Путь автодетекта идёт
+    /// через `Armed`, где предзапись — сознательная фича: кольцо копит 30 с
+    /// именно затем, чтобы в файл попало то, что было ДО ответа. Там
+    /// выбрасывать нечего и незачем, и `Action::FlushRingToFile` эта правка не
+    /// трогает вовсе.
+    fn discard_pending_audio(&mut self) {
+        let _ = self.drain_channels();
+    }
+
     /// Событие → переход машины → применение действия.
     ///
     /// # Почему ошибка применения сбрасывает машину
@@ -632,6 +908,16 @@ impl App {
                 self.started = Local::now();
                 self.current_source = "manual".into();
                 self.audio.open()?;
+                // ...и сразу выбрасываем всё, что уже лежит в каналах: это звук
+                // ДО нажатия «записать». См. докблок `discard_pending_audio` —
+                // без этой строки первый же `pump_audio` дописал бы его в начало
+                // файла.
+                //
+                // Именно ЗДЕСЬ, между `open()` и `open_sinks()`, а не после:
+                // так выброшено ровно предзаписное, а всё, что натечёт за время
+                // создания файлов (миллисекунды), уже относится к записи и
+                // сохраняется.
+                self.discard_pending_audio();
                 self.open_sinks()?;
             }
             Action::FlushRingToFile => {
@@ -680,6 +966,16 @@ impl App {
         // Порядок важен: если вторая дорожка не открылась, первую надо закрыть,
         // иначе на диске останется осиротевший mic-файл.
         let sink_mic = self.sinks.create(&dir, &mic)?;
+        // Дорожки, которую нечем наполнить, на диске быть не должно — см.
+        // докблок `AudioIo::has_system`. Имя `sys` при этом всё равно выбрано
+        // выше и не пропадает: `free_name_pair` считает пару занятой, если
+        // занято ЛЮБОЕ из двух имён, так что следующая запись — хоть с
+        // разрешением, хоть без — на это имя уже не сядет.
+        if !self.audio.has_system() {
+            self.sink_mic = Some(sink_mic);
+            self.sink_sys = None;
+            return Ok(());
+        }
         match self.sinks.create(&dir, &sys) {
             Ok(sink_sys) => {
                 self.sink_mic = Some(sink_mic);
@@ -773,12 +1069,19 @@ impl App {
     /// секунды после каждого штатного `close()` и слал бы `reopen_loopback`
     /// в пустоту.
     ///
+    /// Гейт по `has_system()` обязателен по той же причине, но для macOS:
+    /// после отказа в разрешении на захват звука (`MacAudio` без тапа)
+    /// system-дорожки нет легитимно, не по обрыву — без этого гейта watchdog
+    /// каждые `SYS_WATCHDOG_TICKS` звонил бы в `reopen_loopback` тому, у кого
+    /// пересобирать нечего, и заваливал бы лог одной и той же бесполезной
+    /// ошибкой на весь звонок.
+    ///
     /// Переподключение здесь не считается ошибкой самого `pump_audio` и не
     /// уходит по `?` — та же логика приоритета, что у `_silence` и `_sys` в
     /// `CpalAudio`: пропавшая system-дорожка дешевле, чем остановленная
     /// запись. Обе ветки исхода видны только через лог.
     fn check_sys_watchdog(&mut self, sys: &[i16]) {
-        if !self.audio.is_open() {
+        if !self.audio.is_open() || !self.audio.has_system() {
             self.sys_silent_ticks = 0;
             return;
         }
@@ -1167,8 +1470,11 @@ mod tests {
             Ok(Box::new(ФейкSink {
                 дорожка,
                 журнал: self.журнал.clone(),
-                падать_на_write: self.поломка == Поломка::ХвостMicНеПишется && mic,
-                падать_на_finalize: self.поломка == Поломка::НеФинализируется,
+                падать_на_write: self.поломка
+                    == Поломка::ХвостMicНеПишется
+                    && mic,
+                падать_на_finalize: self.поломка
+                    == Поломка::НеФинализируется,
             }))
         }
     }
@@ -1186,6 +1492,9 @@ mod tests {
         /// `true` — `reopen_loopback` отвечает ошибкой, как настоящий
         /// `CpalAudio`, когда пересобрать loopback не удалось.
         reopen_падает: bool,
+        /// `false` — притворяемся `MacAudio` без тапа: человек отказал в
+        /// разрешении на захват системного звука.
+        есть_система: bool,
     }
 
     impl AudioIo for ФейкAudio {
@@ -1229,6 +1538,10 @@ mod tests {
             }
             Ok(())
         }
+
+        fn has_system(&self) -> bool {
+            self.есть_система
+        }
     }
 
     /// Захват, который всегда отказывает на `open()` — «устройство занято
@@ -1251,7 +1564,20 @@ mod tests {
 
     /// App на подставном бэкенде. `dir` — заведомо несуществующий путь: до
     /// файловой системы эти тесты не доходят, всё ловится фейками.
-    fn стенд(журнал: &Журнал, поломка: Поломка, звук: Vec<(Vec<i16>, Vec<i16>)>) -> App {
+    fn стенд(
+        журнал: &Журнал, поломка: Поломка, звук: Vec<(Vec<i16>, Vec<i16>)>
+    ) -> App {
+        стенд_с_системой(журнал, поломка, звук, true)
+    }
+
+    /// `есть_система: false` — захват без системной дорожки, то есть `MacAudio`
+    /// после отказа в разрешении на захват звука.
+    fn стенд_с_системой(
+        журнал: &Журнал,
+        поломка: Поломка,
+        звук: Vec<(Vec<i16>, Vec<i16>)>,
+        есть_система: bool,
+    ) -> App {
         App::with_backends(
             PathBuf::from("."),
             Box::new(ФейкAudio {
@@ -1261,6 +1587,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает: false,
+                есть_система,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
@@ -1285,6 +1612,7 @@ mod tests {
                 выбор: выбор.clone(),
                 подмена: подмена.map(str::to_string),
                 reopen_падает: false,
+                есть_система: true,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
@@ -1313,6 +1641,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает,
+                есть_система: true,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
@@ -1601,6 +1930,121 @@ mod tests {
         );
     }
 
+    /// Гейт по `has_system()`: без разрешения на захват системного звука
+    /// (`MacAudio` без тапа) дорожки нет легитимно, а не по обрыву — watchdog
+    /// не имеет права копить молчание и звать `reopen_loopback` в пустоту.
+    #[test]
+    fn watchdog_не_копит_молчание_без_системного_звука() {
+        let ж = журнал();
+        let тиков = SYS_WATCHDOG_TICKS as usize * 2;
+        let звук = std::iter::repeat((vec![1], Vec::new())).take(тиков).collect();
+        let mut app = стенд_с_системой(&ж, Поломка::Нет, звук, false);
+        app.audio
+            .open()
+            .expect("открыть подставной захват без системной дорожки");
+
+        for _ in 0..тиков {
+            app.pump_audio().expect("pump без системной дорожки");
+        }
+        assert!(
+            !записано(&ж).contains(&"audio:reopen_loopback".to_string()),
+            "без разрешения на системный звук watchdog не имеет права звать reopen_loopback"
+        );
+    }
+
+    // ---- Захват без системной дорожки (отказ в разрешении на macOS) --------
+
+    /// Отказ в разрешении на захват системного звука не имеет права породить
+    /// вторую дорожку.
+    ///
+    /// Без этого на диск легла бы пара файлов, из которых второй открывается,
+    /// весит заголовок и играет тишину. Человек, у которого запись «наполовину
+    /// пустая», читает это как поломку записи, а не как отсутствие разрешения,
+    /// — то есть чинит не то. Дорожки, которой нет, не должно быть и в файлах.
+    #[test]
+    fn без_системного_звука_создаётся_только_дорожка_микрофона() {
+        let ж = журнал();
+        let mut app = стенд_с_системой(&ж, Поломка::Нет, Vec::new(), false);
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+        assert_eq!(app.state(), State::Recording(Trigger::Manual));
+
+        let создано: Vec<_> = записано(&ж)
+            .into_iter()
+            .filter(|з| з.starts_with("create:"))
+            .collect();
+        assert_eq!(
+            создано,
+            vec!["create:mic".to_string()],
+            "без тапа системная дорожка не создаётся вовсе, журнал: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Обратная сторона предыдущего теста. Без неё «создана одна дорожка»
+    /// проходило бы и у кода, который перестал создавать вторую ВСЕГДА, — то
+    /// есть тихо сломал бы запись системного звука на обеих платформах.
+    #[test]
+    fn с_системным_звуком_создаются_обе_дорожки() {
+        let ж = журнал();
+        let mut app = стенд_с_системой(&ж, Поломка::Нет, Vec::new(), true);
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+
+        let создано: Vec<_> = записано(&ж)
+            .into_iter()
+            .filter(|з| з.starts_with("create:"))
+            .collect();
+        assert_eq!(
+            создано,
+            vec!["create:mic".to_string(), "create:system".to_string()],
+            "журнал: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Запись без второй дорожки обязана идти и закрываться штатно, а не
+    /// падать на отсутствующем `sink_sys`.
+    ///
+    /// Проверяется именно `write` в дорожку микрофона: `pump_audio` пропускает
+    /// обе через `if let Some(w)`, поэтому «ничего не упало» само по себе
+    /// доказывало бы и то, что не пишется НИЧЕГО.
+    ///
+    /// Порций в очереди две, а не одна, по той же причине, что и в тестах на
+    /// кольцо: первую забирает `discard_pending_audio` между `open()` и
+    /// `open_sinks()`.
+    #[test]
+    fn без_системного_звука_запись_микрофона_идёт_и_закрывается() {
+        let ж = журнал();
+        let mut app = стенд_с_системой(
+            &ж,
+            Поломка::Нет,
+            vec![(vec![9, 9], Vec::new()), (vec![1, 2, 3], Vec::new())],
+            false,
+        );
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+        app.pump_audio().expect("прокачка без системной дорожки");
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"write:mic:3".to_string()),
+            "микрофон обязан писаться, и именно этими сэмплами, журнал: {ж:?}"
+        );
+        assert!(
+            ж.iter().all(|з| !з.starts_with("write:system")
+                && !з.starts_with("create:system")
+                && !з.starts_with("finalize:system")),
+            "системной дорожки нет — ни создания, ни записи, ни финализации, \
+             журнал: {ж:?}"
+        );
+        assert!(
+            ж.contains(&"finalize:mic".to_string()),
+            "дорожка микрофона обязана быть финализирована, журнал: {ж:?}"
+        );
+    }
+
     // ---- Important 2 ревью: машина и мир не расходятся при ошибке ----------
 
     /// Провал открытия файлов не имеет права оставить машину в `Recording`.
@@ -1703,7 +2147,8 @@ mod tests {
     fn finalize_done_уходит_в_машину_даже_если_закрытие_упало() {
         let ж = журнал();
         let mut app = стенд(&ж, Поломка::НеФинализируется, Vec::new());
-        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
         assert_eq!(app.state(), State::Recording(Trigger::Manual));
 
         let action = app.machine.handle(Event::ManualStop);
@@ -1734,7 +2179,8 @@ mod tests {
             Поломка::ХвостMicНеПишется,
             vec![(vec![1, 2, 3], vec![4, 5, 6])],
         );
-        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
 
         app.on_event(Event::ManualStop, None)
             .expect_err("запись хвоста в mic обязана упасть");
@@ -1758,15 +2204,21 @@ mod tests {
 
     /// Хвост дописывается во вторую дорожку, даже если первая упала: беда с
     /// mic не должна стоить system её последних сэмплов.
+    ///
+    /// Порций в очереди две, а не одна: первую забирает `discard_pending_audio`
+    /// на старте записи (звук до нажатия), хвостом становится вторая.
+    /// Проверяемый инвариант от этого не изменился — изменилось только то,
+    /// какая порция играет роль хвоста.
     #[test]
     fn хвост_во_вторую_дорожку_пишется_даже_если_первая_упала() {
         let ж = журнал();
         let mut app = стенд(
             &ж,
             Поломка::ХвостMicНеПишется,
-            vec![(vec![1, 2, 3], vec![4, 5, 6])],
+            vec![(vec![9, 9], vec![9, 9]), (vec![1, 2, 3], vec![4, 5, 6])],
         );
-        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
         app.on_event(Event::ManualStop, None)
             .expect_err("запись хвоста в mic обязана упасть");
 
@@ -1811,7 +2263,8 @@ mod tests {
     fn закрытие_файла_отпускает_микрофон() {
         let ж = журнал();
         let mut app = стенд(&ж, Поломка::Нет, Vec::new());
-        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
         assert!(app.audio.is_open());
 
         app.on_event(Event::ManualStop, None).expect("стоп");
@@ -1859,13 +2312,120 @@ mod tests {
         app.on_event(Event::SessionAppeared, None).expect("детект");
         app.pump_audio().expect("набрать кольцо");
 
-        app.on_event(Event::UserConfirmed, None).expect("подтверждение");
+        app.on_event(Event::UserConfirmed, None)
+            .expect("подтверждение");
 
         assert_eq!(app.state(), State::Recording(Trigger::Auto));
         let ж = записано(&ж);
         assert!(
             ж.contains(&"write:mic:3".to_string()) && ж.contains(&"write:system:3".to_string()),
             "кольцо обязано уйти в начало файла: {ж:?}"
+        );
+    }
+
+    // ---- звук до нажатия «записать» ---------------------------------------
+    //
+    // Регресс на дефект, найденный ручной проверкой Task 4 на живом железе:
+    // системная дорожка вышла на 5119 сэмплов (0.32 с) длиннее микрофонной при
+    // одновременном закрытии обеих. `pump_audio` дренирует каналы ДО разбора
+    // состояния, поэтому на тике перехода в `Recording` в файл уезжало всё, что
+    // натекло с прошлого тика, — то есть звук ДО нажатия.
+    //
+    // Обе проверки падают на коде без `discard_pending_audio`.
+
+    /// Первая порция — «до нажатия», вторая — уже запись. В файл обязана уйти
+    /// только вторая.
+    #[test]
+    fn ручной_старт_не_пишет_звук_накопленный_до_нажатия() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::Нет,
+            vec![
+                (vec![1, 2, 3], vec![4, 5, 6, 7]),
+                (vec![8, 9], vec![10, 11]),
+            ],
+        );
+
+        app.on_event(Event::ManualStart, None)
+            .expect("старт записи");
+        app.pump_audio().expect("прокачка");
+
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"write:system:2".to_string()),
+            "запись после нажатия обязана попасть в файл: {ж:?}"
+        );
+        assert!(
+            ж.contains(&"write:mic:2".to_string()),
+            "запись после нажатия обязана попасть в файл: {ж:?}"
+        );
+        assert!(
+            !ж.contains(&"write:system:4".to_string()),
+            "звук ДО нажатия уехал в системную дорожку: {ж:?}"
+        );
+        assert!(
+            !ж.contains(&"write:mic:3".to_string()),
+            "звук ДО нажатия уехал в микрофонную дорожку: {ж:?}"
+        );
+    }
+
+    /// Худший случай той же баги, и он про приватность, а не про выравнивание.
+    ///
+    /// Если до старта была включена проверка микрофона, то микрофон уже открыт и
+    /// его канал уже полон — то есть в файл уезжал бы кусок ГОЛОСА, записанный
+    /// до того, как человек нажал «записать». На macOS то же верно для системной
+    /// дорожки всегда: тап течёт с запуска приложения независимо от проверки.
+    #[test]
+    fn старт_после_проверки_микрофона_не_пишет_голос_до_нажатия() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::Нет,
+            vec![
+                (vec![100, 101, 102, 103, 104], vec![200, 201]),
+                (vec![7], vec![8]),
+            ],
+        );
+
+        app.set_monitor(true).expect("включить проверку");
+        app.on_event(Event::ManualStart, None)
+            .expect("старт записи");
+        app.pump_audio().expect("прокачка");
+
+        let ж = записано(&ж);
+        assert!(
+            !ж.contains(&"write:mic:5".to_string()),
+            "голос, звучавший во время проверки до нажатия, уехал в файл: {ж:?}"
+        );
+        assert!(
+            ж.contains(&"write:mic:1".to_string()) && ж.contains(&"write:system:1".to_string()),
+            "после нажатия запись обязана идти как обычно: {ж:?}"
+        );
+    }
+
+    /// Обратная сторона: путь автодетекта эта правка не трогает. Кольцо —
+    /// сознательная предзапись, и `FlushRingToFile` обязан отдать в файл ровно
+    /// то, что в нём накопилось.
+    ///
+    /// Дублирует `подтверждение_сливает_кольцо_в_файл` не по лени, а по адресу:
+    /// тот тест сторожит саму фичу кольца, этот — то, что `discard_pending_audio`
+    /// на неё не распространился. Сломай кто-нибудь границу (позови сброс из
+    /// `Action::StartRingBuffer`) — упадёт именно он, и текст скажет почему.
+    #[test]
+    fn автодетект_сохраняет_предзапись_кольца() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, vec![(vec![1, 2, 3], vec![4, 5, 6])]);
+
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        app.pump_audio().expect("набрать кольцо");
+        app.on_event(Event::UserConfirmed, None)
+            .expect("подтверждение");
+
+        let ж = записано(&ж);
+        assert!(
+            ж.contains(&"write:mic:3".to_string()) && ж.contains(&"write:system:3".to_string()),
+            "предзапись кольца — фича, а не баг: она обязана уйти в файл целиком: {ж:?}"
         );
     }
 
@@ -1901,7 +2461,8 @@ mod tests {
     fn смена_устройства_под_записью_откладывается_и_это_видно() {
         let ж = журнал();
         let mut app = стенд(&ж, Поломка::Нет, Vec::new());
-        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.on_event(Event::ManualStart, None)
+            .expect("старт записи");
         app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
         assert!(
             app.mic_change_deferred(),
@@ -1915,7 +2476,8 @@ mod tests {
     fn конец_записи_снимает_отложенность() {
         let ж = журнал();
         let mut app = стенд(&ж, Поломка::Нет, Vec::new());
-        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.on_event(Event::ManualStart, None)
+            .expect("старт записи");
         app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
         assert!(app.mic_change_deferred(), "предусловие теста");
         app.on_event(Event::ManualStop, None).expect("стоп записи");

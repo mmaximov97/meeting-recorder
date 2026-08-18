@@ -25,3 +25,4 @@ hound = "3.5"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["time", "fs", "macros"] }
 thiserror = "2"
+sysinfo = "0.32"

@@ -1,8 +1,16 @@
+#[cfg(target_os = "windows")]
 pub mod windows;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
 pub use self::windows::WindowsDetector;
+
+#[cfg(target_os = "macos")]
+pub use self::macos::MacDetector;
 
 /// Активная сессия захвата микрофона: какой-то процесс держит мик.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +21,7 @@ pub struct MicSession {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DetectError {
+    #[cfg(target_os = "windows")]
     #[error("ошибка COM/WASAPI: {0}")]
     Com(#[from] ::windows::core::Error),
 }

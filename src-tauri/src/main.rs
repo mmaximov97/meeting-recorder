@@ -32,8 +32,15 @@ use tauri_plugin_log::{Target, TargetKind};
 /// консоль остаётся инструментом отладки того же ядра.
 ///
 /// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
+#[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
     PathBuf::from(r"C:\Users\<username>\Recordings")
+}
+
+#[cfg(target_os = "macos")]
+fn recordings_root() -> PathBuf {
+    let home = std::env::var("HOME").expect("$HOME обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 /// Канал в аудио-поток. `Mutex` — потому что `tauri::State` шарится между
@@ -285,10 +292,44 @@ fn open_folder() -> Result<(), String> {
     let dir = recordings_root();
     // Иначе explorer откроет «Документы» вместо пустого несуществующего пути.
     std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
-    std::process::Command::new("explorer.exe")
-        .arg(&dir)
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(&dir);
+    cmd.spawn().map_err(|e| format!("не удалось открыть Finder/проводник: {e}"))?;
+    Ok(())
+}
+
+/// Открыть раздел настроек, где выдают разрешение на захват системного звука.
+///
+/// Тем же способом, что `open_folder`, и по той же причине: одна строка вместо
+/// плагина с правами в capabilities.
+///
+/// Раздел — «Запись экрана и звука» (`Privacy_ScreenCapture`): Process Tap
+/// живёт именно там, хотя usage description у него свой
+/// (`NSAudioCaptureUsageDescription`). Отдельного якоря под захват звука в
+/// схеме `x-apple.systempreferences` нет.
+///
+/// Кнопка нужна не для красоты: путь до этого переключателя человек по памяти
+/// не наберёт, а предупреждение, которое говорит «разрешите в настройках» и не
+/// показывает где, перекладывает поиск на того, кто и так уже споткнулся.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn open_privacy_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         .spawn()
-        .map_err(|e| format!("не удалось открыть проводник: {e}"))?;
+        .map_err(|e| format!("не удалось открыть Системные настройки: {e}"))?;
+    Ok(())
+}
+
+/// На Windows этой кнопки нет — как нет и разрешения, которое она открывает:
+/// WASAPI loopback его не требует. Команда существует только затем, чтобы
+/// `invoke` из общего `main.js` не падал в ненайденную команду.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn open_privacy_settings() -> Result<(), String> {
     Ok(())
 }
 
@@ -545,6 +586,7 @@ fn main() {
             get_state,
             list_recordings,
             open_folder,
+            open_privacy_settings,
             list_mic_devices,
             get_config,
             set_mic_device,
@@ -554,6 +596,28 @@ fn main() {
             transcribe_recording
         ])
         .setup(move |app| {
+            // Приложение строки меню, а не Dock: окно стартует скрытым, крестик
+            // его прячет, а не выходит, — иконка в Dock, за которой нет окна и
+            // по клику на которую ничего не происходит (обработчика Reopen у
+            // нас нет), только вводила бы в заблуждение.
+            //
+            // Парная половина решения — `LSUIElement` в `src-tauri/Info.plist`.
+            // Нужны обе, и вот почему ни одной по отдельности не хватает:
+            // `LSUIElement` убирает Dock на момент запуска, но tao на
+            // `applicationDidFinishLaunching` безусловно зовёт
+            // `setActivationPolicy` своим значением, а его дефолт — `Regular`
+            // (tao 0.35.3, `app_state.rs`: `launched` → `apply_activation_policy`),
+            // и иконка вернулась бы. Эта строка задаёт tao нужное значение ДО
+            // старта цикла событий, но сама по себе успела бы дать Dock'у
+            // мигнуть.
+            //
+            // На показ окна из `status::fatal` это не влияет: `set_focus()` в
+            // tao — это `makeKeyAndOrderFront` + `activateIgnoringOtherApps`,
+            // то есть явная активация, которую accessory-приложению как раз и
+            // положено делать самому.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let handle = app.handle().clone();
             tray::build(&handle, tray_tx)?;
 
@@ -777,5 +841,94 @@ mod tests {
         let t = Transcribing(Mutex::new(Some("занято".to_string())));
         *t.0.lock().unwrap() = None;
         assert!(t.0.lock().unwrap().is_none());
+    }
+
+    // ---- tauri.conf.json ----------------------------------------------------
+
+    /// Караул при значении, которое выглядит опечаткой и ею не является.
+    ///
+    /// `bundle.macOS.minimumSystemVersion` стоит `11.0`, хотя приложению нужна
+    /// macOS 14.4, — иначе отказ на старой системе не дойдёт до человека:
+    /// запуск перехватит Finder и откажет своими словами. Рассуждение записано
+    /// в нескольких местах (докблок `MIN_MACOS` в `src/capture/macos.rs`,
+    /// design-документ, план, README, `scripts/check-tap-lazy-bind.sh`), и ни
+    /// одно из них не лежит внутри `src-tauri/` — то есть там, куда смотрит
+    /// человек, решивший «привести в соответствие». JSON комментариев не держит;
+    /// этот тест — единственный комментарий, который правка не сможет не
+    /// заметить.
+    ///
+    /// Файл берётся `include_str!`, а не чтением с диска: так тест не зависит
+    /// ни от рабочего каталога, ни от платформы, а расхождение всплывает уже
+    /// при компиляции, если файл вообще исчезнет. `cfg` на нём нет намеренно —
+    /// ключ правят чаще всего как раз не с macOS.
+    #[test]
+    fn минимальная_версия_macos_в_бандле_осталась_11_0() {
+        const CONF: &str = include_str!("../tauri.conf.json");
+        let conf: serde_json::Value =
+            serde_json::from_str(CONF).expect("src-tauri/tauri.conf.json — не валидный JSON");
+
+        assert_eq!(
+            conf["bundle"]["macOS"]["minimumSystemVersion"].as_str(),
+            Some("11.0"),
+            "\n\
+             bundle.macOS.minimumSystemVersion обязан остаться \"11.0\".\n\
+             \n\
+             Расхождение с настоящим требованием (macOS 14.4) выглядит \
+             недосмотром, но им не является.\n\
+             \n\
+             ЗАЧЕМ. Этот ключ — LSMinimumSystemVersion в Info.plist, то есть гейт \
+             Finder'а.\n\
+             При 11.0 приложение на старой системе запускается, доходит до main, \
+             зовёт\n\
+             unsupported_reason() и объясняет человеку, что нужна 14.4 и почему. \
+             При 14.4\n\
+             запуск перехватит сама macOS и откажет своими словами — пользователь \
+             не узнает,\n\
+             чего именно не хватает, а мы не узнаем, что он вообще пытался.\n\
+             \n\
+             ЧЕГО ЭТОТ КЛЮЧ БОЛЬШЕ НЕ ДЕЛАЕТ. До 2026-08-17 он же держал \
+             живучесть процесса:\n\
+             в Tauri 2 он задаёт и MACOSX_DEPLOYMENT_TARGET, а ld при 11.x \
+             связывал символы\n\
+             тапа лениво. Опора оказалась зависящей от версии линкера — на \
+             ld-1053.12\n\
+             связывание жадное уже при 11.0. Теперь живучесть держит слабая \
+             линковка\n\
+             (-Wl,-weak_framework,CoreAudio в обоих build.rs), и её стерегут \
+             отдельные тесты:\n\
+             корневой_крейт_линкует_coreaudio_слабо (src/lib.rs) и \
+             gui_крейт_линкует_coreaudio_слабо.\n\
+             \n\
+             Замеры и рассуждение целиком — докблок MIN_MACOS в \
+             src/capture/macos.rs.\n\
+             Проверка на собранном бандле: npm run check-tap-lazy-bind\n"
+        );
+    }
+
+    // ---- build.rs -----------------------------------------------------------
+
+    /// То же, что `корневой_крейт_линкует_coreaudio_слабо` в ядре, но для этого
+    /// крейта: `cargo:rustc-link-arg` между крейтами не наследуется, линк у
+    /// GUI-бинаря свой, и флаг ему нужен свой.
+    ///
+    /// Два почти одинаковых теста вместо одного общего — потому что забыть флаг
+    /// можно в каждом файле по отдельности, и падать должен тот тест, который
+    /// назовёт нужный файл.
+    #[test]
+    fn gui_крейт_линкует_coreaudio_слабо() {
+        const BUILD_RS: &str = include_str!("../build.rs");
+        assert!(
+            BUILD_RS.contains("-Wl,-weak_framework,CoreAudio"),
+            "\n\
+             В src-tauri/build.rs пропал флаг слабой линковки CoreAudio:\n\
+             \x20   println!(\"cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio\");\n\
+             \n\
+             Без него на macOS старее 14.4 dyld убивает GUI с \"Symbol not found:\n\
+             _AudioHardwareCreateProcessTap\" ДО main: ни окна, ни тоста, ни \
+             объяснения.\n\
+             \n\
+             Докблок MIN_MACOS в src/capture/macos.rs, проверка на бандле:\n\
+             \x20   npm run check-tap-lazy-bind\n"
+        );
     }
 }

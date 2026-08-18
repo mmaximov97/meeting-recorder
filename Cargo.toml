@@ -48,10 +48,29 @@ env_logger = "0.11"
 # осознанный, версии semver-несовместимы и мирно сосуществуют.
 cpal = "0.18"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_Foundation",
 ]
+
+# Core Audio Process Tap (macOS 14.4+). Проверено по исходникам крейта: голых
+# extern "C" объявлений не нужно вообще — objc2-core-audio 0.3 покрывает и класс
+# CATapDescription, и все семь функций рецепта (AudioHardwareCreate/DestroyProcessTap,
+# AudioHardwareCreate/DestroyAggregateDevice, AudioDeviceCreateIOProcIDWithBlock,
+# AudioDeviceStart/Stop/DestroyIOProcID), и ключи словаря агрегата.
+# Остальные четыре крейта — обязательная обвязка, а не удобство: objc2 даёт alloc/Retained
+# для CATapDescription, objc2-foundation — NSArray/NSDictionary/NSString/NSNumber/NSUUID
+# для словаря агрегата, block2 — блок IOProc, dispatch2 — очередь под него (не-nil
+# обязательна), objc2-core-audio-types — AudioBufferList/AudioStreamBasicDescription,
+# objc2-core-foundation — CFDictionary в сигнатуре AudioHardwareCreateAggregateDevice.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+objc2 = "0.6.4"
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"

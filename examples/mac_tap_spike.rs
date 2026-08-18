@@ -1,0 +1,842 @@
+//! Спайк: рецепт Core Audio Process Tap (macOS 14.4+) на минимальном коде.
+//!
+//! Цель — де-рискнуть самый неопределённый кусок порта ДО того, как он обрастёт
+//! обвязкой (`capture::macos`, каналы, `AudioIo`). Здесь только последовательность
+//! системных вызовов; запись WAV и конвертация формата переиспользуют то, что уже
+//! есть в ядре (`storage::WavSink`, `capture::downmix_to_mono_f32`,
+//! `capture::Resampler`), а не пишутся заново.
+//!
+//! Запуск: `cargo run --example mac_tap_spike` — при ПЕРВОМ запуске macOS покажет
+//! системный диалог разрешения на захват аудио. Решение «липкое»: отказ придётся
+//! откатывать через `tccutil`.
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("этот пример только для macOS");
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    imp::run();
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use block2::RcBlock;
+    use dispatch2::DispatchQueue;
+    // Чистая часть разбора ABL живёт в библиотеке и покрыта тестами
+    // (`cargo test --lib`), а не дублируется здесь: Task 4 поднимает её как есть.
+    use meeting_recorder::capture::macos::{interleave_streams, locate_tap};
+    use meeting_recorder::capture::{downmix_to_mono_f32, Resampler};
+    use meeting_recorder::storage::{WavSink, SAMPLE_RATE};
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::AllocAnyThread;
+    use objc2_core_audio::{
+        kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+        kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey,
+        kAudioAggregateDeviceSubDeviceListKey, kAudioAggregateDeviceTapAutoStartKey,
+        kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
+        kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreamConfiguration,
+        kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyElementMain,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput, kAudioObjectSystemObject,
+        kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey,
+        kAudioTapPropertyFormat, AudioDeviceCreateIOProcIDWithBlock, AudioDeviceDestroyIOProcID,
+        AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop, AudioHardwareCreateAggregateDevice,
+        AudioHardwareCreateProcessTap, AudioHardwareDestroyAggregateDevice,
+        AudioHardwareDestroyProcessTap, AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize,
+        AudioObjectID, AudioObjectPropertyAddress, CATapDescription,
+    };
+    use objc2_core_audio_types::{
+        kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, AudioBuffer, AudioBufferList,
+        AudioStreamBasicDescription, AudioTimeStamp,
+    };
+    use objc2_core_foundation::CFDictionary;
+    use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSUUID};
+    use std::ffi::CStr;
+    use std::path::Path;
+    use std::ptr::{null, NonNull};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// Сколько секунд системного звука пишем.
+    const RECORD_SECS: u64 = 5;
+
+    /// Фора человеку на «переключиться в плеер и нажать play» до старта записи.
+    const GRACE_SECS: u64 = 3;
+
+    /// Какую композицию агрегата собирать. Выбирается аргументом командной строки.
+    ///
+    /// Обе проверяются на живом железе в один присест: спор «нужен ли в агрегате
+    /// реальный саб-девайс» решается замером, а не рассуждением.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Composition {
+        /// Композиция из плана: реальное устройство вывода главным саб-девайсом,
+        /// оно же в `SubDeviceList`, тап отдельным списком `taps`.
+        ///
+        /// Именно эта композиция подтверждена работающей на прогоне (AirPods,
+        /// пик 10732). Её словарь ниже не трогается ни на байт.
+        Plan,
+        /// Композиция «только тап»: реального саб-девайса в агрегате нет вовсе.
+        ///
+        /// Взята из `q-p/SoundPusher`, `SoundPusher/AudioTap.mm`,
+        /// `AggregateTappedDevice::AggregateTappedDevice` — словарь из четырёх
+        /// ключей: `UID`, `Name`, `IsPrivate: YES`, `TapList`. Ключи
+        /// `MainSubDevice` и `SubDeviceList` там закомментированы с авторским
+        /// комментарием «it seems we only need the tap, not the actual device in
+        /// there»; `TapAutoStart` тоже закомментирован; `IsStacked` не
+        /// используется.
+        ///
+        /// `makeusabrew/audiotee` делает то же самое иначе: пустой
+        /// `SubDeviceList: []`, устаревший `MasterSubDevice: 0` (целое!),
+        /// `IsStacked: false`, а тап привешивает ПОСЛЕ создания через
+        /// `AudioObjectSetPropertyData(kAudioAggregateDevicePropertyTapList)`.
+        /// Выбран вариант SoundPusher: он оставляет тап в словаре создания, то
+        /// есть отличается от `Plan` ровно удалением двух ключей и ничего нового
+        /// в код не приносит. Если он даст тишину, следующий кандидат —
+        /// вариант AudioTee целиком.
+        TapOnly,
+    }
+
+    impl Composition {
+        fn from_args() -> Self {
+            match std::env::args().nth(1).as_deref() {
+                None | Some("plan") => Composition::Plan,
+                Some("taponly") => Composition::TapOnly,
+                Some(other) => {
+                    eprintln!(
+                        "неизвестная композиция {other:?}\n\
+                         использование: cargo run --example mac_tap_spike -- [plan|taponly]\n\
+                         без аргумента — plan"
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Composition::Plan => "plan",
+                Composition::TapOnly => "taponly",
+            }
+        }
+
+        fn description(self) -> &'static str {
+            match self {
+                Composition::Plan => "реальное устройство вывода главным саб-девайсом + тап",
+                Composition::TapOnly => "ТОЛЬКО тап, реального саб-девайса в агрегате нет",
+            }
+        }
+
+        /// Отдельное имя файла на композицию: второй прогон не должен затирать
+        /// первый, иначе спектральную проверку не с чем сравнивать.
+        /// Расширение `.wav` сохранено — `.gitignore` ловит их по `*.wav`.
+        fn wav_name(self) -> &'static str {
+            match self {
+                Composition::Plan => "mac_tap_spike.plan.wav",
+                Composition::TapOnly => "mac_tap_spike.taponly.wav",
+            }
+        }
+    }
+
+    /// Состояние за одним мьютексом: ресемплер и накопитель.
+    ///
+    /// Ресемплер именно ОДИН на весь поток, а не новый на пакет: он stateful —
+    /// хранит фазу и историю фильтра между вызовами (см. докблок `Resampler`),
+    /// поэтому пересоздание на каждый пакет дало бы щелчок и прогрев на каждом шве.
+    struct State {
+        resampler: Resampler,
+        samples: Vec<i16>,
+        packets: u64,
+        /// Раскладка ВХОДНОГО ABL, снятая на первом пакете, — для диагностики.
+        abl_buffers: u32,
+        abl_channels: u32,
+        /// Срез буферов ABL, опознанный как тап: `[start .. start+len)`.
+        tap_start: usize,
+        tap_len: usize,
+        /// Первая причина, по которой опознать тап не удалось. Паниковать прямо
+        /// в колбэке нельзя (разворот стека сквозь C-кадры HAL и dispatch), так
+        /// что причина копится здесь, а падает `run()` уже на своём потоке.
+        locate_error: Option<&'static str>,
+        skipped: u64,
+        /// Пакеты, в которых буфер тапа приехал с `mData == NULL`.
+        ///
+        /// Отдельный счётчик, а не тихий `return`: по `AudioHardware.h` так
+        /// выглядит НЕиспользуемый поток, то есть «тап есть, данных нет». Без
+        /// счётчика оператор увидел бы `пакетов: 464, пик: 0` при трёх зелёных
+        /// ассертах и подсказку про тишину, указывающую на три неверные причины.
+        null_data: u64,
+    }
+
+    /// Сводит буферы ТАПА (и только их) в моно f32, уважая собственное
+    /// `mNumberChannels` каждого буфера.
+    ///
+    /// Небезопасная обвязка вокруг чистых `interleave_streams` +
+    /// `downmix_to_mono_f32`: всё, что можно проверить без железа, живёт в
+    /// библиотеке и покрыто тестами, здесь остаётся только построение срезов из
+    /// сырых указателей HAL.
+    ///
+    /// `None` — в срезе есть буфер с нулевым `mData`. По `AudioHardware.h`
+    /// (описание `AudioDeviceIOProc`) неиспользуемый поток приезжает именно так:
+    /// `mData == NULL` при осмысленном `mDataByteSize`. Это не «тихий пакет», а
+    /// отсутствие данных, и вызывающий обязан посчитать такой пакет отдельно.
+    ///
+    /// # Safety
+    /// `bufs` должны указывать на живые буферы HAL с корректным `mDataByteSize`.
+    unsafe fn tap_to_mono(bufs: &[AudioBuffer], tap_channels: u32) -> Option<Vec<f32>> {
+        if bufs.iter().any(|b| b.mData.is_null()) {
+            return None;
+        }
+        // Один поток — общий случай для тапа: переплетённое стерео. Копии не надо.
+        if bufs.len() == 1 {
+            let b = &bufs[0];
+            let ch = b.mNumberChannels.max(1);
+            let n = b.mDataByteSize as usize / 4;
+            let samples = unsafe { std::slice::from_raw_parts(b.mData as *const f32, n) };
+            return Some(downmix_to_mono_f32(samples, ch as u16));
+        }
+        // Несколько потоков тапа: сшиваем чистой interleave_streams, она же
+        // отвечает за минимум по длине и за отказ вылезти за кадр.
+        let streams: Vec<(u32, &[f32])> = bufs
+            .iter()
+            .map(|b| {
+                let ch = b.mNumberChannels.max(1);
+                let n = b.mDataByteSize as usize / 4;
+                let data = unsafe { std::slice::from_raw_parts(b.mData as *const f32, n) };
+                (ch, data)
+            })
+            .collect();
+        let inter = interleave_streams(&streams, tap_channels);
+        Some(downmix_to_mono_f32(&inter, tap_channels.max(1) as u16))
+    }
+
+    pub fn run() {
+        // Первой строкой и ничем иным: два прогона читаются подряд, и перепутать
+        // их вывод нельзя.
+        let composition = Composition::from_args();
+        println!(
+            "=== КОМПОЗИЦИЯ АГРЕГАТА: {} ({}) ===",
+            composition.label(),
+            composition.description()
+        );
+
+        // --- 1. описание тапа: весь микс, никого не исключаем -----------------
+        //
+        // `isExclusive` руками НЕ трогаем: это флаг направления (включать
+        // перечисленные процессы или исключать их), который конструктор уже
+        // выставил правильно. Ручная правка инвертирует смысл и даёт тишину.
+        let no_processes: Retained<NSArray<NSNumber>> = NSArray::new();
+        let tap_desc = unsafe {
+            CATapDescription::initStereoGlobalTapButExcludeProcesses(
+                CATapDescription::alloc(),
+                &no_processes,
+            )
+        };
+        let tap_uuid = NSUUID::new();
+        unsafe {
+            tap_desc.setName(&NSString::from_str("meeting-recorder spike tap"));
+            // UUID выставляем явно, а не полагаемся на конструктор: его строковая
+            // форма — это то, чем тап адресуется в списке `taps` агрегата (шаг 4).
+            tap_desc.setUUID(&tap_uuid);
+        }
+
+        // --- 2. создать тап (здесь всплывает TCC-диалог) ----------------------
+        let mut tap_id: AudioObjectID = 0;
+        check(
+            unsafe { AudioHardwareCreateProcessTap(Some(&tap_desc), &mut tap_id) },
+            "AudioHardwareCreateProcessTap",
+        );
+
+        // Реальный формат тапа — задокументированный факт для Task 4.
+        let asbd = tap_format(tap_id);
+        let tap_rate = asbd.mSampleRate as u32;
+        let tap_channels = asbd.mChannelsPerFrame;
+        let non_interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0;
+        println!(
+            "формат тапа: {} Гц, {} кан., {} бит/кан., {}, flags=0x{:08x}",
+            tap_rate,
+            tap_channels,
+            asbd.mBitsPerChannel,
+            if non_interleaved {
+                "непереплетённый"
+            } else {
+                "переплетённый"
+            },
+            asbd.mFormatFlags,
+        );
+        assert!(tap_rate > 0, "тап отдал нулевую частоту дискретизации");
+        assert!(
+            asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 && asbd.mBitsPerChannel == 32,
+            "спайк умеет читать только 32-битный float; тап отдал {} бит, flags=0x{:08x}",
+            asbd.mBitsPerChannel,
+            asbd.mFormatFlags
+        );
+
+        // --- 3. UID текущего дефолтного устройства вывода ---------------------
+        let output_device = default_output_device();
+        let output_uid = device_uid(output_device);
+
+        // Сколько ВХОДНЫХ каналов вносит само устройство вывода. Из этой величины
+        // выводится смещение тапа в ABL — вместо «пропустить первый буфер» или
+        // «тап последний», то есть вместо замены одного непроверенного допущения
+        // другим.
+        //
+        // Спрашиваем ДО создания агрегата: после устройство уже в него зачислено,
+        // и вопрос «а не изменился ли его собственный вход от участия в агрегате»
+        // пришлось бы проверять на железе. Здесь этот вопрос просто не возникает.
+        let (device_has_buffers, device_has_channels) = device_input_streams(output_device);
+        println!(
+            "собственный вход устройства вывода: {} буфер(ов), {} кан.",
+            device_has_buffers, device_has_channels
+        );
+
+        // Сколько это устройство вносит ИМЕННО В ЭТОТ агрегат — зависит от
+        // композиции, и это не одно и то же.
+        //
+        // В `taponly` устройства в агрегате нет вообще, поэтому вносит оно ноль,
+        // сколько бы своих входов у него ни было. Подставить сюда ноль — НЕ
+        // отключение проверки: `locate_tap(ch, 0, 0, tap)` требует, чтобы сумма
+        // каналов ABL в точности равнялась каналам тапа, и падает, если в ABL
+        // приехало что-то ещё. То есть в этой композиции ассерт проверяет ровно
+        // то утверждение, которое и должно быть верно: «в ABL нет ничего, кроме
+        // тапа». Ожидание — смещение 0 и длина во весь ABL, но это именно
+        // ожидание, которое проверяется, а не постулируется.
+        let (device_in_buffers, device_in_channels) = match composition {
+            Composition::Plan => (device_has_buffers, device_has_channels),
+            Composition::TapOnly => (0, 0),
+        };
+        println!(
+            "вносит в агрегат при композиции {}: {} буфер(ов), {} кан.",
+            composition.label(),
+            device_in_buffers,
+            device_in_channels
+        );
+
+        // --- 4. словарь агрегированного устройства ----------------------------
+        //
+        // Ловушка: главным саб-девайсом обязано быть РЕАЛЬНОЕ устройство вывода.
+        // Тап главным саб-девайсом быть не может — агрегат соберётся, но отдаст
+        // тишину. Тап идёт отдельным списком `taps`.
+        let agg_uid = NSUUID::new().UUIDString();
+        let yes = NSNumber::new_bool(true);
+        let no = NSNumber::new_bool(false);
+
+        let k_sub_device_uid = ns(kAudioSubDeviceUIDKey);
+        let sub_device_values: [&AnyObject; 1] = [&output_uid];
+        let sub_device: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[&*k_sub_device_uid], &sub_device_values);
+
+        let k_sub_tap_uid = ns(kAudioSubTapUIDKey);
+        let k_sub_tap_drift = ns(kAudioSubTapDriftCompensationKey);
+        let tap_uuid_string = tap_uuid.UUIDString();
+        let sub_tap_values: [&AnyObject; 2] = [&tap_uuid_string, &yes];
+        let sub_tap: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_slices(&[&*k_sub_tap_uid, &*k_sub_tap_drift], &sub_tap_values);
+
+        let sub_devices = NSArray::from_retained_slice(&[sub_device]);
+        let sub_taps = NSArray::from_retained_slice(&[sub_tap]);
+
+        let agg_name = NSString::from_str("meeting-recorder spike aggregate");
+        let agg_dict: Retained<NSDictionary<NSString, AnyObject>> = match composition {
+            // Ровно тот словарь, что был до появления вариантов: восемь ключей,
+            // те же значения, тот же порядок. Эта ветка не менялась.
+            Composition::Plan => {
+                let keys = [
+                    ns(kAudioAggregateDeviceNameKey),
+                    ns(kAudioAggregateDeviceUIDKey),
+                    ns(kAudioAggregateDeviceMainSubDeviceKey),
+                    ns(kAudioAggregateDeviceIsPrivateKey),
+                    ns(kAudioAggregateDeviceIsStackedKey),
+                    ns(kAudioAggregateDeviceTapAutoStartKey),
+                    ns(kAudioAggregateDeviceSubDeviceListKey),
+                    ns(kAudioAggregateDeviceTapListKey),
+                ];
+                let values: [&AnyObject; 8] = [
+                    &agg_name,
+                    &agg_uid,
+                    &output_uid,
+                    &yes,
+                    &no,
+                    &yes,
+                    &sub_devices,
+                    &sub_taps,
+                ];
+                let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+                NSDictionary::from_slices(&key_refs, &values)
+            }
+            // SoundPusher, AudioTap.mm: UID, Name, IsPrivate, TapList — и всё.
+            // Ни MainSubDevice, ни SubDeviceList, ни IsStacked, ни TapAutoStart.
+            Composition::TapOnly => {
+                let keys = [
+                    ns(kAudioAggregateDeviceNameKey),
+                    ns(kAudioAggregateDeviceUIDKey),
+                    ns(kAudioAggregateDeviceIsPrivateKey),
+                    ns(kAudioAggregateDeviceTapListKey),
+                ];
+                let values: [&AnyObject; 4] = [&agg_name, &agg_uid, &yes, &sub_taps];
+                let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+                NSDictionary::from_slices(&key_refs, &values)
+            }
+        };
+
+        // --- 5. создать агрегированное устройство ------------------------------
+        //
+        // NSDictionary и CFDictionary — toll-free bridged, поэтому указатель на
+        // первый законно читается как второй.
+        let cf_dict: &CFDictionary =
+            unsafe { &*(Retained::as_ptr(&agg_dict) as *const CFDictionary) };
+        let mut agg_id: AudioObjectID = 0;
+        check(
+            unsafe { AudioHardwareCreateAggregateDevice(cf_dict, NonNull::from(&mut agg_id)) },
+            "AudioHardwareCreateAggregateDevice",
+        );
+
+        // --- 6. IOProc прямо на агрегате ---------------------------------------
+        //
+        // Не через AVAudioEngine: он не ретаргетится на произвольный HAL-девайс —
+        // `kAudioOutputUnitProperty_CurrentDevice` вернёт noErr, но движок молча
+        // продолжит читать системный дефолтный ВХОД (микрофон), а не тап.
+        let state = Arc::new(Mutex::new(State {
+            resampler: Resampler::new(tap_rate, SAMPLE_RATE),
+            samples: Vec::new(),
+            packets: 0,
+            abl_buffers: 0,
+            abl_channels: 0,
+            tap_start: 0,
+            tap_len: 0,
+            locate_error: None,
+            skipped: 0,
+            null_data: 0,
+        }));
+        let cb_state = Arc::clone(&state);
+
+        let block = RcBlock::new(
+            move |_now: NonNull<AudioTimeStamp>,
+                  input: NonNull<AudioBufferList>,
+                  _in_time: NonNull<AudioTimeStamp>,
+                  _output: NonNull<AudioBufferList>,
+                  _out_time: NonNull<AudioTimeStamp>| {
+                let abl = unsafe { input.as_ref() };
+                let count = abl.mNumberBuffers as usize;
+                if count == 0 {
+                    return;
+                }
+                // `mBuffers` объявлен как массив из одного элемента, реальная длина
+                // лежит в `mNumberBuffers` — классический C-хвост переменной длины.
+                let buffers = unsafe { std::slice::from_raw_parts(abl.mBuffers.as_ptr(), count) };
+
+                let mut guard = cb_state.lock().expect("мьютекс отравлен");
+                let st = &mut *guard;
+                st.packets += 1;
+
+                // Опознаём тап на КАЖДОМ пакете, а не только на первом: раскладка
+                // ABL не обязана быть постоянной, а стоит это десяток целочисленных
+                // операций. Ошибка не паникует здесь, а копится в состоянии.
+                let ch_counts: Vec<u32> = buffers.iter().map(|b| b.mNumberChannels).collect();
+                let located = locate_tap(
+                    &ch_counts,
+                    device_in_buffers as usize,
+                    device_in_channels,
+                    tap_channels,
+                );
+
+                // Раскладку печатаем ровно один раз: без этого открытый вопрос
+                // «а тап ли вообще лежит в буфере 0» уходит в Task 4 непроверенным.
+                // Печать в аудио-колбэке — грех, но однократный.
+                if st.packets == 1 {
+                    st.abl_buffers = abl.mNumberBuffers;
+                    st.abl_channels = ch_counts.iter().sum();
+                    let layout: Vec<String> = buffers
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| format!("[{i}] {}кан./{}Б", b.mNumberChannels, b.mDataByteSize))
+                        .collect();
+                    println!(
+                        "раскладка входного ABL: {} буфер(ов) {{{}}}, итого {} кан.",
+                        st.abl_buffers,
+                        layout.join(", "),
+                        st.abl_channels,
+                    );
+                    if let Ok((start, len)) = located {
+                        st.tap_start = start;
+                        st.tap_len = len;
+                    }
+                    match located {
+                        Ok((start, len)) => println!(
+                            "тап опознан как буфер(ы) [{}..{}) — вход устройства вывода вносит \
+                             {} кан. в {} буфер(ах), тап вносит {} кан.; граница проведена по \
+                             накопленной сумме каналов, не по фиксированному смещению",
+                            start,
+                            start + len,
+                            device_in_channels,
+                            device_in_buffers,
+                            tap_channels,
+                        ),
+                        Err(why) => eprintln!("тап в ABL НЕ опознан: {why}"),
+                    }
+                }
+
+                let (start, len) = match located {
+                    Ok(slice) => slice,
+                    Err(why) => {
+                        st.locate_error.get_or_insert(why);
+                        st.skipped += 1;
+                        return;
+                    }
+                };
+
+                // Сводим ТОЛЬКО буферы тапа. Чужие входы не попадают в микс.
+                let Some(mono) = (unsafe { tap_to_mono(&buffers[start..start + len], tap_channels) })
+                else {
+                    st.null_data += 1;
+                    return;
+                };
+                if mono.is_empty() {
+                    return;
+                }
+                let out = st.resampler.process_to_i16(&mono);
+                st.samples.extend_from_slice(&out);
+            },
+        );
+
+        // Очередь обязана быть не-nil.
+        let queue = DispatchQueue::new("com.meeting-recorder.spike-tap", None);
+        let mut io_proc_id: AudioDeviceIOProcID = None;
+        check(
+            unsafe {
+                AudioDeviceCreateIOProcIDWithBlock(
+                    NonNull::from(&mut io_proc_id),
+                    agg_id,
+                    Some(&queue),
+                    RcBlock::as_ptr(&block),
+                )
+            },
+            "AudioDeviceCreateIOProcIDWithBlock",
+        );
+
+        // --- 7. старт / стоп / разбор в обратном порядке ------------------------
+        //
+        // Отсчёт до старта обязателен. Без него окно записи начинает тикать
+        // раньше, чем человек успел переключиться на плеер и нажать play: он
+        // не успевает, файл выходит пустым, и спайк печатает подсказку про две
+        // ловушки Core Audio, которые на самом деле реализованы верно. Это
+        // ровно тот ложноотрицательный результат, ради исключения которого
+        // спайк и существует — и он стоил бы одноразового TCC-решения.
+        println!(
+            "Включи что-нибудь — Spotify, YouTube, что угодно. \
+             Запись начнётся через {GRACE_SECS} с и продлится {RECORD_SECS} с."
+        );
+        for remaining in (1..=GRACE_SECS).rev() {
+            println!("  {remaining}...");
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        check(
+            unsafe { AudioDeviceStart(agg_id, io_proc_id) },
+            "AudioDeviceStart",
+        );
+        println!("ПИШУ {RECORD_SECS} с — пусть играет.");
+        std::thread::sleep(Duration::from_secs(RECORD_SECS));
+        check(
+            unsafe { AudioDeviceStop(agg_id, io_proc_id) },
+            "AudioDeviceStop",
+        );
+        check(
+            unsafe { AudioDeviceDestroyIOProcID(agg_id, io_proc_id) },
+            "AudioDeviceDestroyIOProcID",
+        );
+        check(
+            unsafe { AudioHardwareDestroyAggregateDevice(agg_id) },
+            "AudioHardwareDestroyAggregateDevice",
+        );
+        check(
+            unsafe { AudioHardwareDestroyProcessTap(tap_id) },
+            "AudioHardwareDestroyProcessTap",
+        );
+        drop(block);
+
+        // --- запись через существующий WavSink ---------------------------------
+        //
+        // WavSink жёстко пишет заголовок «16 кГц, моно, 16 бит» и под вход НЕ
+        // подстраивается. Поэтому сэмплы уже сведены и ресемплированы в колбэке —
+        // иначе заголовок соврал бы о частоте и файл звучал бы втрое медленнее.
+        let st = state.lock().expect("мьютекс отравлен");
+        let peak = st
+            .samples
+            .iter()
+            .map(|s| s.unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        println!(
+            "пакетов: {}, сэмплов 16 кГц моно: {} (~{:.2} с), пик: {peak}",
+            st.packets,
+            st.samples.len(),
+            st.samples.len() as f64 / SAMPLE_RATE as f64,
+        );
+        // Пустой указатель в буфере тапа — не «тихий пакет», а отсутствие данных.
+        // Молчать о нём нельзя: иначе тишина выглядит как исправная запись
+        // тишины, и подсказка ниже уводит в три заведомо неверные стороны.
+        if st.null_data > 0 {
+            eprintln!(
+                "ВНИМАНИЕ: в {} пакет(ах) из {} у тапа был mData == NULL — HAL отдавал \
+                 поток как НЕиспользуемый, данных в нём не было вовсе. Это не тишина \
+                 в звуке, а отсутствие звука в буфере: причину надо искать в тапе и \
+                 композиции агрегата, а не в том, что играло.",
+                st.null_data, st.packets,
+            );
+        }
+        if peak == 0 {
+            eprintln!(
+                "ТИШИНА. По порядку, от самого частого к самому редкому:\n\
+                 0) если выше есть строка про mData == NULL — начинай с неё, \
+                 остальные три причины к этому случаю не относятся;\n\
+                 1) ...или ничего не играло — проверь, что звук действительно шёл \
+                 эти {RECORD_SECS} с (успел ли ты нажать play за {GRACE_SECS} с отсчёта, \
+                 не был ли звук выключен или выведен на другое устройство);\n\
+                 2) тап не должен быть главным саб-девайсом агрегата;\n\
+                 3) isExclusive нельзя трогать руками."
+            );
+        }
+
+        let mut sink =
+            WavSink::create(Path::new("."), composition.wav_name()).expect("создать WAV");
+        sink.write(&st.samples).expect("записать сэмплы");
+        let path = sink.finalize().expect("закрыть WAV");
+        println!(
+            "Записано в {} — прослушай и подтверди, что там системный звук",
+            path.display()
+        );
+
+        // --- итог: ошибка Core Audio или «всё удалось, но звука нет» ------------
+        //
+        // Дизайн-док предупреждает, что тап в неверной структурной позиции даёт
+        // ТИШИНУ, а не ошибку. Значит, два исхода надо развести явно, иначе по
+        // выводу не понять, что именно произошло.
+        //
+        // Ошибка Core Audio сюда просто не доходит: `check` валит прогон в точке
+        // вызова с текстом «<функция> упал: OSStatus N ('4cc')». Раз мы здесь —
+        // ни один вызов не сбоил, и остаётся только вопрос про данные.
+        println!("--- ИТОГ ({}) ---", composition.label());
+        println!("Core Audio: ошибок нет, все вызовы вернули noErr.");
+        if st.packets == 0 {
+            println!(
+                "Данные: IOProc НЕ ВЫЗВАЛСЯ НИ РАЗУ. Агрегат создался, но поток не пошёл."
+            );
+        } else if st.null_data > 0 && st.samples.is_empty() {
+            println!(
+                "Данные: IOProc вызвался {} раз, но во всех пакетах у тапа mData == NULL — \
+                 поток числится НЕиспользуемым.",
+                st.packets
+            );
+        } else if peak == 0 {
+            println!(
+                "Данные: IOProc вызвался {} раз, буферы приходили, но все сэмплы нулевые — \
+                 ровно та ТИШИНА БЕЗ ОШИБКИ, о которой предупреждает дизайн-док.",
+                st.packets
+            );
+        } else {
+            println!(
+                "Данные: IOProc вызвался {} раз, пик {peak}. ЗВУК ЕСТЬ.",
+                st.packets
+            );
+        }
+        if peak == 0 && composition == Composition::TapOnly {
+            println!(
+                "Для композиции taponly тишина без ошибок — ЗАКОННЫЙ результат эксперимента, \
+                 а не обязательно баг в коде: она и означает, что тап в этой структурной \
+                 позиции не отдаёт данных."
+            );
+        }
+
+        // Вердикт по раскладке — ПОСЛЕ записи WAV и разбора устройств, но до
+        // выхода с нулевым кодом. Порядок именно такой: файл и вся диагностика
+        // уже на диске, разбирать проблему есть по чему, а прогон при этом
+        // честно завершается ошибкой и галочку поставить не даёт.
+        //
+        // Сама сверка сделана здесь, а не ассертом внутри колбэка, сознательно:
+        // паника из блока IOProc разворачивала бы стек сквозь C-кадры HAL и
+        // dispatch (UB), причём именно в том сценарии, который мы диагностируем.
+        // Тут это обычная паника на обычном потоке.
+        assert!(
+            st.packets > 0,
+            "колбэк IOProc не вызвался ни разу при композиции {} — записывать нечего. \
+             Это НЕ ошибка Core Audio (все вызовы вернули noErr), а отсутствие потока: \
+             для plan это провал рецепта, для taponly — результат эксперимента.",
+            composition.label(),
+        );
+        assert!(
+            st.locate_error.is_none(),
+            "тап не удалось опознать во входном ABL: {}. В ABL было {} буфер(ов) на {} кан.; \
+             вход устройства вывода вносит {} кан., у тапа {} кан. Пропущено пакетов: {}. \
+             Записанное в WAV неполно или пусто — галочку по этому прогону ставить нельзя. \
+             Task 4 обязан разбирать этот случай, а не полагать, что тап занимает весь ABL.",
+            st.locate_error.unwrap_or(""),
+            st.abl_buffers,
+            st.abl_channels,
+            device_in_channels,
+            tap_channels,
+            st.skipped,
+        );
+        assert!(
+            st.skipped == 0,
+            "{} пакет(ов) из {} пропущено — раскладка ABL менялась по ходу прогона",
+            st.skipped,
+            st.packets,
+        );
+        println!(
+            "раскладка подтверждена: тап = буфер(ы) [{}..{}) из {}",
+            st.tap_start,
+            st.tap_start + st.tap_len,
+            st.abl_buffers,
+        );
+    }
+
+    // --- мелкие помощники ------------------------------------------------------
+
+    /// Адрес свойства в глобальной области, главный элемент — форма, в которой
+    /// читаются все свойства этого спайка.
+    fn addr(selector: u32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress {
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        }
+    }
+
+    fn default_output_device() -> AudioObjectID {
+        let mut device: AudioObjectID = 0;
+        let mut size = std::mem::size_of::<AudioObjectID>() as u32;
+        let mut a = addr(kAudioHardwarePropertyDefaultOutputDevice);
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    kAudioObjectSystemObject as AudioObjectID,
+                    NonNull::from(&mut a),
+                    0,
+                    null(),
+                    NonNull::from(&mut size),
+                    NonNull::from(&mut device).cast(),
+                )
+            },
+            "kAudioHardwarePropertyDefaultOutputDevice",
+        );
+        device
+    }
+
+    /// UID устройства. CFStringRef приходит с +1 (правило Copy), а CFString и
+    /// NSString toll-free bridged — поэтому владение сразу забирает `Retained`.
+    fn device_uid(device: AudioObjectID) -> Retained<NSString> {
+        let mut uid: *mut NSString = std::ptr::null_mut();
+        let mut size = std::mem::size_of::<*mut NSString>() as u32;
+        let mut a = addr(kAudioDevicePropertyDeviceUID);
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    device,
+                    NonNull::from(&mut a),
+                    0,
+                    null(),
+                    NonNull::from(&mut size),
+                    NonNull::from(&mut uid).cast(),
+                )
+            },
+            "kAudioDevicePropertyDeviceUID",
+        );
+        unsafe { Retained::from_raw(uid) }.expect("устройство вернуло пустой UID")
+    }
+
+    /// Сколько буферов и каналов устройство вносит СВОИМ входом.
+    ///
+    /// `kAudioDevicePropertyStreamConfiguration` во входной области возвращает
+    /// `AudioBufferList` переменной длины — размер сначала спрашивается отдельно.
+    /// У устройства без входов (встроенные динамики) свойства может не быть
+    /// вовсе: это не ошибка, а честный ноль.
+    fn device_input_streams(device: AudioObjectID) -> (u32, u32) {
+        let mut a = AudioObjectPropertyAddress {
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        let mut size: u32 = 0;
+        let status = unsafe {
+            AudioObjectGetPropertyDataSize(
+                device,
+                NonNull::from(&mut a),
+                0,
+                null(),
+                NonNull::from(&mut size),
+            )
+        };
+        if status != 0 || (size as usize) < std::mem::size_of::<AudioBufferList>() {
+            return (0, 0);
+        }
+        // Через Vec<u64>, а не Vec<u8>: в AudioBufferList есть указатель, и читать
+        // структуру с невыровненного адреса — UB. u64 даёт нужные 8 байт выравнивания.
+        let mut raw = vec![0u64; size as usize / 8 + 1];
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    device,
+                    NonNull::from(&mut a),
+                    0,
+                    null(),
+                    NonNull::from(&mut size),
+                    NonNull::new(raw.as_mut_ptr().cast()).expect("Vec дал нулевой указатель"),
+                )
+            },
+            "kAudioDevicePropertyStreamConfiguration (вход устройства вывода)",
+        );
+        let abl = unsafe { &*(raw.as_ptr() as *const AudioBufferList) };
+        let count = abl.mNumberBuffers as usize;
+        if count == 0 {
+            return (0, 0);
+        }
+        let bufs = unsafe { std::slice::from_raw_parts(abl.mBuffers.as_ptr(), count) };
+        (count as u32, bufs.iter().map(|b| b.mNumberChannels).sum())
+    }
+
+    fn tap_format(tap: AudioObjectID) -> AudioStreamBasicDescription {
+        let mut asbd: AudioStreamBasicDescription = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<AudioStreamBasicDescription>() as u32;
+        let mut a = addr(kAudioTapPropertyFormat);
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    tap,
+                    NonNull::from(&mut a),
+                    0,
+                    null(),
+                    NonNull::from(&mut size),
+                    NonNull::from(&mut asbd).cast(),
+                )
+            },
+            "kAudioTapPropertyFormat",
+        );
+        asbd
+    }
+
+    /// Ключи словаря агрегата объявлены в SDK как C-строки — переводим в NSString.
+    fn ns(key: &CStr) -> Retained<NSString> {
+        NSString::from_str(key.to_str().expect("ключ Core Audio не UTF-8"))
+    }
+
+    /// Панику на ошибке спайк себе позволяет: и приватный агрегат, и процесс-тап
+    /// принадлежат создавшему процессу и уничтожаются системой при его выходе,
+    /// так что аварийное завершение ничего не оставляет в системе.
+    fn check(status: i32, what: &str) {
+        assert!(
+            status == 0,
+            "{what} упал: OSStatus {status} ({})",
+            fourcc(status)
+        );
+    }
+
+    /// OSStatus у Core Audio почти всегда четырёхсимвольный код вроде 'nope'.
+    fn fourcc(code: i32) -> String {
+        let bytes = (code as u32).to_be_bytes();
+        if bytes.iter().all(|b| (0x20..=0x7e).contains(b)) {
+            format!("'{}'", String::from_utf8_lossy(&bytes))
+        } else {
+            "не 4CC".to_string()
+        }
+    }
+}

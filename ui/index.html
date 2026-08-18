@@ -89,6 +89,31 @@
       #devwarn.on {
         display: block;
       }
+      /* Тот же вид, что у #devwarn: оба — «работает, но не полностью».
+         Баннер висит до перезапуска, поэтому в нём ровно два факта и кнопка:
+         длинный текст его не объясняет, а прячет — читают такое один раз, а
+         видят каждый день. Подробности (техническая причина отказа) живут в
+         title, то есть доступны и не мозолят глаза. */
+      #nosysaudio {
+        display: none;
+        border: 1px solid var(--warn);
+        border-radius: 8px;
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        color: var(--warn);
+      }
+      #nosysaudio.on {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      #nosysaudio span {
+        flex: 1;
+      }
+      /* Кнопка не должна ужиматься до многоточия, когда текст длинный. */
+      #nosysaudio button {
+        flex: none;
+      }
       .row {
         display: flex;
         gap: 8px;
@@ -300,6 +325,10 @@
     </div>
 
     <div id="devwarn"></div>
+    <div id="nosysaudio">
+      <span id="nosysaudio-text"></span>
+      <button id="nosysaudio-fix">Настройки</button>
+    </div>
 
     <h2>Микрофон</h2>
     <div class="row">

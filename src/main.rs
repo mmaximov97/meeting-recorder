@@ -32,6 +32,10 @@ fn spawn_stdin() -> Receiver<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Без этого log::error!/warn! из ядра (watchdog system-дорожки, ошибки
+    // потоков захвата) молча проглатываются фасадом — у консоли есть
+    // терминал, но не логгер, пока его явно не назначили.
+    env_logger::init();
     let root = PathBuf::from(r"C:\Users\Cypher\Recordings");
     let det = WindowsDetector::new()?;
     // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный

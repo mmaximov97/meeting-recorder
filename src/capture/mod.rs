@@ -528,7 +528,7 @@ where
     let stream = device.build_output_stream::<T, _, _>(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| fill_silence(data),
-        |err| eprintln!("ошибка тихого render-потока: {err}"),
+        |err| log::error!("ошибка тихого render-потока: {err}"),
         None,
     )?;
     stream.play()?;
@@ -579,7 +579,7 @@ where
             // Приёмник мог отвалиться (запись остановлена) — это не ошибка.
             let _ = sink.send(out);
         },
-        |err| eprintln!("ошибка потока захвата: {err}"),
+        |err| log::error!("ошибка потока захвата: {err}"),
         None,
     )?;
     // Намеренно НЕ play(): запускает вызывающий, оба потока подряд (см. PendingCapture).

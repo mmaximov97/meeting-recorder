@@ -1,5 +1,8 @@
-// В релизе консольного окна за GUI быть не должно; в отладке оно нужно —
-// eprintln! из аудио-потока это единственный способ увидеть, что там происходит.
+// В релизе консольного окна за GUI быть не должно. Раньше это означало, что
+// eprintln! из аудио-потока в релизе улетал в никуда — единственным способом
+// увидеть, что происходит, была отладочная сборка с консолью. С
+// tauri-plugin-log (см. main()) лог теперь пишется в файл в любой сборке;
+// консоль в отладке остаётся удобством, а не единственным источником истины.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
@@ -22,6 +25,7 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_log::{Target, TargetKind};
 
 /// Корень записей. Тот же, что у консольного бинаря (`src/main.rs`): разъедься
 /// эти два пути, GUI перестал бы показывать записи, сделанные консолью, — а
@@ -515,6 +519,19 @@ fn main() {
     let hotkey_tx = tx.clone();
 
     tauri::Builder::default()
+        // Первым — до .manage(Status::default()), у которого свой докблок
+        // «аудио-поток пишет сюда с первой же строки»: если сбой случится
+        // раньше, чем плагин поднимется, он снова уйдёт в никуда, ровно как
+        // раньше уходил eprintln! из GUI без консоли.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                    Target::new(TargetKind::Stdout),
+                ])
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Cmd(Mutex::new(tx)))

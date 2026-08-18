@@ -14,6 +14,11 @@ meeting-recorder = { path = ".." }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
+# Персистентный лог GUI: раньше ошибки захвата уходили в eprintln! stderr,
+# у которого нет консоли, — то есть в никуда. LogDir пишет в файл на диске,
+# Stdout сохраняет то же поведение для запуска из терминала при отладке.
+tauri-plugin-log = "2"
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hound = "3.5"

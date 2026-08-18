@@ -27,6 +27,26 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Instant;
 
+/// Сколько подряд пустых тиков system-дорожки считать обрывом потока, а не
+/// паузой в разговоре.
+///
+/// Тиками, а не временем: `pump_audio` не знает и не обязан знать свой
+/// период (200 мс сейчас — деталь `main.rs`/`tray.rs`, не ядра), а секунды
+/// пришлось бы либо мерить через `Instant` (нечем подменить в тесте без
+/// сна на реальные 5 секунд), либо протаскивать период тика в `App` отдельным
+/// параметром ради одной этой проверки. Счётчик тиков решает оба вопроса разом
+/// и проверяется в тесте без единого сна.
+///
+/// Число выбрано не произвольно: пока держится тихий render-поток
+/// (`start_silence`), loopback обязан отдавать пакет на каждый тик, даже
+/// когда все молчат — см. докблок `start_silence` в `capture/mod.rs`. Пустой
+/// `Vec` там, где эндпоинт держат живым специально, — это мёртвый поток, а не
+/// тишина в разговоре. 25 тиков (~5 секунд при типичном периоде 200 мс) —
+/// заметно быстрее, чем узнать о пропаже из целиком пропавшей встречи, и
+/// достаточно редко, чтобы не дёргать переподключение на честном единичном
+/// пропуске буфера.
+const SYS_WATCHDOG_TICKS: u32 = 25;
+
 const RING_SECONDS: usize = 30;
 const RING_CAPACITY: usize = SAMPLE_RATE as usize * RING_SECONDS;
 
@@ -66,13 +86,13 @@ pub trait AudioIo {
     fn close(&mut self);
     /// Держим ли мы сейчас микрофон, то есть горит ли индикатор в Windows.
     ///
-    /// В рабочем коде не зовётся: `App` знает про захват из собственного
-    /// состояния, а Task 7 будет спрашивать про индикатор у `state()`.
-    /// Существует ради тестов privacy-инвариантов — «мик берётся на детекте,
-    /// а не в `App::new`» и «отказ отпускает мик немедленно» иначе не
-    /// сформулировать вовсе: наблюдать за индикатором изнутри теста больше
-    /// нечем.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Изначально существовал только ради тестов privacy-инвариантов — «мик
+    /// берётся на детекте, а не в `App::new`» и «отказ отпускает мик
+    /// немедленно» иначе не сформулировать вовсе. С появлением watchdog
+    /// system-дорожки (`App::pump_audio`) зовётся и в рабочем коде: это тот
+    /// же вопрос «идёт ли сейчас захват», который watchdog обязан задавать
+    /// ДО того, как считать тишину подозрительной — в `Idle` пустая
+    /// system-дорожка это норма, а не обрыв.
     fn is_open(&self) -> bool;
     /// Всё, что накопилось с прошлого раза: `(mic, system)`.
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>);
@@ -85,6 +105,17 @@ pub trait AudioIo {
     /// взяли системный дефолт.
     fn fell_back_from(&self) -> Option<String> {
         None
+    }
+
+    /// Пересобрать loopback-захват, не трогая микрофон — ответ на watchdog
+    /// молчащей system-дорожки (см. `App::pump_audio`).
+    ///
+    /// Дефолт — no-op: большинству фейков в тестах эта ветка не нужна, а там,
+    /// где нужна (тест самого watchdog), фейк её переопределяет и считает
+    /// вызовы. `CpalAudio` — единственная реализация, которой есть что
+    /// пересобирать.
+    fn reopen_loopback(&mut self) -> Res {
+        Ok(())
     }
 }
 
@@ -123,9 +154,14 @@ struct Streams {
     /// записи (см. `open`).
     _silence: Option<cpal::Stream>,
     _mic: cpal::Stream,
-    _sys: cpal::Stream,
+    /// `None` — loopback-поток недоступен прямо сейчас: либо не поднялся при
+    /// пересоздании в [`CpalAudio::reopen_loopback`], либо переподключение ещё
+    /// не случилось. Запись при этом продолжается только микрофоном — ровно
+    /// та же логика приоритета, что и у `_silence` выше: дорожка `system`
+    /// дешевле потерять, чем всю встречу.
+    _sys: Option<cpal::Stream>,
     rx_mic: Receiver<Vec<i16>>,
-    rx_sys: Receiver<Vec<i16>>,
+    rx_sys: Option<Receiver<Vec<i16>>>,
 }
 
 /// Реальный захват через cpal.
@@ -177,7 +213,7 @@ impl AudioIo for CpalAudio {
         //
         // Отказ тихого потока НЕ роняет запись: выравнивание — средство, а
         // встреча — цель, и «дорожки разъехались» несравнимо дешевле, чем «записи
-        // нет вообще». Молчанием это не становится: причина уходит в stderr, а
+        // нет вообще». Молчанием это не становится: причина уходит в лог, а
         // сам сценарий почти невозможен — устройство и конфиг здесь ровно те же,
         // что у loopback ниже, а output-поток вдобавок терпимее к формату
         // (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM), так что упасть в одиночку ему
@@ -185,10 +221,10 @@ impl AudioIo for CpalAudio {
         let _silence = match start_silence() {
             Ok(s) => Some(s),
             Err(e) => {
-                eprintln!(
-                    "не удалось поднять тихий render-поток: {e}\n\
-                     запись продолжится, но дорожка system может начаться позже mic \
-                     (loopback молчит, пока эндпоинт простаивает) — выравнивание не гарантировано"
+                log::warn!(
+                    "не удалось поднять тихий render-поток: {e} — запись продолжится, но \
+                     дорожка system может начаться позже mic (loopback молчит, пока эндпоинт \
+                     простаивает) — выравнивание не гарантировано"
                 );
                 None
             }
@@ -251,10 +287,51 @@ impl AudioIo for CpalAudio {
         self.streams = Some(Streams {
             _silence,
             _mic,
-            _sys,
+            _sys: Some(_sys),
             rx_mic,
-            rx_sys,
+            rx_sys: Some(rx_sys),
         });
+        Ok(())
+    }
+
+    /// Пересобирает loopback и тихий render-поток, не трогая микрофон.
+    ///
+    /// Вызывается по подозрению на мёртвый loopback (см. watchdog в
+    /// `App::pump_audio`): и `_sys`, и `_silence` роняются здесь явно, ДО
+    /// попытки поднять новые — иначе на Windows возможна кратковременная
+    /// коллизия за один и тот же render-эндпоинт между старым потоком, который
+    /// ещё не отпустил устройство, и новым, который его уже просит.
+    ///
+    /// Если пересборка падает — `_sys` остаётся `None`: запись не рвётся,
+    /// продолжается одним микрофоном, а следующий тик watchdog попробует
+    /// снова. Микрофон эта функция не видит и потому уронить не может — `_mic`
+    /// вообще не участвует в пересборке.
+    fn reopen_loopback(&mut self) -> Res {
+        let Some(streams) = self.streams.as_mut() else {
+            return Ok(());
+        };
+        streams._sys = None;
+        streams._silence = None;
+        streams.rx_sys = None;
+
+        let (tx_sys, rx_sys) = channel();
+        let silence = match start_silence() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("не удалось поднять тихий render-поток при переподключении: {e}");
+                None
+            }
+        };
+        // `?` здесь может вернуть раньше времени — `_sys`/`_silence`/`rx_sys`
+        // уже сброшены в `None` строками выше, поэтому ранний выход оставляет
+        // состояние ровно тем, каким его и должен видеть следующий тик
+        // watchdog: loopback недоступен, микрофон не тронут.
+        let sys_pending = build_loopback_capture(tx_sys)?;
+        let sys = sys_pending.play()?;
+
+        streams._silence = silence;
+        streams._sys = Some(sys);
+        streams.rx_sys = Some(rx_sys);
         Ok(())
     }
 
@@ -274,7 +351,14 @@ impl AudioIo for CpalAudio {
         let (mic, sys) = match &self.streams {
             Some(s) => (
                 s.rx_mic.try_iter().flatten().collect::<Vec<i16>>(),
-                s.rx_sys.try_iter().flatten().collect::<Vec<i16>>(),
+                // `None` — loopback сейчас не поднят (см. `reopen_loopback`):
+                // тот же случай, что и полное молчание дорожки, для читателя
+                // `drain()` неотличим и не обязан быть отличим — про причину
+                // знает watchdog в `App::pump_audio`, а не эта функция.
+                s.rx_sys
+                    .as_ref()
+                    .map(|rx| rx.try_iter().flatten().collect::<Vec<i16>>())
+                    .unwrap_or_default(),
             ),
             None => (Vec::new(), Vec::new()),
         };
@@ -353,6 +437,10 @@ pub struct App {
     mic_change_deferred: bool,
     level_mic: f32,
     level_sys: f32,
+    /// Сколько тиков подряд `drain()` отдавал пустую system-дорожку при
+    /// открытых потоках. Считается только пока `audio.is_open()` — см.
+    /// `check_sys_watchdog`.
+    sys_silent_ticks: u32,
 }
 
 impl App {
@@ -446,6 +534,7 @@ impl App {
             mic_change_deferred: false,
             level_mic: 0.0,
             level_sys: 0.0,
+            sys_silent_ticks: 0,
         }
     }
 
@@ -648,6 +737,7 @@ impl App {
     /// Прокачать накопленные семплы туда, куда велит текущее состояние.
     pub fn pump_audio(&mut self) -> Res {
         let (mic, sys) = self.drain_channels();
+        self.check_sys_watchdog(&sys);
         // Уровень считается всегда, когда что-то течёт: в записи он даровой
         // (данные и так проходят здесь), в проверке — единственный смысл.
         // Затухание, а не мгновенный ноль: иначе полоска мигала бы на паузах
@@ -672,6 +762,42 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Считает подряд идущие пустые тики system-дорожки и переподключает
+    /// loopback, когда их набирается [`SYS_WATCHDOG_TICKS`].
+    ///
+    /// Гейт по `is_open()` обязателен: в `Idle` без `monitor` пустая
+    /// system-дорожка — не сигнал обрыва, а единственно возможное состояние
+    /// (потоков попросту нет). Без гейта счётчик набирал бы порог в первые же
+    /// секунды после каждого штатного `close()` и слал бы `reopen_loopback`
+    /// в пустоту.
+    ///
+    /// Переподключение здесь не считается ошибкой самого `pump_audio` и не
+    /// уходит по `?` — та же логика приоритета, что у `_silence` и `_sys` в
+    /// `CpalAudio`: пропавшая system-дорожка дешевле, чем остановленная
+    /// запись. Обе ветки исхода видны только через лог.
+    fn check_sys_watchdog(&mut self, sys: &[i16]) {
+        if !self.audio.is_open() {
+            self.sys_silent_ticks = 0;
+            return;
+        }
+        if !sys.is_empty() {
+            self.sys_silent_ticks = 0;
+            return;
+        }
+        self.sys_silent_ticks += 1;
+        if self.sys_silent_ticks < SYS_WATCHDOG_TICKS {
+            return;
+        }
+        self.sys_silent_ticks = 0;
+        log::error!(
+            "system-дорожка молчит {SYS_WATCHDOG_TICKS} тиков подряд — переподключаю loopback"
+        );
+        match self.audio.reopen_loopback() {
+            Ok(()) => log::warn!("loopback-поток переподключён"),
+            Err(e) => log::error!("переподключить loopback не удалось: {e}"),
+        }
     }
 }
 
@@ -1057,6 +1183,9 @@ mod tests {
         /// Что вернуть из `fell_back_from`: `Some` — притворяемся, что просили
         /// это устройство и не нашли.
         подмена: Option<String>,
+        /// `true` — `reopen_loopback` отвечает ошибкой, как настоящий
+        /// `CpalAudio`, когда пересобрать loopback не удалось.
+        reopen_падает: bool,
     }
 
     impl AudioIo for ФейкAudio {
@@ -1092,6 +1221,14 @@ mod tests {
         fn fell_back_from(&self) -> Option<String> {
             self.подмена.clone()
         }
+
+        fn reopen_loopback(&mut self) -> Res {
+            self.журнал.borrow_mut().push("audio:reopen_loopback".into());
+            if self.reopen_падает {
+                return Err(ошибка("loopback не поднялся"));
+            }
+            Ok(())
+        }
     }
 
     /// Захват, который всегда отказывает на `open()` — «устройство занято
@@ -1123,6 +1260,7 @@ mod tests {
                 очередь: звук,
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
+                reopen_падает: false,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
@@ -1146,6 +1284,7 @@ mod tests {
                 очередь: Vec::new(),
                 выбор: выбор.clone(),
                 подмена: подмена.map(str::to_string),
+                reopen_падает: false,
             }),
             Box::new(ФейкSinks {
                 журнал: журнал.clone(),
@@ -1153,6 +1292,33 @@ mod tests {
             }),
         );
         (app, выбор)
+    }
+
+    /// Стенд для watchdog system-дорожки: та же форма, что `стенд`, но
+    /// `звук` — не одноразовый список, а то, что `drain()` отдаёт на КАЖДОМ
+    /// тике (watchdog-тестам нужны десятки одинаковых тиков подряд, и
+    /// плодить их вручную было бы шумом, а не сигналом).
+    fn стенд_watchdog(
+        журнал: &Журнал,
+        тик: (Vec<i16>, Vec<i16>),
+        reopen_падает: bool,
+        тиков: usize,
+    ) -> App {
+        App::with_backends(
+            PathBuf::from("."),
+            Box::new(ФейкAudio {
+                журнал: журнал.clone(),
+                открыт: false,
+                очередь: std::iter::repeat(тик).take(тиков).collect(),
+                выбор: Rc::new(RefCell::new(None)),
+                подмена: None,
+                reopen_падает,
+            }),
+            Box::new(ФейкSinks {
+                журнал: журнал.clone(),
+                поломка: Поломка::Нет,
+            }),
+        )
     }
 
     fn записано(журнал: &Журнал) -> Vec<String> {
@@ -1311,6 +1477,127 @@ mod tests {
         assert!(
             записано(&ж).iter().all(|з| !з.starts_with("create:")),
             "до подтверждения на диск не создаётся ничего"
+        );
+    }
+
+    // ---- watchdog system-дорожки --------------------------------------------
+    //
+    // Тики, а не `Instant`/сон: `SYS_WATCHDOG_TICKS` считает вызовы
+    // `pump_audio`, поэтому весь порог проверяется мгновенно, без единой
+    // реальной секунды ожидания. См. докблок константы — почему тики, а не
+    // время.
+
+    /// Гвоздь всей задачи: ровно на `SYS_WATCHDOG_TICKS`-м пустом тике
+    /// watchdog обязан позвать переподключение, не раньше.
+    #[test]
+    fn watchdog_переподключает_ровно_на_пороговом_тике() {
+        let ж = журнал();
+        let тиков = SYS_WATCHDOG_TICKS as usize;
+        let mut app = стенд_watchdog(&ж, (vec![1], Vec::new()), false, тиков);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+
+        for i in 1..тиков {
+            app.pump_audio().expect("pump на пустой system-дорожке");
+            assert!(
+                !записано(&ж).contains(&"audio:reopen_loopback".to_string()),
+                "переподключение случилось раньше порога, на тике {i}"
+            );
+        }
+        app.pump_audio().expect("pump на пороговом тике");
+        assert_eq!(
+            записано(&ж)
+                .iter()
+                .filter(|з| *з == "audio:reopen_loopback")
+                .count(),
+            1,
+            "на пороговом тике переподключение обязано случиться ровно один раз"
+        );
+    }
+
+    /// Обратная сторона предыдущего теста: чтобы «не раньше» не проходило
+    /// случайно из-за бага, который вообще никогда не дёргает reopen.
+    #[test]
+    fn watchdog_не_молчит_вечно_если_дорожка_и_правда_мертва() {
+        let ж = журнал();
+        let тиков = SYS_WATCHDOG_TICKS as usize * 2;
+        let mut app = стенд_watchdog(&ж, (vec![1], Vec::new()), false, тиков);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+
+        for _ in 0..тиков {
+            app.pump_audio().expect("pump на мёртвой system-дорожке");
+        }
+        assert_eq!(
+            записано(&ж)
+                .iter()
+                .filter(|з| *з == "audio:reopen_loopback")
+                .count(),
+            2,
+            "за два полных порога подряд переподключение обязано случиться дважды — \
+             счётчик сбрасывается после каждой попытки, а не останавливается навсегда"
+        );
+    }
+
+    /// Настоящие данные (пусть и от одного пакета) обязаны сбрасывать счётчик
+    /// молчания — иначе пауза в разговоре, растянутая на несколько тиков
+    /// дважды подряд, ошибочно сложится в порог, которого на самом деле не
+    /// было ни разу целиком.
+    #[test]
+    fn watchdog_сбрасывает_счётчик_живыми_данными() {
+        let ж = журнал();
+        let половина = SYS_WATCHDOG_TICKS as usize - 1;
+        let mut очередь: Vec<(Vec<i16>, Vec<i16>)> =
+            std::iter::repeat((vec![1], Vec::new())).take(половина).collect();
+        очередь.push((vec![1], vec![9])); // один живой пакет посередине
+        очередь.extend(std::iter::repeat((vec![1], Vec::new())).take(половина));
+
+        let mut app = стенд(&ж, Поломка::Нет, очередь);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+
+        for _ in 0..(половина * 2 + 1) {
+            app.pump_audio().expect("pump watchdog-серии со сбросом");
+        }
+        assert!(
+            !записано(&ж).contains(&"audio:reopen_loopback".to_string()),
+            "ни одна из двух половин порога не набралась целиком — переподключения быть не должно"
+        );
+    }
+
+    /// Гейт по `is_open()`: закрытый захват (обычный `Idle`) не имеет права
+    /// копить молчание тиками и однажды выстрелить `reopen_loopback` в
+    /// пустоту — потоков там попросту нет.
+    #[test]
+    fn watchdog_не_копит_молчание_пока_захват_закрыт() {
+        let ж = журнал();
+        let тиков = SYS_WATCHDOG_TICKS as usize * 2;
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        assert!(!app.audio.is_open(), "стенд стартует в Idle с закрытым захватом");
+
+        for _ in 0..тиков {
+            app.pump_audio().expect("pump в Idle с закрытым захватом");
+        }
+        assert!(
+            записано(&ж).is_empty(),
+            "в Idle с закрытым захватом watchdog не имеет права трогать audio вообще"
+        );
+    }
+
+    /// Провал переподключения — деградация, а не отказ всего `pump_audio`:
+    /// та же логика приоритета, что у `_silence`/`_sys` в `CpalAudio` —
+    /// пропавшая system-дорожка дешевле остановленной записи.
+    #[test]
+    fn watchdog_переживает_неудачное_переподключение() {
+        let ж = журнал();
+        let тиков = SYS_WATCHDOG_TICKS as usize;
+        let mut app = стенд_watchdog(&ж, (vec![1], Vec::new()), true, тиков);
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+
+        for _ in 0..тиков {
+            app.pump_audio()
+                .expect("неудачный reopen_loopback не имеет права ронять pump_audio");
+        }
+        assert!(
+            записано(&ж).contains(&"audio:reopen_loopback".to_string()),
+            "переподключение обязано быть попыткой, даже если она провалится"
         );
     }
 

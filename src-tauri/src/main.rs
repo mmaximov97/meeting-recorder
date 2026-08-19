@@ -19,11 +19,11 @@ use imbalance::Cache;
 use meeting_recorder::session::Event;
 use serde::Serialize;
 use status::{Snapshot, Status};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -57,9 +57,85 @@ impl Cmd {
     }
 }
 
-/// `Some(base)` — какая запись сейчас транскрибируется. Один слот на всё
-/// приложение: одновременно — только одна транскрипция, см. дизайн.
-struct Transcribing(Mutex<Option<String>>);
+/// Одна ждущая или обрабатываемая транскрипция.
+#[derive(Clone, PartialEq, Debug)]
+struct QueueItem {
+    folder: Option<String>,
+    base: String,
+}
+
+/// Очередь транскрипций на всё приложение: `items[0]` обрабатывается прямо
+/// сейчас (или вот-вот начнёт), `items[1..]` ждут своей очереди в порядке
+/// постановки.
+///
+/// Один воркер (см. `spawn_transcribe_worker`) читает `rx` строго
+/// последовательно — это и есть очередь, а не просто «не начинать вторую,
+/// пока не кончится первая», как было раньше: там второй клик отвечал
+/// ошибкой и требовал повторного клика вручную после первой.
+///
+/// `items` и канал меняются под одним и тем же локом (`enqueue`), поэтому
+/// порядок в `items` всегда совпадает с порядком, в котором воркер реально
+/// получит записи — иначе позиции, которые видит UI, могли бы разойтись с
+/// тем, что происходит на самом деле.
+struct TranscribeQueue {
+    items: Mutex<VecDeque<QueueItem>>,
+    tx: tokio::sync::mpsc::UnboundedSender<QueueItem>,
+}
+
+impl TranscribeQueue {
+    fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<QueueItem>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (Self { items: Mutex::new(VecDeque::new()), tx }, rx)
+    }
+
+    /// Ставит запись в очередь, если её там ещё нет — двойной клик по кнопке
+    /// не создаёт вторую копию, а просто отдаёт ту же позицию, что и первый.
+    /// Позиция 1-индексирована: 1 — обрабатывается прямо сейчас, 2 —
+    /// следующая, и так далее.
+    fn enqueue(&self, item: QueueItem) -> Result<usize, String> {
+        let mut items = self.items.lock().map_err(|e| e.to_string())?;
+        if let Some(pos) = items.iter().position(|i| *i == item) {
+            return Ok(pos + 1);
+        }
+        items.push_back(item.clone());
+        let position = items.len();
+        self.tx.send(item).map_err(|_| "воркер транскрипции недоступен".to_string())?;
+        Ok(position)
+    }
+
+    /// Убирает обработанную запись с фронта и отдаёт тех, кто остался — под
+    /// тем же локом, что и `enqueue`, чтобы снимок для пересчёта позиций не
+    /// мог оказаться устаревшим уже в момент чтения.
+    fn finish_front(&self) -> Vec<QueueItem> {
+        let mut items = self.items.lock().expect("лок очереди транскрипции");
+        items.pop_front();
+        items.iter().cloned().collect()
+    }
+}
+
+/// Воркер очереди: читает канал строго по одной записи за раз, поэтому
+/// параллельных транскрипций не бывает в принципе — не только по логике
+/// `enqueue`, но и потому, что второй `.recv()` физически не начнётся, пока
+/// первый `await` внутри цикла не вернётся.
+///
+/// Ошибку `run_transcription` не пробрасывает и не логирует отдельно: она уже
+/// ушла тому, кто умеет её показать, через `emit_transcribe_error` внутри
+/// самой функции — здесь важно только то, что очередь обязана двигаться
+/// дальше независимо от того, чем кончилась предыдущая запись.
+fn spawn_transcribe_worker(
+    app: AppHandle,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<QueueItem>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some(item) = rx.recv().await {
+            let _ = run_transcription(&item.folder, &item.base, &app).await;
+            let remaining = app.state::<TranscribeQueue>().finish_front();
+            for (i, next) in remaining.iter().enumerate() {
+                emit_transcribe_progress(&app, &next.folder, &next.base, &format!("queued:{}", i + 1));
+            }
+        }
+    });
+}
 
 /// Одна запись: пара дорожек под общим именем.
 ///
@@ -433,29 +509,23 @@ fn emit_transcribe_error(app: &AppHandle, folder: &Option<String>, base: &str, m
     );
 }
 
+/// Ставит запись в очередь и возвращается сразу — саму транскрипцию проводит
+/// `spawn_transcribe_worker`. Позиция > 1 значит «уже что-то обрабатывается
+/// или ждёт впереди» — шлём её в UI тем же событием `transcribe-progress`,
+/// которым `run_transcription` шлёт стадии, чтобы фронтенду не нужен был
+/// отдельный тип состояния под «в очереди» и «обрабатывается».
 #[tauri::command]
-async fn transcribe_recording(
+fn transcribe_recording(
     folder: Option<String>,
     base: String,
     app: AppHandle,
-    state: tauri::State<'_, Transcribing>,
+    queue: tauri::State<'_, TranscribeQueue>,
 ) -> Result<(), String> {
-    {
-        let mut current = state.0.lock().map_err(|e| e.to_string())?;
-        if current.is_some() {
-            return Err("уже идёт транскрипция другой записи".to_string());
-        }
-        *current = Some(base.clone());
+    let position = queue.enqueue(QueueItem { folder: folder.clone(), base: base.clone() })?;
+    if position > 1 {
+        emit_transcribe_progress(&app, &folder, &base, &format!("queued:{position}"));
     }
-
-    let result = run_transcription(&folder, &base, &app).await;
-
-    {
-        let mut current = state.0.lock().map_err(|e| e.to_string())?;
-        *current = None;
-    }
-
-    result
+    Ok(())
 }
 
 async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle) -> Result<(), String> {
@@ -558,6 +628,7 @@ fn main() {
     let (tx, rx) = channel::<Ctl>();
     let tray_tx = tx.clone();
     let hotkey_tx = tx.clone();
+    let (transcribe_queue, transcribe_rx) = TranscribeQueue::new();
 
     tauri::Builder::default()
         // Первым — до .manage(Status::default()), у которого свой докблок
@@ -580,7 +651,7 @@ fn main() {
         // фатальная ошибка там случается раньше, чем webview успеет подписаться.
         .manage(Status::default())
         .manage(Cache::default())
-        .manage(Transcribing(Mutex::new(None)))
+        .manage(transcribe_queue)
         .invoke_handler(tauri::generate_handler![
             send_event,
             get_state,
@@ -643,6 +714,8 @@ fn main() {
             // Аудио-поток. Всё !Send рождается ВНУТРИ него.
             let mic = Config::load(&handle).choice();
             std::thread::spawn(move || audio::run(handle, rx, recordings_root(), mic));
+
+            spawn_transcribe_worker(app.handle().clone(), transcribe_rx);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -822,25 +895,63 @@ mod tests {
         assert!(!is_month_folder(""));
     }
 
-    #[test]
-    fn второй_slot_не_занимается_пока_первый_не_освобождён() {
-        let t = Transcribing(Mutex::new(None));
-        {
-            let mut slot = t.0.lock().unwrap();
-            assert!(slot.is_none());
-            *slot = Some("2026-08-10_10-00_zoom".to_string());
-        }
-        {
-            let slot = t.0.lock().unwrap();
-            assert!(slot.is_some(), "занятый слот должен остаться занятым");
-        }
+    fn qi(base: &str) -> QueueItem {
+        QueueItem { folder: None, base: base.to_string() }
     }
 
     #[test]
-    fn slot_освобождается_и_снова_доступен() {
-        let t = Transcribing(Mutex::new(Some("занято".to_string())));
-        *t.0.lock().unwrap() = None;
-        assert!(t.0.lock().unwrap().is_none());
+    fn первая_запись_в_очереди_получает_позицию_1() {
+        let (q, mut rx) = TranscribeQueue::new();
+        assert_eq!(q.enqueue(qi("a")), Ok(1));
+        assert_eq!(rx.try_recv(), Ok(qi("a")), "воркер обязан получить её немедленно");
+    }
+
+    /// Гвоздь задачи: вторая запись не отвергается ошибкой, как было раньше
+    /// («уже идёт транскрипция другой записи»), а встаёт следующей.
+    #[test]
+    fn вторая_запись_пока_первая_обрабатывается_встаёт_второй_а_не_отвергается() {
+        let (q, mut rx) = TranscribeQueue::new();
+        assert_eq!(q.enqueue(qi("a")), Ok(1));
+        assert_eq!(q.enqueue(qi("b")), Ok(2));
+        assert_eq!(rx.try_recv(), Ok(qi("a")));
+        assert_eq!(rx.try_recv(), Ok(qi("b")), "обе записи обязаны дойти до воркера по порядку");
+    }
+
+    /// Двойной клик по кнопке — реальный сценарий, а не гипотетический: между
+    /// кликом и первым событием `transcribe-progress` кнопка ещё активна.
+    /// Без дедупликации в очередь ушли бы два одинаковых задания.
+    #[test]
+    fn повторный_enqueue_той_же_записи_не_дублирует_и_отдаёт_ту_же_позицию() {
+        let (q, mut rx) = TranscribeQueue::new();
+        assert_eq!(q.enqueue(qi("a")), Ok(1));
+        assert_eq!(q.enqueue(qi("b")), Ok(2));
+        assert_eq!(
+            q.enqueue(qi("a")),
+            Ok(1),
+            "повторная постановка уже стоящей в очереди записи не создаёт вторую копию"
+        );
+        assert_eq!(rx.try_recv(), Ok(qi("a")));
+        assert_eq!(rx.try_recv(), Ok(qi("b")));
+        assert!(
+            rx.try_recv().is_err(),
+            "третьего сообщения в канале быть не должно — дубликат не отправлялся"
+        );
+    }
+
+    #[test]
+    fn finish_front_убирает_обработанную_запись_и_отдаёт_остальных_по_порядку() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.enqueue(qi("c")).unwrap();
+        assert_eq!(q.finish_front(), vec![qi("b"), qi("c")]);
+    }
+
+    #[test]
+    fn finish_front_на_последней_записи_отдаёт_пустую_очередь() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        assert_eq!(q.finish_front(), Vec::<QueueItem>::new());
     }
 
     // ---- tauri.conf.json ----------------------------------------------------

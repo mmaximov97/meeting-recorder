@@ -409,6 +409,26 @@ fn open_privacy_settings() -> Result<(), String> {
     Ok(())
 }
 
+/// Открыть страницу репозитория в браузере по умолчанию.
+///
+/// Тем же способом, что `open_folder`: `explorer.exe`/`open` открывают не
+/// только пути, но и произвольный URL — заводить `tauri-plugin-opener` ради
+/// одной ссылки в подвале окна незачем. Ссылка нужна не для красоты: человек,
+/// которому переслали голый `.exe`/`.dmg` без сопроводительного текста, иначе
+/// не узнает, откуда взять новую версию или куда написать про баг.
+const REPOSITORY_URL: &str = "https://github.com/mmaximov97/meeting-recorder";
+
+#[tauri::command]
+fn open_repository() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(REPOSITORY_URL);
+    cmd.spawn().map_err(|e| format!("не удалось открыть браузер: {e}"))?;
+    Ok(())
+}
+
 /// Доступные микрофоны для выпадашки: идентификатор и что показать.
 ///
 /// `InputDevice` уже `Serialize`? Нет — он в ядре, где serde не подключён.
@@ -658,6 +678,7 @@ fn main() {
             list_recordings,
             open_folder,
             open_privacy_settings,
+            open_repository,
             list_mic_devices,
             get_config,
             set_mic_device,

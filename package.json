@@ -2,7 +2,7 @@
   "name": "meeting-recorder",
   "version": "0.1.1",
   "private": true,
-  "description": "Tauri-оболочка записи встреч: трей, тост, хоткей, список записей",
+  "description": "Tauri shell for the meeting recorder: tray, toast, hotkey, recordings list",
   "scripts": {
     "tauri": "tauri",
     "check-tap-lazy-bind": "scripts/check-tap-lazy-bind.sh"

@@ -1,309 +1,285 @@
 # meeting-recorder
 
-Захват аудио со встреч на Windows и macOS: замечает начало звонка, предлагает записать, пишет две
-раздельные дорожки (микрофон и системный звук) — в `C:\Users\Cypher\Recordings` на Windows,
-в `~/Recordings` на macOS.
+Records your meetings on Windows and macOS: it notices a call starting, offers to record, and
+writes **two separate tracks** — your microphone and the system audio — as plain WAV files on
+disk. Optionally it transcribes them with speaker labels through a self-hosted gateway.
 
-Урезанный MVP «открытого аналога Granola». Кроме записи, в приложении есть встроенная
-транскрибация и диаризация через self-hosted шлюз ai-lab: кнопка «Транскрибировать» у готовой
-записи, очередь на несколько записей сразу, метки говорящих в результате — подробнее в
-разделе «Транскрибация».
+A trimmed-down, open MVP in the spirit of Granola. Two tracks instead of one is the whole
+point: keeping your voice and everyone else's in separate files is what makes speaker
+diarisation reliable afterwards, instead of guessing who spoke from a single mixed recording.
 
-## Статус
+> **The application UI is in Russian.** So are the source comments and the design documents
+> under `docs/`. This README is the only English-language part of the project. If that is a
+> blocker for you, it is a fair reason to skip this project — translating the UI is not
+> currently planned.
 
-Реализован и работает: все задачи MVP-плана (Task 1–7, `docs/2026-07-17-meeting-recorder-mvp-plan.md`)
-закрыты — детектор, кольцевой буфер, стейт-машина, WAV-хранилище, захват mic+loopback,
-консольная сборка и Tauri-оболочка (трей, тост, окно со списком записей, глобальный хоткей).
+## Requirements
 
-Поверх этого закрыты все 13 задач плана «выбор микрофона, месячные папки и переименование»
-(`docs/2026-07-30-device-folders-rename-plan.md`) — выбор устройства микрофона с сохранением,
-месячные папки, переименование записей из окна, режим проверки микрофона с полосками уровня
-и пометка записей с перекосом громкости.
+| | |
+|---|---|
+| Windows | 10 or 11, x64 |
+| macOS | **14.4 or newer** — the system-audio track uses the Core Audio Process Tap API, which does not exist before 14.4. On an older macOS the app refuses to start with an explicit message rather than silently losing the other party's audio. |
+| To build | Rust stable (edition 2021), Node.js for the Tauri 2 CLI, and Xcode command line tools on macOS |
+| To transcribe (optional) | An OpenAI-compatible STT gateway — see [Transcription](#transcription) |
 
-Порт на macOS (`docs/2026-08-10-macos-port-design.md`, `docs/2026-08-10-macos-port-plan.md`)
-доведён до рабочего состояния: системный звук идёт через Core Audio Process Tap, детект — по
-именам известных процессов плюс активность системного звука, записи ложатся в
-`~/Recordings/YYYY-MM/`, сборка даёт `.app` и `.dmg`. На железе проверено, что системная дорожка
-пишется корректно на трёх устройствах вывода — встроенных динамиках, AirPods и USB-гарнитуре;
-руками в GUI проверены иконка в трее, полоски уровня, жизнь приложения в трее после закрытия
-окна, диалоги разрешений и звучание готовых файлов. На упакованном `.app` проверено, что
-иконки в Dock нет, трей открывает окно и запись пишет обе дорожки. Отдельно проверен режим
-одного микрофона (отказ в разрешении на захват системного звука): баннер виден, окно
-открывается само, на диск ложится один `.mic.wav` без пары — включается переменной
-`MR_FORCE_NO_SYSTEM_AUDIO=1`, потому что `tccutil` разрешение обратно не отзывает.
-240 тестов зелёные, прогон нативно на macOS.
+## Install
 
-Перепроверка порта на другой машине и другом мажоре системы — macOS 26.5, 18.08.2026.
-`npx tauri build` даёт `.app` и `.dmg`, `cargo test --workspace` — 240 зелёных,
-`npm run check-tap-lazy-bind` проходит. В собранном бандле CoreAudio подключён через
-`LC_LOAD_WEAK_DYLIB`: слабая линковка из фикса guard'а доехала до артефакта, а не осталась
-в исходниках. Приложение стартует, элемент строки меню регистрируется — видно через
-Accessibility API. Запись на этой машине не прогонялась: проверялись сборка, запуск и трей,
-но не звук на диске.
+You don't have to build it. Every `vX.Y.Z` tag makes GitHub Actions
+(`.github/workflows/release.yml`) build Windows and both macOS architectures and publish them
+to [Releases](https://github.com/mmaximov97/meeting-recorder/releases).
 
-Та же проверка вскрыла три вещи, которых в документации не было:
-
-- **Второй запуск приложение не замечает.** Плагина `single-instance` в сборке нет, и `open -a`
-  на уже работающем приложении поднимает вторую копию вместо того, чтобы показать окно первой.
-  Наблюдалось живьём: процессы из `/Applications` и из `target/release/bundle/macos` работали
-  одновременно. Две копии разом держат микрофон и Process Tap и пишут в одну папку.
-- **Иконку трея может быть не видно, и тогда окно не открыть ничем.** В переполненной строке
-  меню элементы выдавливаются за левый край: на машине проверки соседние элементы стояли на
-  `x=7` и `x=-1` при ширине экрана 1512 точек, а сам элемент приложения переезжал между
-  строками меню двух мониторов, меняя координату на 150 точек. Пункта «открыть окно» в меню
-  трея нет, а синтетический клик через Accessibility API окно не поднимает — нужен настоящий
-  левый клик по иконке. Хоткей `Ctrl+Shift+R` в этом состоянии работает, записывать он
-  позволяет и без иконки.
-- **`bundle_dmg.sh` спотыкается о том от прерванного прогона.** Один раз сборка `.dmg` упала,
-  и в системе при этом висел смонтированный `/Volumes/dmg.*` с образом
-  `rw.*.meeting-recorder_0.1.0_aarch64.dmg` из `bundle/macos/`. После `hdiutil detach` сборка
-  прошла без единой правки. Причинно-следственная связь не доказана: повторно падение не
-  воспроизводилось, так что это зацепка для следующего раза, а не диагноз.
-
-Windows-часть портом затронута — не переписана, но и не оставлена нетронутой: семь правок
-лежат в общем коде и общем конфиге, без `cfg`. Windows ни разу не собирался за всю работу
-над портом — тулчейна на машине, где он делался, не было. Перепроверять надо ровно по
-этому списку; ожидается **240 зелёных тестов**:
-
-- `src/app.rs`, `Action::StartFileWrite` — ручной старт больше не дописывает в начало файла
-  звук, звучавший ДО нажатия (`discard_pending_audio`). На Windows это меняет поведение:
-  ручной старт после сессии «Проверить» теперь выбрасывает накопленное в буферах захвата,
-  а не пишет его в файл.
-- `src-tauri/src/status.rs`, `status::fatal` — фатальный отказ на старте теперь ещё и
-  показывает окно и даёт ему фокус (раньше — только `emit`, трей и тост). На Windows тоже.
-- `src-tauri/src/audio.rs` — память детекта между опросами переехала из переменных цикла в
-  `Detect::step`. Гейт по звуку остался только на macOS, на Windows решение по-прежнему
-  принимает один `poll_to_event`, но код авто-детекта общий — прогнать детект начала и конца
-  звонка стоит.
-- `src-tauri/src/main.rs`, `open_folder` — текст ошибки стал общим («Finder/проводник»);
-  `src-tauri/tauri.conf.json` — конфиг общий на обе платформы, в `bundle.targets` рядом с
-  `nsis` появились `app` и `dmg`, в `bundle.icon` — `icon.icns`.
-- `src/main.rs` — консольная сборка сменила `fn main() -> Result<…>` на `-> ExitCode` с
-  `eprintln!("ошибка: {e}")`. На Windows это меняет вывод при ошибке: было `Error: {Debug}`
-  от рантайма, стало `ошибка: {Display}`. Код возврата прежний (1).
-- `src/app.rs`, `open_sinks` — появилась ветка «системной дорожки нет вовсе»
-  (`AudioIo::has_system`). На Windows она недостижима: дефолт трейта — `true`, а `CpalAudio`
-  его не переопределяет, потому что WASAPI loopback разрешения не требует и отказывать в нём
-  некому. Проверять надо обратное — что **обе** дорожки по-прежнему создаются и пишутся;
-  ошибка здесь выглядела бы как пропавший `system.wav`.
-- `ui/index.html`, `ui/main.js` — добавлен баннер `#nosysaudio` и кнопка «Настройки».
-  Разметка общая на обе платформы, но на Windows баннер не показывается никогда: его
-  зажигает только `status::no_system_audio`, а он зовётся из macOS-ветки `audio::run`.
-  Проверять надо, что в окне ничего лишнего не появилось и не разъехалась вёрстка.
-  Команда `open_privacy_settings` на Windows — заглушка, возвращает `Ok(())`: кнопки,
-  которая её зовёт, там не бывает, а `invoke` из общего `main.js` не должен падать
-  в ненайденную команду.
-
-## Релизы
-
-Собирать из исходников не обязательно — на каждый тег `vX.Y.Z` GitHub Actions
-(`.github/workflows/release.yml`) сам собирает Windows и обе архитектуры macOS и выкладывает их
-в Releases репозитория: <https://github.com/mmaximov97/meeting-recorder/releases>.
-
-Репозиторий приватный, поэтому релизы видят только коллабораторы — доступ тот же, что и к коду,
-отдельно открывать ничего не нужно.
-
-Что скачивать:
-
-| Платформа | Файл | Куда идёт |
+| Platform | File | What to do with it |
 |---|---|---|
-| Windows, с установкой | `meeting-recorder_X.Y.Z_x64-setup.exe` | обычный NSIS-инсталлятор, запустить и пройти мастер |
-| Windows, portable | `meeting-recorder_vX.Y.Z_x64-portable.exe` | без установки — положить куда угодно и запустить; ничего не пишет в реестр и Program Files |
-| Mac на Apple Silicon (M1 и новее) | `meeting-recorder_X.Y.Z_aarch64.dmg` | открыть `.dmg`, перетащить в Applications |
-| Mac на Intel | `meeting-recorder_X.Y.Z_x64.dmg` | то же самое |
+| Windows, installed | `meeting-recorder_X.Y.Z_x64-setup.exe` | An ordinary NSIS installer — run it and follow the wizard |
+| Windows, portable | `meeting-recorder_vX.Y.Z_x64-portable.exe` | No install — put it anywhere and run it; touches neither the registry nor Program Files |
+| Mac, Apple Silicon (M1 and newer) | `meeting-recorder_X.Y.Z_aarch64.dmg` | Open the `.dmg`, drag to Applications |
+| Mac, Intel | `meeting-recorder_X.Y.Z_x64.dmg` | Same |
 
-Portable-версии для macOS нет: неподписанный голый бинарь Gatekeeper блокирует так же, как
-`.app`, но без диалога «Открыть», которым блокировку обходят — `.dmg` реально проще.
+Not sure which Mac you have: Apple menu (top-left of the screen) → `About This Mac` → the "Chip" line. `Apple M…` means
+Apple Silicon, `Intel` means Intel.
 
-Не знаете, какой у вас Mac — `О этом Mac` (**⌘** в левом верхнем углу экрана) → строка «Чип»:
-`Apple M…` значит Apple Silicon, `Intel` значит Intel.
+There is no portable build for macOS. Gatekeeper blocks an unsigned bare binary exactly as it
+blocks a `.app`, but without the "Open anyway" dialog you'd use to get around it — the `.dmg`
+is genuinely the easier path.
 
-Файлы `*.app.tar.gz` рядом с `.dmg` — не для ручной установки, задел под автообновление
-(Tauri updater), если оно когда-нибудь понадобится; сейчас не используются.
+The `*.app.tar.gz` files next to the `.dmg` are not for manual installation. They exist for
+Tauri's updater, in case auto-update is ever wired up; nothing uses them today.
 
-**macOS спросит про Gatekeeper при первом запуске.** Сборка не подписана Apple Developer ID
-(`signingIdentity: "-"` — ad-hoc, см. раздел «Сборка (на macOS)»), поэтому вместо обычного
-двойного клика — правый клик по приложению в Applications → **Открыть** → подтвердить в
-диалоге. Через Finder-двойной-клик система откажет молча. Если и это не помогает:
+### macOS will complain on first launch
+
+The build is **not signed with an Apple Developer ID** (`signingIdentity: "-"`, i.e. ad-hoc —
+see [Building](#building-on-macos)). So instead of double-clicking: right-click the app in
+Applications → **Open** → confirm in the dialog. A plain Finder double-click gets refused
+silently. If even that doesn't work:
 
 ```bash
 xattr -cr /Applications/meeting-recorder.app
 ```
 
-Дальше — как в разделе «Запуск» ниже: разрешения на микрофон и системный звук, трей, хоткей.
+## Usage
 
-### Выпустить новую версию
+On Windows the app runs **without a terminal** — double-click the exe or use the desktop
+shortcut:
 
-Для мейнтейнера — сначала поднять `version` в ДВУХ местах (иначе имена файлов в Releases не
-совпадут с тегом — ровно так один раз и вышло: релиз назывался `v0.1.1`, а внутри лежал
-`meeting-recorder_0.1.0_x64-setup.exe`, потому что `tauri` берёт версию для имени файла из
-конфига, а не из git-тега):
+```
+target\release\meeting-recorder-gui.exe
+```
+
+Don't launch the GUI from a WSL terminal: when the terminal closes, WSL kills the whole tree of
+Windows processes along with the app.
+
+On macOS you run the bundle:
+
+```
+target/release/bundle/macos/meeting-recorder.app
+```
+
+The first launch on macOS asks for **two different** system permissions — microphone and system
+audio capture. They are separate categories, and without both the recording is incomplete.
+Because the signature is ad-hoc it has no stable Team ID, and TCC ties permissions to the
+binary's hash — so permissions may be requested again after a rebuild.
+
+Day to day:
+
+- **Tray icon** → the window with the list of recordings.
+- **"Начать запись" / "Остановить запись"** button, or the global hotkey **Ctrl+Shift+R**. On
+  macOS it is Ctrl too, not Cmd — deliberately, so the muscle memory carries across machines.
+- When a call is detected the app offers to record it by itself (a "Записать?" toast). On macOS
+  detection only knows `zoom.us`, `Microsoft Teams` and `Slack` by process name, and also
+  requires that system audio is actually playing. Browsers are excluded on purpose: from inside
+  Chrome a Google Meet tab is indistinguishable from any other tab — such a meeting won't be
+  auto-detected, but the button and the hotkey work for it as usual.
+- **"Микрофон"** dropdown — pick the input device. The choice survives restarts; if the device
+  goes missing, recording falls back to the system default and the window shows a warning.
+- **"Проверить"** button — opens the microphone and shows a level meter for both tracks, so you
+  can confirm the mic being recorded is the one you're talking into. It switches itself off
+  after a minute.
+- **Files**: two WAV tracks in `%USERPROFILE%\Recordings\YYYY-MM\` on Windows and
+  `~/Recordings/YYYY-MM/` on macOS. The month folder is created automatically.
+- **"Переименовать"** on a row changes the tail of the name — date and time stay fixed —
+  renaming both tracks and the transcript folder together.
+
+Recordings deliberately land **outside** the repository: a meeting is roughly 150 MB, which has
+no business in git. On macOS the root is `~/Recordings` rather than `~/Documents` for a second
+reason — Documents is synced to iCloud Drive by default.
+
+## Transcription
+
+Transcription and diarisation are built into the app, but they need an external
+OpenAI-compatible STT gateway — this project does not run a speech model itself. It was built
+against [selfhost-ai-lab](https://github.com/mmaximov97/selfhost-ai-lab), a self-hosted gateway
+that exposes local Whisper and diarisation over an OpenAI-shaped API; anything serving
+`POST /v1/audio/transcriptions/async` the same way should work.
+
+Configure it once in the **"Транскрипция"** section of the window — two fields, gateway URL and
+key. They save on blur (Tab or a click elsewhere), there is no separate save button.
+
+- **Gateway URL** — base URL only, e.g. `http://your-gateway.local:8080`. No `/v1/...` suffix;
+  the client appends it.
+- **Key** — an API key with the `stt` scope. Issue one key per person rather than sharing one,
+  so access can be revoked individually.
+
+A recording that has **both** tracks (mic + system) grows a **"Транскрибировать"** button.
+Clicking it queues the recording: if nothing is being processed it starts immediately,
+otherwise the button shows "В очереди (N)" and it waits its turn. Exactly one recording is
+processed at a time, because GPU capacity on the gateway is not elastic. Progress runs
+"Загрузка…" → "Обработка…" → "Слияние…" → "Готово".
+
+The result is a `<recording>.transcript/` folder with a `.md` carrying timestamps and speaker
+labels, and a `.txt` of plain running text.
+
+Diarisation is real: the gateway distinguishes voices *within* each track (`diarize=true` in
+the request). If the `system` track has more than one participant, they get distinct labels —
+"Собеседники (1)", "Собеседники (2)" — numbered in order of first appearance. A single voice on
+a track gets no number, just "Собеседники".
+
+## Building (on Windows, from WSL)
+
+Windows toolchain only, through interop — a plain `cargo` would build a Linux binary:
+
+```bash
+cargo.exe build --workspace                          # debug
+cargo.exe build --release -p meeting-recorder-gui
+cargo.exe test --workspace
+```
+
+`meeting-recorder-cli.exe` is the console build of the core without a GUI. It is a debugging
+tool, not leftover junk — it's the only way to exercise detection and recording without a
+webview. Don't delete it.
+
+## Building (on macOS)
+
+Natively, no WSL scaffolding — Xcode command line tools and a Rust toolchain are enough:
+
+```bash
+cargo build --workspace            # debug
+cargo test --workspace
+
+npm install                        # @tauri-apps/cli, from package.json
+npx tauri build                    # release .app and .dmg
+```
+
+It has to be `npx tauri`, not `cargo tauri`: the CLI lives in `package.json`, not as a `cargo`
+subcommand. Artifacts land in `target/release/bundle/` (`macos/*.app`, `dmg/*.dmg`) — the
+workspace has a single `target/` at the repository root, not one inside `src-tauri/`.
+
+The signature is ad-hoc: the `.dmg` is neither signed with a Developer ID nor notarised, so on
+someone else's machine Gatekeeper will meet it.
+
+### Three settings that look like oversights and must not be "fixed"
+
+- **`-Wl,-weak_framework,CoreAudio` in both `build.rs` files** (root and `src-tauri/`). This is
+  what makes the "needs macOS 14.4" refusal possible at all: without weak linking, the missing
+  Process Tap symbol kills the process inside dyld before `main`, and nobody ever sees the
+  explanation. Two unit tests guard the flag — `корневой_крейт_линкует_coreaudio_слабо`
+  (`src/lib.rs`) and `gui_крейт_линкует_coreaudio_слабо` (`src-tauri/src/main.rs`); the built
+  binary is checked by `npm run check-tap-lazy-bind`. Full reasoning and measurements are in the
+  `MIN_MACOS` doc block in `src/capture/macos.rs`. The previous approach — relying on lazy
+  binding at deployment target 11.x — turned out to depend on the linker version: on `ld-1053.12`
+  (CLT 15.3) binding is eager even at 11.0. Editing `minimumSystemVersion` will not bring it
+  back; don't try.
+- **`bundle.macOS.minimumSystemVersion` is `11.0`** even though the app needs 14.4. That key is
+  `LSMinimumSystemVersion`, i.e. the Finder gate: set it to 14.4 and the OS refuses in its own
+  words instead of ours, and the user never learns what is actually missing. Guarded by the unit
+  test `минимальная_версия_macos_в_бандле_осталась_11_0` (`src-tauri/src/main.rs`).
+- **`bundle.macOS.hardenedRuntime` is `false`** on purpose. With hardened runtime enabled and no
+  entitlements file, macOS blocks microphone access silently — no dialog, no error. The price is
+  that notarisation is impossible in this configuration; it was never in scope.
+
+## Project status
+
+This is an MVP that works, not a polished product. Everything in the MVP plan
+(`docs/2026-07-17-meeting-recorder-mvp-plan.md`) is done — detector, ring buffer, state machine,
+WAV storage, mic + loopback capture, console build and the Tauri shell (tray, toast, window with
+the recordings list, global hotkey). So is the follow-up work on microphone selection, monthly
+folders and renaming (`docs/2026-07-30-device-folders-rename-plan.md`), and the macOS port
+(`docs/2026-08-10-macos-port-plan.md`).
+
+**What has actually been verified, and where:**
+
+- On macOS the system track was confirmed correct on three output devices — built-in speakers,
+  AirPods and a USB headset. Tray icon, level meters, surviving window close, permission dialogs
+  and the resulting audio were all checked by hand in the GUI. On the packaged `.app`: no Dock
+  icon, tray opens the window, recording writes both tracks.
+- The mic-only path (system-audio permission denied) was verified too: banner visible, window
+  opens by itself, a single `.mic.wav` with no pair lands on disk. Force it with
+  `MR_FORCE_NO_SYSTEM_AUDIO=1`, because `tccutil` cannot revoke that permission again.
+- The "needs macOS 14.4" refusal was confirmed on a real macOS 14.3 machine. macOS 13 and below
+  are still covered by tests only — no hardware available.
+- Re-checked on a second machine and a different major version, macOS 26.5: `npx tauri build`
+  produces `.app` and `.dmg`, `cargo test --workspace` is green, `npm run check-tap-lazy-bind`
+  passes.
+
+**Known gaps — read these before relying on it:**
+
+- **Windows has not been rebuilt since the macOS port.** Seven changes from that work sit in
+  shared code and shared config with no `cfg` guard, and the machine the port was done on had no
+  Windows toolchain. The Windows build is expected to work and expected to stay green, but that
+  is an expectation, not a measurement. The specific behaviour changes to re-check are listed in
+  `docs/2026-08-10-macos-port-plan.md`; the most user-visible one is that a manual start no
+  longer prepends audio that was playing *before* you pressed the button.
+- **A second instance goes unnoticed.** The `single-instance` plugin is not in the build, and
+  `open -a` on an already-running app starts a second copy instead of surfacing the first one.
+  Observed live. Two copies at once both hold the microphone and the Process Tap and write into
+  the same folder.
+- **The tray icon can be invisible, and then nothing opens the window.** In a crowded menu bar
+  items get pushed off the left edge — on the test machine neighbouring items sat at `x=7` and
+  `x=-1` on a 1512-point-wide screen. There is no "open window" item in the tray menu, and a
+  synthetic click via the Accessibility API does not raise it; a real left click on the icon is
+  required. The `Ctrl+Shift+R` hotkey still works in that state, and it can still start
+  recordings without the icon.
+- **`bundle_dmg.sh` can trip over leftovers from an interrupted run.** A `.dmg` build failed once
+  while a `/Volumes/dmg.*` from a previous attempt was still mounted; `hdiutil detach` and it
+  built with no other change. Causation is unproven — it never reproduced — so treat it as a lead,
+  not a diagnosis.
+
+## Architecture
+
+Rust + Tauri 2, two platforms. Platform-specific code lives behind the `MeetingDetector` and
+`AudioSource` traits; everything else is shared.
+
+| Concern | Windows | macOS |
+|---|---|---|
+| Microphone capture | `cpal` | `cpal` |
+| System audio | WASAPI loopback (`cpal`) | Core Audio Process Tap (`src/capture/macos.rs`) — hence the 14.4 requirement |
+| Meeting detection | WASAPI audio sessions via `windows-rs` | `sysinfo` on known process names, gated on system audio actually playing |
+| UI | Tauri tray + window, `global-shortcut` plugin | same |
+
+```
+src/            core: detector, ring buffer, state machine, WAV storage, capture
+src-tauri/      Tauri shell: tray, window commands, config, transcription client
+ui/             the window itself — plain HTML + JS, no framework
+docs/           design and implementation documents (Russian)
+scripts/        build checks and a one-off recordings migration
+```
+
+## Releasing
+
+For maintainers. Bump `version` in **two** places first, or the file names in Releases won't
+match the tag — which happened once: a release tagged `v0.1.1` containing
+`meeting-recorder_0.1.0_x64-setup.exe`, because `tauri` takes the version for the file name from
+the config, not from the git tag.
 
 - `src-tauri/tauri.conf.json` → `"version"`
 - `package.json` → `"version"`
 
-Затем — тег с тем же номером:
+Then tag with the same number:
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-Дальше всё делает workflow: три параллельные сборки (~10–15 минут), публикация в Releases
-сразу после того, как они пройдут — черновиков нет, `releaseDraft: false`.
+The workflow does the rest: three parallel builds (~10–15 minutes), published to Releases as
+soon as they pass — no drafts, `releaseDraft: false`. If a single platform fails,
+`workflow_dispatch` in the Actions tab re-runs everything without a new tag.
 
-Если упадёт одна платформа — `workflow_dispatch` в вкладке Actions перезапускает всё без
-нового тега.
+## Contributing
 
-## Транскрибация
+Issues and pull requests are welcome. Two things worth knowing before you open one: the source
+comments and design docs are in Russian, and platform-specific changes really do need to be
+built on that platform — see the Windows gap above for what happens otherwise.
 
-Настраивается один раз в разделе «Транскрипция» окна — два поля, URL шлюза и ключ; сохраняются
-по потере фокуса поля (Tab/клик мимо), без отдельной кнопки. Ключ и scope `stt` выдаются
-через ai-lab (скилл `ailab-new-project`) — свой ключ на человека, а не общий на всех, чтобы
-доступ можно было отозвать отдельно.
+## License
 
-У записи с **обеими** дорожками (mic + system) появляется кнопка «Транскрибировать». Клик
-ставит запись в очередь — если сейчас ничего не обрабатывается, начнётся сразу, иначе кнопка
-покажет «В очереди (N)» и запись подождёт своей очереди; параллельно обрабатывается всегда
-ровно одна запись, потому что запросов на GPU шлюза не резиновое. Стадии по ходу дела —
-«Загрузка…» → «Обработка…» → «Слияние…» → «Готово». Результат — `<запись>.transcript/`, `.md`
-с таймкодами и метками говорящих и `.txt` сплошным текстом.
-
-Диаризация настоящая: шлюз реально различает голоса внутри каждой дорожки (`diarize=true` в
-запросе), и если на дорожке `system` больше одного собеседника, они получают разные пометки —
-«Собеседники (1)», «Собеседники (2)» — по порядку появления в разговоре. Один голос на
-дорожке номер не получает — «Собеседники» без уточнения, как и раньше.
-
-## Запуск
-
-На Windows приложение запускается **без терминала** — двойным кликом по exe или ярлыком
-«Запись встреч» на рабочем столе:
-
-```
-target\release\meeting-recorder-gui.exe
-```
-
-Не запускать GUI из WSL-терминала: при закрытии терминала WSL убивает всё дерево
-Windows-процессов вместе с приложением.
-
-На macOS запускается собранный бандл:
-
-```
-target/release/bundle/macos/meeting-recorder.app
-```
-
-Первый запуск на macOS спросит два разных системных разрешения — на микрофон и на захват
-системного звука; это разные категории, и без обоих запись будет неполной. Подпись ad-hoc,
-стабильного Team ID у неё нет, TCC привязывает разрешение к хешу бинаря — после пересборки
-разрешения могут спроситься заново.
-
-Как пользоваться:
-
-- иконка в трее → окно со списком записей;
-- кнопка **«Начать запись» / «Остановить запись»** или глобальный хоткей **Ctrl+Shift+R**;
-  на macOS это тоже Ctrl, а не Cmd, — сознательно, чтобы не ломать моторную память;
-- при детекте начала звонка приложение само предлагает запись (тост «Записать?»); на macOS
-  детект знает только `zoom.us`, `Microsoft Teams` и `Slack` по имени процесса и требует, чтобы
-  при этом звучал системный звук. Браузеры в список не входят намеренно: вкладку Google Meet
-  изнутри Chrome не отличить от любой другой — такая встреча сама не задетектится, кнопка и
-  хоткей для неё работают как обычно;
-- выпадашка **«Микрофон»** — выбор устройства записи; выбор сохраняется между
-  запусками, а если устройство недоступно, запись идёт с системного по умолчанию
-  и в окне висит предупреждение;
-- кнопка **«Проверить»** — открывает микрофон и показывает уровень по обеим
-  дорожкам, чтобы убедиться, что пишется тот микрофон, в который говорят;
-  выключается сама через минуту;
-- файлы: две WAV-дорожки в `C:\Users\Cypher\Recordings\YYYY-MM\` на Windows и в
-  `~/Recordings/YYYY-MM/` на macOS, папка месяца создаётся автоматически;
-- **«Переименовать»** в строке записи меняет хвост имени (дата и время
-  зафиксированы), переименовывая обе дорожки и папку транскрипта разом.
-
-## Сборка (на Windows, из WSL)
-
-Только Windows-тулчейном через interop — обычный `cargo` соберёт Linux-бинарь:
-
-```bash
-cargo.exe build --workspace            # debug
-cargo.exe build --release -p meeting-recorder-gui
-cargo.exe test --workspace
-```
-
-`meeting-recorder-cli.exe` — консольная отладочная сборка ядра без GUI (Task 6),
-не мусор, не удалять.
-
-## Сборка (на macOS)
-
-Нативно, без WSL-обвязки — хватает Xcode command line tools и Rust-тулчейна:
-
-```bash
-cargo build --workspace            # debug
-cargo test --workspace
-
-npm install                        # @tauri-apps/cli из package.json
-npx tauri build                    # релизные .app и .dmg
-```
-
-Именно `npx tauri`, а не `cargo tauri`: CLI живёт в `package.json`, отдельной подкомандой
-`cargo` здесь не установлен. Артефакты — в `target/release/bundle/` (`macos/*.app`,
-`dmg/*.dmg`); `target/` у воркспейса один, в корне репозитория, а не внутри `src-tauri/`.
-Подпись ad-hoc: `.dmg` не подписан Developer ID и не нотаризован, на чужой машине его встретит
-Gatekeeper.
-
-Минимальная версия — macOS 14.4: без Core Audio Process Tap API системную дорожку писать
-нечем. На более старой приложение откажется запускаться с понятным сообщением, а не тихо
-потеряет дорожку собеседников. Отказ проверен на живой macOS 14.3 (2026-08-17): приложение
-доходит до `main` и говорит «нужна macOS 14.4 или новее — используется Core Audio Process Tap
-API (система сообщает 14.3)». На 13 и ниже путь по-прежнему проверен только тестами — машины
-нет.
-
-Держится этот отказ на слабой линковке CoreAudio: `-Wl,-weak_framework,CoreAudio` в обоих
-`build.rs` (корневом и `src-tauri/`). Без флага отсутствующий символ тапа убивает процесс в
-dyld до `main`, и объяснения никто не видит. Флаг стерегут два юнит-теста —
-`корневой_крейт_линкует_coreaudio_слабо` (`src/lib.rs`) и `gui_крейт_линкует_coreaudio_слабо`
-(`src-tauri/src/main.rs`); проверка на собранном бинаре — `npm run check-tap-lazy-bind`.
-Рассуждение и замеры целиком — в докблоке `MIN_MACOS` (`src/capture/macos.rs`).
-
-Прежняя опора — ленивое связывание при deployment target 11.x — оказалась зависящей от версии
-линкера: на `ld-1053.12` (CLT 15.3) связывание жадное уже при 11.0. Правкой
-`minimumSystemVersion` её не вернуть, не пытайтесь.
-
-Два места в `src-tauri/tauri.conf.json`, которые выглядят как недосмотр, но правиться не должны:
-
-- `bundle.macOS.minimumSystemVersion` — `11.0`, хотя приложению нужна 14.4. Это
-  `LSMinimumSystemVersion`, то есть гейт Finder'а: при 14.4 система откажет своими словами
-  вместо наших, и пользователь не узнает, чего именно не хватает. Значение стережёт юнит-тест
-  `минимальная_версия_macos_в_бандле_осталась_11_0` (`src-tauri/src/main.rs`).
-- `bundle.macOS.hardenedRuntime` — `false` намеренно. С включённым hardened runtime и без файла
-  entitlements macOS закрывает доступ к микрофону молча: ни диалога, ни ошибки. Цена решения —
-  нотаризация в таком виде невозможна; она в объём работ и не входила.
-
-## Документация
-
-Дизайн и обоснование решений живут в Obsidian-vault, не здесь:
-
-- Спека MVP: `Cypher/Brainstorming/Открытый аналог Granola/2026-07-17-meeting-recorder-mvp-design.md`
-- Ресёрч, на который она опирается: `Cypher/Brainstorming/Открытый аналог Granola/` (MOC + 5 заметок)
-- План реализации MVP: `docs/2026-07-17-meeting-recorder-mvp-plan.md`
-- Спека «выбор микрофона, месячные папки, переименование»: `docs/2026-07-30-device-folders-rename-design.md`
-- План реализации этой доработки: `docs/2026-07-30-device-folders-rename-plan.md`
-- Спека порта на macOS: `docs/2026-08-10-macos-port-design.md`
-- План порта на macOS: `docs/2026-08-10-macos-port-plan.md`
-
-## Стек
-
-Rust + Tauri, две платформы — Windows и macOS. Платформенный код живёт за трейтами
-`MeetingDetector` и `AudioSource`, всё остальное общее.
-
-- захват микрофона: `cpal` на обеих платформах
-- захват системного звука: WASAPI loopback (`cpal`) на Windows, Core Audio Process Tap
-  (`src/capture/macos.rs`) на macOS — отсюда требование macOS 14.4
-- детект встречи: WASAPI audio sessions через `windows-rs` на Windows; на macOS — `sysinfo`
-  по именам известных звонилок (`zoom.us`, `Microsoft Teams`, `Slack`) в связке с проверкой,
-  что системный звук действительно звучит
-- UI: Tauri (трей + окно со списком) + плагин `global-shortcut`
-
-## Важно
-
-Аудио пишется **вне** этого репозитория и вне vault — vault синкается git'ом с автокоммитами,
-~150 МБ на встречу туда попасть не должны. По той же причине на macOS корень записей —
-`~/Recordings`, а не `~/Documents`: «Документы» по умолчанию уезжают в iCloud Drive.
+MIT — see [LICENSE](LICENSE).

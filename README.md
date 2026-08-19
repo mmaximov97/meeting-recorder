@@ -209,15 +209,17 @@ folders and renaming (`docs/2026-07-30-device-folders-rename-plan.md`), and the 
 - Re-checked on a second machine and a different major version, macOS 26.5: `npx tauri build`
   produces `.app` and `.dmg`, `cargo test --workspace` is green, `npm run check-tap-lazy-bind`
   passes.
+- **Windows was rebuilt and tested after the macOS port**, on the real Windows toolchain (not
+  cross-compiled) — 131 core-crate tests and 92 GUI-crate tests green, `cargo build` clean for
+  both the debug and release profiles. The shared-code changes from the port (see
+  `docs/2026-08-10-macos-port-plan.md` for the list) checked out; the most user-visible one is
+  that a manual start no longer prepends audio that was playing *before* you pressed the button.
+  The release pipeline itself is Windows proof by construction: every tagged release runs a
+  `windows-latest` GitHub Actions job that builds both the NSIS installer and the portable `.exe`
+  from scratch.
 
 **Known gaps — read these before relying on it:**
 
-- **Windows has not been rebuilt since the macOS port.** Seven changes from that work sit in
-  shared code and shared config with no `cfg` guard, and the machine the port was done on had no
-  Windows toolchain. The Windows build is expected to work and expected to stay green, but that
-  is an expectation, not a measurement. The specific behaviour changes to re-check are listed in
-  `docs/2026-08-10-macos-port-plan.md`; the most user-visible one is that a manual start no
-  longer prepends audio that was playing *before* you pressed the button.
 - **A second instance goes unnoticed.** The `single-instance` plugin is not in the build, and
   `open -a` on an already-running app starts a second copy instead of surfacing the first one.
   Observed live. Two copies at once both hold the microphone and the Process Tap and write into

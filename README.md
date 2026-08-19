@@ -107,9 +107,13 @@ Windows-часть портом затронута — не переписана
 
 | Платформа | Файл | Куда идёт |
 |---|---|---|
-| Windows | `meeting-recorder_X.Y.Z_x64-setup.exe` | обычный NSIS-инсталлятор, запустить и пройти мастер |
+| Windows, с установкой | `meeting-recorder_X.Y.Z_x64-setup.exe` | обычный NSIS-инсталлятор, запустить и пройти мастер |
+| Windows, portable | `meeting-recorder_vX.Y.Z_x64-portable.exe` | без установки — положить куда угодно и запустить; ничего не пишет в реестр и Program Files |
 | Mac на Apple Silicon (M1 и новее) | `meeting-recorder_X.Y.Z_aarch64.dmg` | открыть `.dmg`, перетащить в Applications |
 | Mac на Intel | `meeting-recorder_X.Y.Z_x64.dmg` | то же самое |
+
+Portable-версии для macOS нет: неподписанный голый бинарь Gatekeeper блокирует так же, как
+`.app`, но без диалога «Открыть», которым блокировку обходят — `.dmg` реально проще.
 
 Не знаете, какой у вас Mac — `О этом Mac` (**⌘** в левом верхнем углу экрана) → строка «Чип»:
 `Apple M…` значит Apple Silicon, `Intel` значит Intel.

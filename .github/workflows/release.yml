@@ -48,7 +48,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'meeting-recorder ${{ github.ref_name }}'
           releaseBody: |
-            Сборки Windows (NSIS-установщик) и macOS (.dmg, Apple Silicon и Intel отдельно).
+            Сборки Windows (NSIS-установщик + portable .exe без установки) и macOS
+            (.dmg, Apple Silicon и Intel отдельно).
 
             macOS-сборка без подписи Apple Developer ID (`signingIdentity: "-"`,
             ad-hoc) — при первом запуске Gatekeeper потребует явного разрешения:
@@ -57,3 +58,20 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # У Tauri нет отдельного "portable"-таргета бандлера (только nsis/msi —
+      # оба ставят инсталлятором), но собранный `cargo build --release` бинарь
+      # и так самодостаточен: фронтенд (`ui/`) и иконка уже вкомпилированы,
+      # никаких файлов рядом ему не нужно — это и есть portable-режим, просто
+      # без отдельной сборки под него. Докладываем его в тот же релиз вручную,
+      # только на Windows job — на macOS у portable нет смысла: неподписанный
+      # голый бинарь Gatekeeper блокирует так же, как и .app, но без диалога
+      # «Открыть», которым это обходится.
+      - name: upload portable exe (Windows only)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          cp target/release/meeting-recorder-gui.exe "meeting-recorder_${{ github.ref_name }}_x64-portable.exe"
+          gh release upload "${{ github.ref_name }}" "meeting-recorder_${{ github.ref_name }}_x64-portable.exe" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

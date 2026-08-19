@@ -13,14 +13,14 @@
 ## Global Constraints
 
 - **Таргет только `x86_64-pc-windows-msvc`.** Сборка — только Windows-тулчейном через интероп: `cargo.exe build --release -p meeting-recorder-gui`. Обычный `cargo` соберёт Linux-бинарь.
-- **Код живёт на Windows-диске:** `/mnt/c/Users/<username>/Projects/meeting-recorder`.
+- **Код живёт на Windows-диске:** `/mnt/c/Users/<you>/Projects/meeting-recorder`.
 - **Комментарии и сообщения коммитов — на русском**, как во всём проекте. Тексты интерфейса — тоже на русском.
 - **Фронтенд — ванильный JS без сборщика.** Никаких npm-пакетов, импортов и фреймворков.
 - **Фронтенд намеренно тонкий:** состояние машины в нём не дублируется, он только рисует то, что пришло с бэкенда.
 - **Ноль предупреждений компилятора** — дисциплина проекта.
 - **Автоматических тестов на фронтенде в проекте нет и в этой работе не заводится.** Критерий готовности задачи — успешная релизная сборка; правильность вида проверяет человек глазами по чек-листу в конце плана.
 - **Не убивать чужие процессы.** `meeting-recorder-gui.exe` — фоновый демон пользователя; если релизная сборка упрётся в `Access is denied`, остановиться и сообщить, а не обходить блокировку.
-- **Каталог `C:\Users\<username>\Recordings` не трогать** — там настоящие записи встреч.
+- **Каталог `C:\Users\<you>\Recordings` не трогать** — там настоящие записи встреч.
 
 ## File Structure
 
@@ -91,7 +91,7 @@
 
 - [ ] **Step 3: Собрать релиз**
 
-Run: `cd /mnt/c/Users/<username>/Projects/meeting-recorder && cargo.exe build --release -p meeting-recorder-gui 2>&1 | tail -3`
+Run: `cd /mnt/c/Users/<you>/Projects/meeting-recorder && cargo.exe build --release -p meeting-recorder-gui 2>&1 | tail -3`
 
 Expected: `Finished \`release\` profile`, ноль предупреждений. Если вместо этого `Access is denied` — приложение запущено; остановиться и сообщить, процесс не убивать.
 
@@ -238,7 +238,7 @@ function размер(байты) {
 
 - [ ] **Step 7: Собрать релиз**
 
-Run: `cd /mnt/c/Users/<username>/Projects/meeting-recorder && cargo.exe build --release -p meeting-recorder-gui 2>&1 | tail -3`
+Run: `cd /mnt/c/Users/<you>/Projects/meeting-recorder && cargo.exe build --release -p meeting-recorder-gui 2>&1 | tail -3`
 
 Expected: `Finished \`release\` profile`, ноль предупреждений.
 

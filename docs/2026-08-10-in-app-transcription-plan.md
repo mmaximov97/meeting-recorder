@@ -44,7 +44,7 @@ fn настройки_транскрипции_переживают_сериал
     let c = Config {
         mic_device_id: None,
         mic_device_name: None,
-        stt_gateway_url: Some("http://localhost:8080".to_string()),
+        stt_gateway_url: Some("http://your-gateway.local:8080".to_string()),
         stt_api_key: Some("ailab_xxx".to_string()),
     };
     let json = serde_json::to_string(&c).unwrap();
@@ -75,7 +75,7 @@ cargo.exe test --workspace
 pub struct Config {
     pub mic_device_id: Option<String>,
     pub mic_device_name: Option<String>,
-    /// Базовый URL шлюза, например `http://localhost:8080` — без хвоста
+    /// Базовый URL шлюза, например `http://your-gateway.local:8080` — без хвоста
     /// `/v1/...`, его дописывает клиент транскрипции.
     pub stt_gateway_url: Option<String>,
     pub stt_api_key: Option<String>,
@@ -139,12 +139,12 @@ fn смена_только_микрофонных_полей_не_трогает
     let mut cfg = Config {
         mic_device_id: None,
         mic_device_name: None,
-        stt_gateway_url: Some("http://localhost:8080".to_string()),
+        stt_gateway_url: Some("http://your-gateway.local:8080".to_string()),
         stt_api_key: Some("secret".to_string()),
     };
     cfg.mic_device_id = Some("{new-id}".to_string());
     cfg.mic_device_name = Some("Новый микрофон".to_string());
-    assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://localhost:8080"));
+    assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://your-gateway.local:8080"));
     assert_eq!(cfg.stt_api_key.as_deref(), Some("secret"));
 }
 ```
@@ -184,7 +184,7 @@ input[type="password"] {
 ```html
 <h2>Транскрипция</h2>
 <div class="row">
-  <input type="text" id="stt-url" placeholder="URL шлюза, например http://localhost:8080" />
+  <input type="text" id="stt-url" placeholder="URL шлюза, например http://your-gateway.local:8080" />
 </div>
 <div class="row">
   <input type="password" id="stt-key" placeholder="Ключ" />

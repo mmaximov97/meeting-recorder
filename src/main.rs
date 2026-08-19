@@ -37,7 +37,8 @@ fn spawn_stdin() -> Receiver<String> {
 
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\<username>\Recordings")
+    let home = std::env::var("USERPROFILE").expect("%USERPROFILE% обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 #[cfg(target_os = "macos")]

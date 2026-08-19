@@ -792,7 +792,7 @@ git commit -m "feat(detector): детект звонка на macOS — изве
 
 ```rust
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\<username>\Recordings")
+    PathBuf::from(r"C:\Users\<you>\Recordings")
 }
 ```
 
@@ -801,7 +801,7 @@ fn recordings_root() -> PathBuf {
 ```rust
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\<username>\Recordings")
+    PathBuf::from(r"C:\Users\<you>\Recordings")
 }
 
 #[cfg(target_os = "macos")]
@@ -874,7 +874,7 @@ use meeting_recorder::detector::MacDetector;
 ```rust
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\<username>\Recordings")
+    PathBuf::from(r"C:\Users\<you>\Recordings")
 }
 
 #[cfg(target_os = "macos")]
@@ -1205,7 +1205,7 @@ npx tauri build                    # релизные .app и .dmg в target/rel
 
 - [ ] **Шаг 2: перечитать весь README целиком**
 
-Пройти по всему файлу и убедиться, что ни одно оставшееся упоминание `C:\Users\<username>\Recordings`/`explorer.exe`/`cargo.exe` не выглядит теперь как единственный способ — где формулировка была общей («приложение пишет...», «файлы: две WAV-дорожки в ...»), уточнить, что путь платформенный (`C:\Users\<username>\Recordings` на Windows, `~/Recordings` на macOS), не переписывая разделы, специфичные для одной ОС (например, «Не запускать GUI из WSL-терминала» — это по-прежнему верно и относится только к Windows-сборке).
+Пройти по всему файлу и убедиться, что ни одно оставшееся упоминание `C:\Users\<you>\Recordings`/`explorer.exe`/`cargo.exe` не выглядит теперь как единственный способ — где формулировка была общей («приложение пишет...», «файлы: две WAV-дорожки в ...»), уточнить, что путь платформенный (`C:\Users\<you>\Recordings` на Windows, `~/Recordings` на macOS), не переписывая разделы, специфичные для одной ОС (например, «Не запускать GUI из WSL-терминала» — это по-прежнему верно и относится только к Windows-сборке).
 
 - [ ] **Шаг 3: commit**
 

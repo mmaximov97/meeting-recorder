@@ -25,7 +25,17 @@
 # сообщений — по-русски, как везде в проекте.
 set -euo pipefail
 
-ROOT="${1:-/mnt/c/Users/Cypher/Recordings}"
+ROOT="${1:-}"
+if [ -z "$ROOT" ]; then
+  # Имя windows-пользователя из WSL иначе не узнать: $USER — это linux-имя.
+  profile="$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" || profile=""
+  if [ -n "$profile" ]; then
+    ROOT="$(wslpath -u "$profile")/Recordings"
+  else
+    echo "укажите корень записей первым аргументом: $0 /mnt/c/Users/<вы>/Recordings" >&2
+    exit 2
+  fi
+fi
 DRY="${DRY_RUN:-0}"
 
 cd "$ROOT"

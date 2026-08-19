@@ -34,7 +34,8 @@ use tauri_plugin_log::{Target, TargetKind};
 /// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\Cypher\Recordings")
+    let home = std::env::var("USERPROFILE").expect("%USERPROFILE% обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 #[cfg(target_os = "macos")]

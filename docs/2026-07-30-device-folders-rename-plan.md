@@ -13,10 +13,10 @@
 ## Global Constraints
 
 - **Таргет только `x86_64-pc-windows-msvc`.** Код не собирается под Linux/WSL. Все сборки и тесты — Windows-тулчейном через интероп: `cargo.exe test --workspace`, `cargo.exe build --release -p meeting-recorder-gui`. Обычный `cargo` соберёт Linux-бинарь и упадёт.
-- **Код живёт на Windows-диске:** `/mnt/c/Users/Cypher/Projects/meeting-recorder`. Не переносить в WSL-ФС.
+- **Код живёт на Windows-диске:** `/mnt/c/Users/<you>/Projects/meeting-recorder`. Не переносить в WSL-ФС.
 - **Комментарии, имена тестов и сообщения коммитов — на русском**, как в остальном коде проекта.
 - **Формат аудио неизменен:** 16000 Гц, моно, 16 бит PCM, WAV, две раздельные дорожки.
-- **Корень записей:** `C:\Users\Cypher\Recordings`. Никогда не внутри vault — там git-автокоммиты.
+- **Корень записей:** `C:\Users\<you>\Recordings`. Никогда не внутри vault — там git-автокоммиты.
 - **Аудио не коммитится.** `.gitignore` уже покрывает `*.wav`.
 - **Инвариант микрофона сохраняется:** потоки захвата открываются только на детекте, ручном старте или явном включении проверки; закрываются сразу при `DiscardRing`, `CloseFile` и выключении проверки в `Idle`. Держать их открытыми «на всякий случай» запрещено.
 - **Порог дисбаланса:** 20 дБ по RMS. Пол уровня: −120 dBFS.
@@ -116,7 +116,7 @@
 
 - [ ] **Step 2: Прогнать тест и убедиться, что он падает**
 
-Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && cargo.exe test -p meeting-recorder pick 2>&1 | tail -20`
+Run: `cd /mnt/c/Users/<you>/Projects/meeting-recorder && cargo.exe test -p meeting-recorder pick 2>&1 | tail -20`
 
 Expected: ошибка компиляции — `cannot find function 'pick'`, `cannot find type 'DeviceChoice'`.
 
@@ -408,7 +408,7 @@ git commit -m "refactor(capture): разделить build_capture на mic и l
 
 - [ ] **Step 2: Прогнать тесты и убедиться, что они падают**
 
-Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && cargo.exe test -p meeting-recorder pick 2>&1 | tail -20`
+Run: `cd /mnt/c/Users/<you>/Projects/meeting-recorder && cargo.exe test -p meeting-recorder pick 2>&1 | tail -20`
 
 Expected: ошибка компиляции — `no variant named 'Id' found for enum 'DeviceChoice'`.
 
@@ -745,7 +745,7 @@ impl CpalAudio {
 `src/main.rs:35-37`:
 
 ```rust
-    let root = PathBuf::from(r"C:\Users\Cypher\Recordings");
+    let root = PathBuf::from(r"C:\Users\<you>\Recordings");
     let det = WindowsDetector::new()?;
     // Консоль — отладочный инструмент ядра, конфига у неё нет: всегда системный
     // дефолт. Выбор устройства живёт в GUI, где его есть где хранить.
@@ -1145,7 +1145,7 @@ Expected: тесты зелёные, сборка успешна.
 Проверить вручную: запустить `target\release\meeting-recorder-gui.exe`, выбрать в выпадашке `Headset (Boss Bose)`, записать 10 секунд речи, остановить, затем из WSL:
 
 ```bash
-ffmpeg -hide_banner -i "/mnt/c/Users/Cypher/Recordings/<файл>.mic.wav" -af volumedetect -f null /dev/null 2>&1 | grep mean_volume
+ffmpeg -hide_banner -i "/mnt/c/Users/<you>/Recordings/<файл>.mic.wav" -af volumedetect -f null /dev/null 2>&1 | grep mean_volume
 ```
 
 Expected: mean_volume около −25…−35 дБ, а не −55…−60. Перезапустить приложение и убедиться, что выбор сохранился.
@@ -1456,7 +1456,7 @@ pub struct App {
 ///
 /// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\Cypher\Recordings")
+    PathBuf::from(r"C:\Users\<you>\Recordings")
 }
 ```
 
@@ -1758,7 +1758,7 @@ git commit -m "feat(gui): список собирает записи из мес
 # сообщений — по-русски, как везде в проекте.
 set -euo pipefail
 
-ROOT="${1:-/mnt/c/Users/Cypher/Recordings}"
+ROOT="${1:-/mnt/c/Users/<you>/Recordings}"
 DRY="${DRY_RUN:-0}"
 
 cd "$ROOT"
@@ -1811,21 +1811,21 @@ fi
 
 Run:
 ```bash
-chmod +x /mnt/c/Users/Cypher/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh
-DRY_RUN=1 /mnt/c/Users/Cypher/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh
+chmod +x /mnt/c/Users/<you>/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh
+DRY_RUN=1 /mnt/c/Users/<you>/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh
 ```
 
 Expected: список вида `2026-07-30_13-03_chrome.mic.wav -> 2026-07/`, включая `.transcript`-папки и `.mp4`. Ничего не перемещено. Убедиться, что пар дорожек, у которых одна половина уезжает, а вторая остаётся, в выводе нет.
 
 - [ ] **Step 3: Прогнать по-настоящему**
 
-Run: `/mnt/c/Users/Cypher/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh`
+Run: `/mnt/c/Users/<you>/Projects/meeting-recorder/scripts/migrate-to-month-folders.sh`
 
 Expected: `перенесено: N, оставлено: 0, конфликтов: 0` и код возврата 0.
 
 Ненулевой счётчик конфликтов означает, что часть записи осталась в корне: скрипт не перезаписывает существующие файлы и говорит об этом громко, но уже перенесённых членов группы назад не откатывает. В этом случае оставшееся в корне разбирается руками, а не повторным запуском.
 
-Проверить: `ls /mnt/c/Users/Cypher/Recordings/` — только папки `2026-07` и подобные; `ls /mnt/c/Users/Cypher/Recordings/2026-07/ | head` — файлы и `.transcript`-папки на месте.
+Проверить: `ls /mnt/c/Users/<you>/Recordings/` — только папки `2026-07` и подобные; `ls /mnt/c/Users/<you>/Recordings/2026-07/ | head` — файлы и `.transcript`-папки на месте.
 
 - [ ] **Step 4: Обновить скилл meeting-to-vault**
 
@@ -1834,7 +1834,7 @@ Expected: `перенесено: N, оставлено: 0, конфликтов:
 ```markdown
 ## Входные данные
 
-Записи в `C:\Users\Cypher\Recordings` = `/mnt/c/Users/Cypher/Recordings`, разложены
+Записи в `C:\Users\<you>\Recordings` = `/mnt/c/Users/<you>/Recordings`, разложены
 по месячным подпапкам `YYYY-MM/` (свежая встреча — в папке текущего месяца). Обычно
 пара синхронных дорожек одной встречи: `<штамп>.mic.wav` (микрофон = Михаил Максимов)
 и `<штамп>.system.wav` (остальные участники). Штамп — общий префикс имён целиком,
@@ -1843,7 +1843,7 @@ Expected: `перенесено: N, оставлено: 0, конфликтов:
 
 Искать последнюю запись — по всему дереву, а не только в корне:
 
-    ls -t /mnt/c/Users/Cypher/Recordings/*/*.mic.wav | head
+    ls -t /mnt/c/Users/<you>/Recordings/*/*.mic.wav | head
 ```
 
 В разделе «Пайплайн», шаг 1 — заменить команду микса на версию с усилением:
@@ -1892,7 +1892,7 @@ Expected: `перенесено: N, оставлено: 0, конфликтов:
 - [ ] **Step 5: Закоммитить**
 
 ```bash
-cd /mnt/c/Users/Cypher/Projects/meeting-recorder
+cd /mnt/c/Users/<you>/Projects/meeting-recorder
 git add scripts/migrate-to-month-folders.sh
 git commit -m "chore(scripts): разовая раскладка записей по месячным папкам"
 ```
@@ -3557,7 +3557,7 @@ Run: `cargo.exe test --workspace 2>&1 | tail -5 && cargo.exe build --release -p 
 - кнопка **«Проверить»** — открывает микрофон и показывает уровень по обеим
   дорожкам, чтобы убедиться, что пишется тот микрофон, в который говорят;
   выключается сама через минуту;
-- файлы: две WAV-дорожки в `C:\Users\Cypher\Recordings\YYYY-MM\`, папка месяца
+- файлы: две WAV-дорожки в `C:\Users\<you>\Recordings\YYYY-MM\`, папка месяца
   создаётся автоматически;
 - **«Переименовать»** в строке записи меняет хвост имени (дата и время
   зафиксированы), переименовывая обе дорожки и папку транскрипта разом.
@@ -3577,9 +3577,9 @@ git commit -m "feat(gui): проверка микрофона с полоска�
 Прогнать целиком и убедиться, что ничего не отвалилось:
 
 ```bash
-cd /mnt/c/Users/Cypher/Projects/meeting-recorder
+cd /mnt/c/Users/<you>/Projects/meeting-recorder
 cargo.exe test --workspace 2>&1 | tail -20
 cargo.exe build --release -p meeting-recorder-gui 2>&1 | tail -5
 ```
 
-Затем сквозной сценарий на живой встрече: выбрать гарнитуру, проверить уровень кнопкой, записать 2-3 минуты, остановить, убедиться что файлы легли в `C:\Users\Cypher\Recordings\<текущий месяц>\`, переименовать запись из окна, прогнать `ailab-transcribe` и убедиться, что реплики владельца в транскрипте связные, а не обрывочные.
+Затем сквозной сценарий на живой встрече: выбрать гарнитуру, проверить уровень кнопкой, записать 2-3 минуты, остановить, убедиться что файлы легли в `C:\Users\<you>\Recordings\<текущий месяц>\`, переименовать запись из окна, прогнать `ailab-transcribe` и убедиться, что реплики владельца в транскрипте связные, а не обрывочные.

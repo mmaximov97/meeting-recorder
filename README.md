@@ -130,7 +130,15 @@ xattr -cr /Applications/meeting-recorder.app
 
 ### Выпустить новую версию
 
-Для мейнтейнера — три команды:
+Для мейнтейнера — сначала поднять `version` в ДВУХ местах (иначе имена файлов в Releases не
+совпадут с тегом — ровно так один раз и вышло: релиз назывался `v0.1.1`, а внутри лежал
+`meeting-recorder_0.1.0_x64-setup.exe`, потому что `tauri` берёт версию для имени файла из
+конфига, а не из git-тега):
+
+- `src-tauri/tauri.conf.json` → `"version"`
+- `package.json` → `"version"`
+
+Затем — тег с тем же номером:
 
 ```bash
 git tag v0.2.0
@@ -138,9 +146,7 @@ git push origin v0.2.0
 ```
 
 Дальше всё делает workflow: три параллельные сборки (~10–15 минут), публикация в Releases
-сразу после того, как они пройдут — черновиков нет, `releaseDraft: false`. Версию в теге с
-`version` в `src-tauri/tauri.conf.json`/`package.json` синхронизировать не обязательно —
-`tagName` в workflow берётся из самого тега (`github.ref_name`), а не из конфига.
+сразу после того, как они пройдут — черновиков нет, `releaseDraft: false`.
 
 Если упадёт одна платформа — `workflow_dispatch` в вкладке Actions перезапускает всё без
 нового тега.

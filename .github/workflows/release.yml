@@ -1,0 +1,59 @@
+name: publish
+
+# Триггер — тег вида v1.2.3 (пуш тега или релиз через workflow_dispatch для
+# ручного перезапуска без нового тега, например если сборка одной платформы
+# упала, а остальные прошли).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      # fail-fast: false — падение сборки на одной платформе не должно
+      # обрывать остальные: Windows и обе архитектуры macOS независимы, и
+      # частичный релиз (например, только Windows) лучше, чем никакого.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'windows-latest'
+            args: ''
+          # Apple Silicon (M1 и новее) — основной таргет.
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          # Intel Mac — на случай, если у кого-то в команде такой.
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: install frontend dependencies
+        run: npm install
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'meeting-recorder ${{ github.ref_name }}'
+          releaseBody: |
+            Сборки Windows (NSIS-установщик) и macOS (.dmg, Apple Silicon и Intel отдельно).
+
+            macOS-сборка без подписи Apple Developer ID (`signingIdentity: "-"`,
+            ad-hoc) — при первом запуске Gatekeeper потребует явного разрешения:
+            правый клик по приложению → «Открыть», либо
+            `xattr -cr /Applications/meeting-recorder.app`.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

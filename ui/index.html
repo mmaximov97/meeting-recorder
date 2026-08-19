@@ -311,6 +311,25 @@
         margin-top: 10px;
         min-height: 1em;
       }
+      .footer {
+        margin-top: 16px;
+        text-align: center;
+      }
+      /* Кнопка, а не <a href>: обычная ссылка в вебвью Tauri открылась бы
+         внутри самого окна вместо системного браузера. button.link дёргает
+         open_repository, который открывает URL тем же способом, что и
+         open_folder — путь. */
+      button.link {
+        border: none;
+        background: none;
+        padding: 0;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      button.link:hover {
+        color: var(--accent);
+        border-color: transparent;
+      }
     </style>
   </head>
   <body>
@@ -357,6 +376,10 @@
     <h2>Записи</h2>
     <ul id="list"></ul>
     <div id="err"></div>
+
+    <div class="footer">
+      <button id="repo-link" class="link">github.com/mmaximov97/meeting-recorder</button>
+    </div>
 
     <script src="main.js"></script>
   </body>

@@ -1,6 +1,6 @@
 {
   "name": "meeting-recorder",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Tauri-оболочка записи встреч: трей, тост, хоткей, список записей",
   "scripts": {

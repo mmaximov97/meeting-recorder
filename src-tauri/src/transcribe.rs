@@ -4,6 +4,7 @@
 //! `GET /v1/jobs/:id`), здесь не изобретается заново.
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,6 +28,10 @@ pub struct Segment {
     pub start: f64,
     pub label: Label,
     pub text: String,
+    /// Метка спикера от шлюза (`SPEAKER_00`, ...), если диаризация уместилась
+    /// на GPU. `None` — либо диаризация не запускалась/не уместилась, либо
+    /// шлюз её не прислал.
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -77,6 +82,8 @@ struct JobResult {
 struct RawSegment {
     start: f64,
     text: String,
+    #[serde(default)]
+    speaker: Option<String>,
 }
 
 pub enum JobOutcome {
@@ -93,7 +100,7 @@ pub fn parse_job_response(body: &str, label: Label) -> Result<JobOutcome, Transc
             let segments = result
                 .segments
                 .into_iter()
-                .map(|s| Segment { start: s.start, label, text: s.text })
+                .map(|s| Segment { start: s.start, label, text: s.text, speaker: s.speaker })
                 .collect();
             Ok(JobOutcome::Succeeded(TrackResult { segments, text: result.text }))
         }
@@ -173,10 +180,52 @@ fn tail_block(label: Label, track: &TrackResult) -> Option<String> {
     ))
 }
 
+/// Присваивает различимым меткам `speaker` внутри дорожки порядковый номер по
+/// первому появлению в сегментах.
+///
+/// Порядок появления, а не алфавит и не что-то ещё: это единственный критерий,
+/// который не требует ничего сверх самих сегментов, и он же читается
+/// естественно — кто заговорил первым, тот и «собеседник 1».
+fn speaker_numbers(track: &TrackResult) -> HashMap<&str, usize> {
+    let mut numbers = HashMap::new();
+    for s in &track.segments {
+        if let Some(sp) = s.speaker.as_deref() {
+            let next = numbers.len() + 1;
+            numbers.entry(sp).or_insert(next);
+        }
+    }
+    numbers
+}
+
+/// Метка сегмента для markdown.
+///
+/// Номер добавляется, только если на дорожке различимо БОЛЬШЕ одного
+/// голоса — `numbers.len() > 1`, а не просто «спикер известен». Один голос на
+/// дорожке уже однозначно назван меткой дорожки (`Владелец`/`Собеседники`), и
+/// пририсовывать к нему номер значило бы утверждать различие, которого нет:
+/// шлюз мог вернуть один и тот же `SPEAKER_00` на все сегменты, и это не
+/// повод писать «Собеседники (1)» так, будто есть кто-то ещё.
+fn segment_label(s: &Segment, numbers: &HashMap<&str, usize>) -> String {
+    if numbers.len() > 1 {
+        if let Some(n) = s.speaker.as_deref().and_then(|sp| numbers.get(sp)) {
+            return format!("{} ({n})", s.label.title());
+        }
+    }
+    s.label.title().to_string()
+}
+
 pub fn merge_markdown(mic: &TrackResult, system: &TrackResult) -> String {
+    let mic_speakers = speaker_numbers(mic);
+    let sys_speakers = speaker_numbers(system);
     let mut blocks: Vec<String> = chronological_segments(mic, system)
         .into_iter()
-        .map(|s| format!("**[{}]** _{}_ {}", fmt_ts(s.start), s.label.title(), s.text))
+        .map(|s| {
+            let numbers = match s.label {
+                Label::Owner => &mic_speakers,
+                Label::Others => &sys_speakers,
+            };
+            format!("**[{}]** _{}_ {}", fmt_ts(s.start), segment_label(s, numbers), s.text)
+        })
         .collect();
     blocks.extend(tail_block(Label::Owner, mic));
     blocks.extend(tail_block(Label::Others, system));
@@ -216,12 +265,29 @@ mod tests {
         }
     }
 
+    /// Регресс на то, что раньше было осознанным упрощением: `speaker` от
+    /// шлюза отбрасывался, и все «Собеседники» в системной дорожке сливались
+    /// в одну метку, даже если шлюз честно различал голоса. Теперь метка
+    /// обязана дойти до `Segment` — без неё `segment_label` нечем нумеровать.
     #[test]
-    fn speaker_id_от_шлюза_не_попадает_в_segment() {
+    fn speaker_id_от_шлюза_попадает_в_segment() {
         let body = r#"{"status":"succeeded","result":{"text":"текст","segments":[{"start":0.0,"speaker":"SPEAKER_03","text":"текст"}]}}"#;
         let outcome = parse_job_response(body, Label::Others).unwrap();
         match outcome {
-            JobOutcome::Succeeded(r) => assert_eq!(r.segments[0].label, Label::Others),
+            JobOutcome::Succeeded(r) => {
+                assert_eq!(r.segments[0].label, Label::Others);
+                assert_eq!(r.segments[0].speaker.as_deref(), Some("SPEAKER_03"));
+            }
+            _ => panic!("ожидали Succeeded"),
+        }
+    }
+
+    #[test]
+    fn сегмент_без_speaker_в_ответе_даёт_none() {
+        let body = r#"{"status":"succeeded","result":{"text":"текст","segments":[{"start":0.0,"text":"текст"}]}}"#;
+        let outcome = parse_job_response(body, Label::Owner).unwrap();
+        match outcome {
+            JobOutcome::Succeeded(r) => assert_eq!(r.segments[0].speaker, None),
             _ => panic!("ожидали Succeeded"),
         }
     }
@@ -273,7 +339,11 @@ mod tests {
     }
 
     fn seg(start: f64, label: Label, text: &str) -> Segment {
-        Segment { start, label, text: text.to_string() }
+        Segment { start, label, text: text.to_string(), speaker: None }
+    }
+
+    fn seg_sp(start: f64, label: Label, speaker: &str, text: &str) -> Segment {
+        Segment { start, label, text: text.to_string(), speaker: Some(speaker.to_string()) }
     }
 
     #[test]
@@ -292,6 +362,77 @@ mod tests {
         assert!(md.contains("Владелец"));
         assert!(md.contains("Собеседники"));
         assert!(!md.contains("SPEAKER"));
+    }
+
+    /// Один и тот же `speaker` на всех сегментах дорожки — это по-прежнему
+    /// один голос, а не два. `numbers.len() > 1` не даёт `HashMap` слить
+    /// повторные вставки одного ключа в двойку.
+    #[test]
+    fn один_и_тот_же_speaker_на_всех_сегментах_не_получает_номер() {
+        let system = TrackResult {
+            segments: vec![
+                seg_sp(0.0, Label::Others, "SPEAKER_00", "первое"),
+                seg_sp(1.0, Label::Others, "SPEAKER_00", "второе"),
+            ],
+            text: String::new(),
+        };
+        let md = merge_markdown(&TrackResult::default(), &system);
+        assert!(
+            md.contains("_Собеседники_"),
+            "один различимый голос не должен нумероваться: {md}"
+        );
+    }
+
+    /// Гвоздь задачи: диаризация реально различает голоса на шлюзе — это
+    /// обязано стать видно в транскрипте, а не потеряться за общей меткой
+    /// дорожки.
+    #[test]
+    fn несколько_speaker_на_дорожке_получают_номер_по_порядку_появления() {
+        let system = TrackResult {
+            segments: vec![
+                seg_sp(0.0, Label::Others, "SPEAKER_02", "первым заговорил"),
+                seg_sp(1.0, Label::Others, "SPEAKER_00", "вторым"),
+                seg_sp(2.0, Label::Others, "SPEAKER_02", "снова первый"),
+            ],
+            text: String::new(),
+        };
+        let md = merge_markdown(&TrackResult::default(), &system);
+        assert!(
+            md.contains("_Собеседники (1)_ первым заговорил"),
+            "первый по появлению SPEAKER_02 обязан стать (1): {md}"
+        );
+        assert!(
+            md.contains("_Собеседники (2)_ вторым"),
+            "второй по появлению SPEAKER_00 обязан стать (2): {md}"
+        );
+        assert!(
+            md.contains("_Собеседники (1)_ снова первый"),
+            "повторное появление того же SPEAKER_02 обязано получить тот же номер: {md}"
+        );
+    }
+
+    /// Нумерация считается по дорожке отдельно: два голоса на system не
+    /// имеют права навесить номер на единственный голос mic.
+    #[test]
+    fn нумерация_дорожек_независима() {
+        let mic = TrackResult {
+            segments: vec![seg_sp(0.0, Label::Owner, "SPEAKER_00", "я один")],
+            text: String::new(),
+        };
+        let system = TrackResult {
+            segments: vec![
+                seg_sp(1.0, Label::Others, "SPEAKER_01", "первый"),
+                seg_sp(2.0, Label::Others, "SPEAKER_02", "второй"),
+            ],
+            text: String::new(),
+        };
+        let md = merge_markdown(&mic, &system);
+        assert!(
+            md.contains("_Владелец_ я один"),
+            "единственный голос на mic не должен получить номер: {md}"
+        );
+        assert!(md.contains("_Собеседники (1)_ первый"));
+        assert!(md.contains("_Собеседники (2)_ второй"));
     }
 
     #[test]

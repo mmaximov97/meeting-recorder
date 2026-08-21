@@ -23,6 +23,10 @@
         --accent: #7aa2f7;
         --warn: #e0af68;
         --error: #f7768e;
+        /* Зелёная зона метра уровня. Своей переменной раньше не было — жёлтый
+           и красный уже есть (--warn, --error) и совпадают по смыслу с зонами
+           «внимание»/«клиппинг», а зелёного («норма») в схеме не было вообще. */
+        --good: #9ece6a;
         /* Текст на акцентной кнопке. Белым по этому синему — 2.52:1, то есть
            нечитаемая кнопка «Записать»; цветом фона схемы — 6.79:1. */
         --on-accent: #1a1b26;
@@ -193,18 +197,81 @@
         flex: none;
       }
       .bar {
+        position: relative;
         flex: 1;
         height: 8px;
         border-radius: 4px;
         background: var(--line);
         overflow: hidden;
       }
+      /* Заливка — не перекрашивающийся кусок переменной ширины, а фиксированный
+         по позиции градиент (зелёный до -18 дБ, жёлтый до -6, дальше красный),
+         обрезаемый clip-path'ом справа. Если бы вместо этого менялась ширина
+         самого градиентного элемента, цвет в моменте зависел бы от текущей
+         громкости, а не от абсолютного дБ — тихая речь и клиппинг красились бы
+         в один и тот же зелёный на самом краю полоски. */
       .bar > i {
-        display: block;
-        height: 100%;
-        width: 0;
-        background: var(--accent);
-        transition: width 0.12s linear;
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          to right,
+          var(--good) 0%,
+          var(--good) 70%,
+          var(--warn) 70%,
+          var(--warn) 90%,
+          var(--error) 90%,
+          var(--error) 100%
+        );
+        clip-path: inset(0 calc(100% - var(--level, 0%)) 0 0);
+        transition: clip-path 0.12s linear;
+      }
+      /* Пиковый маркер: держит недавний максимум и сползает к текущему уровню
+         (см. применить_пик в main.js). Невидим, пока сигнала не было ни разу —
+         иначе на пустом метре торчала бы линия у нулевой отметки с самого
+         старта приложения. */
+      .bar > b {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        left: var(--peak, 0%);
+        background: var(--fg);
+        opacity: 0;
+        transition: left 0.15s linear;
+      }
+      .bar > b.on {
+        opacity: 1;
+      }
+      .dbval {
+        width: 52px;
+        flex: none;
+        text-align: right;
+        /* Число дБ — данные, как и децибелы перекоса в .meta. */
+        font-family: var(--mono);
+      }
+      /* Общая шкала на обе полоски: диапазон один и тот же (-60..0 дБ, см.
+         МЕТР_ПОЛ_ДБ в main.js), дублировать деления под каждым каналом было бы
+         одной и той же строкой дважды. Отступы подгоняют деления под полосу:
+         слева ширина подписи канала + gap (56+8), справа — ширина .dbval + gap
+         (52+8). */
+      .scale {
+        position: relative;
+        height: 12px;
+        margin: 2px 60px 0 64px;
+        font-family: var(--mono);
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .scale span {
+        position: absolute;
+        top: 0;
+        transform: translateX(-50%);
+      }
+      .scale span:first-child {
+        transform: none;
+      }
+      .scale span:last-child {
+        transform: translateX(-100%);
       }
       h2 {
         font-family: var(--mono);
@@ -356,8 +423,27 @@
     </div>
     <div id="mic-deferred">Применится к следующей записи — текущая пишется прежним микрофоном.</div>
     <div class="meters">
-      <div class="meter"><span>Вы</span><div class="bar"><i id="lvl-mic"></i></div></div>
-      <div class="meter"><span>Система</span><div class="bar"><i id="lvl-sys"></i></div></div>
+      <div class="meter">
+        <span>Вы</span>
+        <div class="bar"><i id="lvl-mic"></i><b id="peak-mic"></b></div>
+        <span id="db-mic" class="dbval">-∞ дБ</span>
+      </div>
+      <div class="meter">
+        <span>Система</span>
+        <div class="bar"><i id="lvl-sys"></i><b id="peak-sys"></b></div>
+        <span id="db-sys" class="dbval">-∞ дБ</span>
+      </div>
+      <div class="scale">
+        <span style="left: 0%">-60</span>
+        <span style="left: 16.67%">-50</span>
+        <span style="left: 33.33%">-40</span>
+        <span style="left: 50%">-30</span>
+        <span style="left: 60%">-24</span>
+        <span style="left: 70%">-18</span>
+        <span style="left: 80%">-12</span>
+        <span style="left: 90%">-6</span>
+        <span style="left: 100%">0</span>
+      </div>
     </div>
 
     <div class="row">

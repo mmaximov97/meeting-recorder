@@ -8,6 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -16,6 +17,24 @@
         "height": 640,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "ask",
+        "url": "ask.html",
+        "title": "Записать встречу?",
+        "width": 876,
+        "height": 96,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": false,
+        "focus": false,
+        "focusable": false,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
+        "visible": false,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

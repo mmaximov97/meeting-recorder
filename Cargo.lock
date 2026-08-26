@@ -2418,6 +2418,7 @@ dependencies = [
  "hound",
  "log",
  "meeting-recorder",
+ "objc2",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

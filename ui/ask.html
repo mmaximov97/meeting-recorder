@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Записать встречу?</title>
+<style>
+/* Окно шире и выше плашки. Слева и снизу — поле под тень (CSS-тень обрезается
+   границей окна), справа — запас, в который плашка уезжает при смахивании: без
+   него она обрывалась бы на границе окна, не долетев до края экрана. Запас
+   висит за краем экрана и кликов не перехватывает. */
+html,body{margin:0;height:100%;background:transparent;overflow:hidden}
+body{
+  font:13px/1.3 -apple-system,system-ui,"SF Pro Text",sans-serif;
+  -webkit-user-select:none;user-select:none;cursor:default;
+  -webkit-font-smoothing:antialiased;
+}
+#wrap{width:380px;margin-left:16px}
+
+/* ── Плашка ────────────────────────────────────────────── */
+/* Пропорции сняты с системного уведомления macOS: значок 38, скругление 18,
+   заголовок 13/600, подпись 12/400. Живого размытия под окном добиться нельзя
+   (backdrop-filter видит только саму страницу, а под ней прозрачное окно),
+   поэтому фон плотный — на глаз он совпадает с тёмным системным материалом. */
+#card{
+  position:relative;display:flex;align-items:center;gap:11px;
+  padding:12px;border-radius:18px;
+  background:rgba(38,38,41,.97);
+  box-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
+  color:#fff;overflow:hidden;
+  will-change:transform;
+}
+
+.ava{width:38px;height:38px;flex:none;border-radius:9px;display:grid;
+  place-items:center;color:#fff;font-weight:600;font-size:15px;
+  background:rgba(255,255,255,.14)}
+.ava.zoom{background:#0B5CFF}
+.ava.teams{background:#6264A7}
+.ava.slack{background:#4A154B}
+.ava.discord{background:#5865F2}
+.ava svg{display:block}
+
+.tx{flex:1;min-width:0}
+/* Трекинг зависит от кегля: крупный текст на глаз кажется разреженным, мелкий
+   наоборот. Одно значение на оба было бы неверным хотя бы для одного из них. */
+.tt{display:block;font-size:13px;font-weight:600;letter-spacing:-.008em;
+  color:rgba(255,255,255,.96)}
+.ts{display:block;font-size:12px;font-weight:400;color:rgba(255,255,255,.56);
+  margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Кнопка — как действие в системном уведомлении: светлое полупрозрачное
+   стекло на тёмной плашке, а не цветная заливка. Цветная читалась бы как
+   веб-кнопка, наклеенная поверх системного окна. */
+.go{flex:none;font:inherit;font-size:13px;font-weight:600;border:none;
+  border-radius:8px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;
+  padding:7px 14px;letter-spacing:-.004em;transition:background 90ms ease-out}
+/* Отклик на НАЖАТИЕ, а не на отпускание: ожидание клика читается как «не
+   сработало». */
+.go:hover{background:rgba(255,255,255,.22)}
+.go:active{background:rgba(255,255,255,.30)}
+
+/* Остаток времени — тонкая линия по нижнему краю плашки. */
+.life{position:absolute;left:0;bottom:0;height:2px;width:0;
+  background:rgba(255,255,255,.30)}
+#card.in .life{animation:life 7s linear forwards}
+@keyframes life{from{width:100%}to{width:0}}
+/* Пауза отсчёта, пока человек читает вопрос.
+   Класс ставит JS по событию из Rust, а НЕ `:hover`: окно принадлежит
+   неактивному приложению, а таким окнам macOS движений мыши не шлёт — `:hover`
+   в нём не срабатывает никогда. Подробности — в `src-tauri/src/audio.rs`,
+   `следить_за_наведением`. */
+/* Селектор длиннее, чем хотелось бы, и это не украшение: сокращённая запись
+   `animation` в правиле выше сама выставляет `animation-play-state: running`,
+   и правило с меньшей специфичностью паузу не поставит — оно просто молча не
+   сработает. */
+body.наведено #card .life{animation-play-state:paused;
+  background:rgba(255,255,255,.55)}
+
+
+[hidden]{display:none !important}
+</style>
+</head>
+<body>
+
+<div id="wrap">
+  <div id="card">
+    <span class="ava" id="ava"></span>
+    <span class="tx">
+      <span class="tt">Записать встречу?</span>
+      <span class="ts" id="src"></span>
+    </span>
+    <button class="go" id="yes">Записать</button>
+    <span class="life" id="life"></span>
+  </div>
+
+</div>
+
+<script src="ask.js"></script>
+</body>
+</html>

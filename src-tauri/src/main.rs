@@ -64,6 +64,47 @@ struct QueueItem {
     base: String,
 }
 
+/// Что стало с записью, которую попросили отменить.
+///
+/// Три исхода, а не «получилось / не получилось», потому что снаружи они
+/// требуют разного: снятую из хвоста очереди никто больше не тронет, и сказать
+/// об этом обязана сама команда; прерванную на ходу объявляет воркер, когда
+/// расшифровка действительно остановится; а неизвестную объявлять некому и
+/// нечего.
+#[derive(PartialEq, Debug)]
+enum Cancelled {
+    /// Записи нет ни в очереди, ни в работе — отменять нечего. Не ошибка:
+    /// расшифровка могла закончиться ровно между показом меню и нажатием.
+    Unknown,
+    /// Стояла в очереди и снята, не начавшись. Внутри — кому и какую позицию
+    /// сообщить заново; идущая запись сюда НЕ попадает (см. `cancel`).
+    Dropped(Vec<(usize, QueueItem)>),
+    /// Обрабатывалась прямо сейчас: воркеру послан сигнал остановиться.
+    Stopped,
+}
+
+/// Изменяемая часть очереди — под одним локом целиком.
+///
+/// Разложить эти три поля по трём мьютексам значило бы завести гонку на ровном
+/// месте: отмена решает, снимать запись из списка или прерывать её на ходу,
+/// ровно по тому, начал ли воркер `items[0]`. Читайся `items` и `running`
+/// порознь, отмена успела бы застать «ещё не начал» между `recv` воркера и
+/// подъёмом флага — и вычеркнула бы из списка запись, которая уже пошла в
+/// работу и всё равно дошла бы до конца.
+#[derive(Default)]
+struct Pending {
+    items: VecDeque<QueueItem>,
+    /// Поднят на всё время обработки `items[0]`, отдельно от `cancel`: послать
+    /// в `oneshot` можно ровно один раз, поэтому после первой отмены `cancel`
+    /// пуст — и без этого флага повторное нажатие приняло бы идущую запись за
+    /// ещё не начатую и вычеркнуло бы её из `items`, а воркер потом снял бы с
+    /// фронта уже чужую.
+    running: bool,
+    /// Куда сказать идущей расшифровке «хватит». `Some` ровно тогда, когда
+    /// `running` поднят и отмены ещё не было.
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
 /// Очередь транскрипций на всё приложение: `items[0]` обрабатывается прямо
 /// сейчас (или вот-вот начнёт), `items[1..]` ждут своей очереди в порядке
 /// постановки.
@@ -77,15 +118,22 @@ struct QueueItem {
 /// порядок в `items` всегда совпадает с порядком, в котором воркер реально
 /// получит записи — иначе позиции, которые видит UI, могли бы разойтись с
 /// тем, что происходит на самом деле.
+///
+/// **Отмена ломает равенство «канал = очередь», но не порядок.** Забрать
+/// запись из середины `tokio::mpsc` нельзя, поэтому `cancel` вычёркивает её
+/// только из `items` — в канале остаётся мёртвая запись. Уцелевшее свойство:
+/// `items` всегда ПОДПОСЛЕДОВАТЕЛЬНОСТЬ того, что ещё лежит в канале. Значит,
+/// пришедшая воркеру запись, не совпавшая с текущим фронтом, — это в точности
+/// отменённая, и её надо пропустить; проверку делает `start_front`.
 struct TranscribeQueue {
-    items: Mutex<VecDeque<QueueItem>>,
+    pending: Mutex<Pending>,
     tx: tokio::sync::mpsc::UnboundedSender<QueueItem>,
 }
 
 impl TranscribeQueue {
     fn new() -> (Self, tokio::sync::mpsc::UnboundedReceiver<QueueItem>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (Self { items: Mutex::new(VecDeque::new()), tx }, rx)
+        (Self { pending: Mutex::new(Pending::default()), tx }, rx)
     }
 
     /// Ставит запись в очередь, если её там ещё нет — двойной клик по кнопке
@@ -93,23 +141,80 @@ impl TranscribeQueue {
     /// Позиция 1-индексирована: 1 — обрабатывается прямо сейчас, 2 —
     /// следующая, и так далее.
     fn enqueue(&self, item: QueueItem) -> Result<usize, String> {
-        let mut items = self.items.lock().map_err(|e| e.to_string())?;
-        if let Some(pos) = items.iter().position(|i| *i == item) {
+        let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
+        if let Some(pos) = pending.items.iter().position(|i| *i == item) {
             return Ok(pos + 1);
         }
-        items.push_back(item.clone());
-        let position = items.len();
+        pending.items.push_back(item.clone());
+        let position = pending.items.len();
         self.tx.send(item).map_err(|_| "воркер транскрипции недоступен".to_string())?;
         Ok(position)
+    }
+
+    /// Воркер получил запись из канала и спрашивает разрешения начать.
+    ///
+    /// `None` — запись отменили, пока она ждала: в `items` её больше нет, а в
+    /// канале осталась мёртвая копия (см. докблок типа). Пропустить её здесь
+    /// обязательно: иначе расшифровка пошла бы после отмены, а `finish_front`
+    /// снял бы с фронта чужую запись.
+    ///
+    /// `Some(rx)` — можно работать, а по этому каналу придёт отмена.
+    fn start_front(&self, item: &QueueItem) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
+        if pending.items.front() != Some(item) {
+            return None;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pending.running = true;
+        pending.cancel = Some(tx);
+        Some(rx)
     }
 
     /// Убирает обработанную запись с фронта и отдаёт тех, кто остался — под
     /// тем же локом, что и `enqueue`, чтобы снимок для пересчёта позиций не
     /// мог оказаться устаревшим уже в момент чтения.
     fn finish_front(&self) -> Vec<QueueItem> {
-        let mut items = self.items.lock().expect("лок очереди транскрипции");
-        items.pop_front();
-        items.iter().cloned().collect()
+        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
+        pending.running = false;
+        pending.cancel = None;
+        pending.items.pop_front();
+        pending.items.iter().cloned().collect()
+    }
+
+    /// Снимает запись с очереди или останавливает её на ходу.
+    ///
+    /// Идущая запись из `items` НЕ вычёркивается: её снимет с фронта
+    /// `finish_front`, когда воркер действительно остановится. Вычеркнуть её
+    /// здесь значило бы сдвинуть фронт под работающим воркером, и тот снял бы
+    /// потом следующую, ни разу не начатую.
+    ///
+    /// В `Dropped` едут только ждущие и только с новыми позициями: идущей
+    /// записи `queued:1` слать нельзя — на экране у неё стадия («отправка»,
+    /// «расшифровка»), и позиция поверх стадии выглядела бы откатом назад.
+    fn cancel(&self, item: &QueueItem) -> Result<Cancelled, String> {
+        let mut pending = self.pending.lock().map_err(|e| e.to_string())?;
+        let Some(pos) = pending.items.iter().position(|i| i == item) else {
+            return Ok(Cancelled::Unknown);
+        };
+        if pos == 0 && pending.running {
+            // `take` — потому что послать в oneshot можно единожды; повторное
+            // нажатие попадёт сюда же по флагу `running` и просто ничего не
+            // сделает.
+            if let Some(tx) = pending.cancel.take() {
+                let _ = tx.send(());
+            }
+            return Ok(Cancelled::Stopped);
+        }
+        pending.items.remove(pos);
+        let skip = usize::from(pending.running);
+        let moved = pending
+            .items
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(|(i, q)| (i + 1, q.clone()))
+            .collect();
+        Ok(Cancelled::Dropped(moved))
     }
 }
 
@@ -122,13 +227,35 @@ impl TranscribeQueue {
 /// ушла тому, кто умеет её показать, через `emit_transcribe_error` внутри
 /// самой функции — здесь важно только то, что очередь обязана двигаться
 /// дальше независимо от того, чем кончилась предыдущая запись.
+///
+/// Отмена идущей записи — это `select!`, который бросает саму расшифровку
+/// недоделанной. Бросить её безопасно ровно потому, что все точки ожидания у
+/// неё сетевые: файлы пишутся сплошным куском в самом конце, между ними нет ни
+/// одного `await`, и оборваться посередине набора `.md`/`.txt` расшифровка не
+/// может. Задание на стороне шлюза при этом остаётся жить — мы всего лишь
+/// перестаём ждать ответ.
 fn spawn_transcribe_worker(
     app: AppHandle,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<QueueItem>,
 ) {
     tauri::async_runtime::spawn(async move {
         while let Some(item) = rx.recv().await {
-            let _ = run_transcription(&item.folder, &item.base, &app).await;
+            let Some(cancel) = app.state::<TranscribeQueue>().start_front(&item) else {
+                // Отменена, пока ждала: об этом уже сказала сама команда.
+                continue;
+            };
+            let stopped = tokio::select! {
+                // `biased` — чтобы уже дошедшая до конца расшифровка считалась
+                // завершённой, а не отменённой: нажатие, опоздавшее на доли
+                // секунды, не должно превращать готовую расшифровку в
+                // «отменено» при том, что файлы на диске уже лежат.
+                biased;
+                _ = run_transcription(item.folder.clone(), item.base.clone(), app.clone()) => false,
+                _ = cancel => true,
+            };
+            if stopped {
+                emit_transcribe_cancelled(&app, &item.folder, &item.base);
+            }
             let remaining = app.state::<TranscribeQueue>().finish_front();
             for (i, next) in remaining.iter().enumerate() {
                 emit_transcribe_progress(&app, &next.folder, &next.base, &format!("queued:{}", i + 1));
@@ -441,7 +568,7 @@ fn list_recordings(cache: tauri::State<Cache>) -> Result<Vec<Recording>, String>
     Ok(list)
 }
 
-/// Открыть каталог записей в проводнике.
+/// Показать каталог в проводнике/Finder.
 ///
 /// Через `explorer.exe` напрямую, без `tauri-plugin-opener`: плагин ради одной
 /// строчки тянул бы за собой ещё и права в capabilities.
@@ -449,18 +576,99 @@ fn list_recordings(cache: tauri::State<Cache>) -> Result<Vec<Recording>, String>
 /// Код возврата не проверяется намеренно: `explorer.exe` возвращает 1 даже когда
 /// окно успешно открылось. Проверять здесь нечего — либо папка открылась, либо
 /// пользователь это увидит сам.
+///
+/// Общая для обеих команд открытия, чтобы способ открытия и это объяснение
+/// жили в одном месте: разъехавшись, они разъедутся молча.
+fn reveal(dir: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(dir);
+    cmd.spawn().map_err(|e| format!("не удалось открыть Finder/проводник: {e}"))?;
+    Ok(())
+}
+
+/// Открыть каталог записей целиком.
 #[tauri::command]
 fn open_folder() -> Result<(), String> {
     let dir = recordings_root();
     // Иначе explorer откроет «Документы» вместо пустого несуществующего пути.
     std::fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
-    #[cfg(target_os = "windows")]
-    let mut cmd = std::process::Command::new("explorer.exe");
-    #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
-    cmd.arg(&dir);
-    cmd.spawn().map_err(|e| format!("не удалось открыть Finder/проводник: {e}"))?;
-    Ok(())
+    reveal(&dir)
+}
+
+/// Имя, пришедшее из окна, должно быть ровно одним шагом пути.
+///
+/// Разбором на компоненты, а не поиском `..` подстрокой: подстрока пропустила
+/// бы `x/../../y`, а разбор — нет. Ровно один `Component::Normal` означает
+/// сразу всё нужное: имя не абсолютное, не корень, не диск (`C:` на Windows),
+/// не `.` и не `..`, и разделителей внутри нет.
+///
+/// Сравнение с исходной строкой нужно потому, что `Path` нормализует на лету:
+/// у `"файл/"` компонент один и он `Normal`, но само имя уже с хвостом, и
+/// пропускать такое незачем.
+fn one_segment(name: &str) -> Result<(), String> {
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(n)), None) if n == std::ffi::OsStr::new(name) => Ok(()),
+        _ => Err(format!("«{name}» — не имя внутри каталога записей")),
+    }
+}
+
+/// Куда ведут пункты «Показать файлы» и «Открыть расшифровку».
+///
+/// Путь собирается ЗДЕСЬ, из корня записей, и ни один его кусок не приходит
+/// готовым: из окна прилетают только имя месячной папки и основа имени записи,
+/// а основу человек мог поменять сам — и через «Переименовать», и руками в
+/// Finder, где на неё нет вообще никаких правил.
+///
+/// Папка проверяется не «на плохие символы», а на то, что она месячная
+/// (`2026-07`): другого места для записей нет — `collect_files` заходит ровно в
+/// такие подпапки и больше никуда, — а семь цифр с дефисом не могут вывести за
+/// пределы корня в принципе. Это строже любого чёрного списка и короче.
+///
+/// Отделено от команды, чтобы проверяться без диска: сборка пути — это ровно
+/// то, что здесь можно сломать незаметно, и файлы ей не нужны.
+fn recording_dir(
+    root: &Path,
+    folder: Option<&str>,
+    base: &str,
+    transcript: bool,
+) -> Result<PathBuf, String> {
+    // Основа проверяется всегда, а не только когда из неё строят подпапку:
+    // правило «всё, что пришло из окна, проверено» держится в голове, а
+    // «проверено в одной ветке из двух» — нет.
+    one_segment(base)?;
+    let mut dir = root.to_path_buf();
+    if let Some(f) = folder {
+        if !is_month_folder(f) {
+            return Err(format!("«{f}» — не месячная папка записей"));
+        }
+        dir.push(f);
+    }
+    if transcript {
+        dir.push(format!("{base}.transcript"));
+    }
+    Ok(dir)
+}
+
+/// Открыть папку конкретной записи: месячную с дорожками или её расшифровку.
+///
+/// Несуществующую папку не создаём, в отличие от `open_folder`: пустой корень
+/// значит «записей ещё не было», а пустая `<имя>.transcript` — враньё, будто
+/// расшифровка есть. Честнее сказать, что открывать нечего.
+#[tauri::command]
+fn open_recording_folder(
+    folder: Option<String>,
+    base: String,
+    transcript: bool,
+) -> Result<(), String> {
+    let dir = recording_dir(&recordings_root(), folder.as_deref(), &base, transcript)?;
+    if !dir.is_dir() {
+        return Err(format!("папки {} нет", dir.display()));
+    }
+    reveal(&dir)
 }
 
 /// Открыть раздел настроек, где выдают разрешение на захват системного звука.
@@ -615,6 +823,15 @@ fn emit_transcribe_error(app: &AppHandle, folder: &Option<String>, base: &str, m
     );
 }
 
+/// Отмена — отдельное событие, а не `transcribe-error`.
+///
+/// Ошибка и отмена выглядят на экране по-разному и должны выглядеть
+/// по-разному: ошибку человек не просил, её показывают красным и предлагают
+/// повторить, а отмену он только что нажал сам — извиняться за неё не за что.
+fn emit_transcribe_cancelled(app: &AppHandle, folder: &Option<String>, base: &str) {
+    let _ = app.emit("transcribe-cancelled", serde_json::json!({ "folder": folder, "base": base }));
+}
+
 /// Ставит запись в очередь и возвращается сразу — саму транскрипцию проводит
 /// `spawn_transcribe_worker`. Позиция > 1 значит «уже что-то обрабатывается
 /// или ждёт впереди» — шлём её в UI тем же событием `transcribe-progress`,
@@ -634,7 +851,40 @@ fn transcribe_recording(
     Ok(())
 }
 
-async fn run_transcription(folder: &Option<String>, base: &str, app: &AppHandle) -> Result<(), String> {
+/// Снять запись с расшифровки: и стоящую в очереди, и идущую прямо сейчас.
+///
+/// Отсутствие записи в очереди — не ошибка: между тем, как человек открыл
+/// меню, и тем, как нажал «Отменить», расшифровка могла спокойно закончиться.
+/// Вернуть здесь `Err` значило бы показать красное сообщение о том, что всё в
+/// порядке.
+#[tauri::command]
+fn cancel_transcription(
+    folder: Option<String>,
+    base: String,
+    app: AppHandle,
+    queue: tauri::State<'_, TranscribeQueue>,
+) -> Result<(), String> {
+    let item = QueueItem { folder: folder.clone(), base: base.clone() };
+    match queue.cancel(&item)? {
+        // Об идущей объявит воркер, когда она действительно остановится:
+        // скажи мы это отсюда, «отменено» появилось бы на экране раньше, чем
+        // расшифровка перестала писать файлы.
+        Cancelled::Stopped => {}
+        Cancelled::Unknown => {}
+        Cancelled::Dropped(moved) => {
+            emit_transcribe_cancelled(&app, &folder, &base);
+            for (position, next) in moved {
+                emit_transcribe_progress(&app, &next.folder, &next.base, &format!("queued:{position}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Значения берутся владением, а не ссылками: расшифровка живёт в `select!`
+/// вместе с каналом отмены и не может одалживать ничего у цикла воркера.
+async fn run_transcription(folder: Option<String>, base: String, app: AppHandle) -> Result<(), String> {
+    let (folder, base, app) = (&folder, base.as_str(), &app);
     let cfg = Config::load(app);
     let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
         (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (
@@ -771,7 +1021,9 @@ fn main() {
             set_transcribe_config,
             set_monitor,
             rename_recording,
-            transcribe_recording
+            transcribe_recording,
+            cancel_transcription,
+            open_recording_folder
         ])
         .setup(move |app| {
             // Приложение строки меню, а не Dock: окно стартует скрытым, крестик
@@ -1233,6 +1485,207 @@ mod tests {
         let (q, _rx) = TranscribeQueue::new();
         q.enqueue(qi("a")).unwrap();
         assert_eq!(q.finish_front(), Vec::<QueueItem>::new());
+    }
+
+
+    // ---- отмена расшифровки -------------------------------------------------
+
+    /// Между тем, как открылось меню «⋯», и тем, как нажали «Отменить»,
+    /// расшифровка успевает закончиться. Это обычный ход событий, а не сбой.
+    #[test]
+    fn отмена_записи_которой_в_очереди_нет_ничего_не_меняет() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        assert_eq!(q.cancel(&qi("b")), Ok(Cancelled::Unknown));
+        assert_eq!(q.finish_front(), Vec::<QueueItem>::new(), "очередь не тронута");
+    }
+
+    /// Позиции пересчитываются той же арифметикой, что и после `finish_front`:
+    /// снялась вторая — третья становится второй.
+    #[test]
+    fn снятая_из_середины_запись_освобождает_позицию_следующим() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.enqueue(qi("c")).unwrap();
+        q.start_front(&qi("a")).expect("первая пошла в работу");
+
+        assert_eq!(q.cancel(&qi("b")), Ok(Cancelled::Dropped(vec![(2, qi("c"))])));
+        assert_eq!(q.finish_front(), vec![qi("c")]);
+    }
+
+    /// Идущей записи новая позиция не сообщается: у неё на экране стадия
+    /// («отправка», «расшифровка»), и `queued:1` поверх стадии читался бы как
+    /// откат назад.
+    #[test]
+    fn идущей_записи_позиция_не_пересылается() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.start_front(&qi("a")).expect("первая пошла в работу");
+
+        assert_eq!(q.cancel(&qi("b")), Ok(Cancelled::Dropped(vec![])));
+    }
+
+    #[test]
+    fn идущая_запись_не_вычёркивается_из_очереди_а_получает_сигнал_остановиться() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        let mut отмена = q.start_front(&qi("a")).expect("первая пошла в работу");
+
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
+        assert!(отмена.try_recv().is_ok(), "сигнал обязан дойти до расшифровки");
+        assert_eq!(
+            q.finish_front(),
+            vec![qi("b")],
+            "с фронта снимается именно отменённая запись, а не следующая"
+        );
+    }
+
+    /// Послать в `oneshot` можно единожды, поэтому после первой отмены канал
+    /// пуст. Без отдельного флага «уже в работе» второе нажатие приняло бы
+    /// идущую запись за ещё не начатую, вычеркнуло бы её из очереди — и
+    /// `finish_front` снял бы с фронта следующую, ни разу не начатую.
+    #[test]
+    fn повторная_отмена_идущей_записи_не_съедает_следующую() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.start_front(&qi("a")).expect("первая пошла в работу");
+
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped), "повтор — не ошибка");
+        assert_eq!(q.finish_front(), vec![qi("b")]);
+    }
+
+    /// Окно между `recv` воркера и началом работы: запись уже первая в
+    /// очереди, но ещё не пошла. Отменить её здесь — значит просто вычеркнуть,
+    /// а не слать сигнал в никуда.
+    #[test]
+    fn ещё_не_начатый_фронт_отменяется_вычёркиванием() {
+        let (q, _rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Dropped(vec![])));
+        assert!(
+            q.start_front(&qi("a")).is_none(),
+            "воркер не имеет права начать отменённую запись"
+        );
+    }
+
+    /// Забрать запись из середины `tokio::mpsc` нельзя, поэтому в канале после
+    /// отмены остаётся мёртвая копия. Ловит её `start_front`, сверяясь с
+    /// фронтом очереди.
+    #[test]
+    fn мёртвая_копия_из_канала_воркеру_работать_не_даёт() {
+        let (q, mut rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.start_front(&qi("a")).expect("первая пошла в работу");
+        q.cancel(&qi("b")).unwrap();
+        q.finish_front();
+
+        assert_eq!(rx.try_recv(), Ok(qi("a")));
+        assert_eq!(rx.try_recv(), Ok(qi("b")), "канал про отмену не знает");
+        assert!(q.start_front(&qi("b")).is_none(), "но работать по ней нельзя");
+    }
+
+    /// Отменили не глядя, спохватились, поставили заново — запись обязана
+    /// пойти в работу, несмотря на мёртвую копию, которая всё ещё лежит в
+    /// канале впереди новой.
+    #[test]
+    fn снятую_запись_можно_поставить_заново() {
+        let (q, mut rx) = TranscribeQueue::new();
+        q.enqueue(qi("a")).unwrap();
+        q.enqueue(qi("b")).unwrap();
+        q.start_front(&qi("a")).expect("первая пошла в работу");
+        q.cancel(&qi("b")).unwrap();
+
+        assert_eq!(q.enqueue(qi("b")), Ok(2), "встала заново, за идущей");
+        q.finish_front();
+        assert_eq!(rx.try_recv(), Ok(qi("a")));
+        assert_eq!(rx.try_recv(), Ok(qi("b")), "мёртвая копия");
+        assert!(q.start_front(&qi("b")).is_some(), "живая постановка — можно работать");
+        assert_eq!(rx.try_recv(), Ok(qi("b")), "а это уже сама постановка");
+    }
+
+    // ---- путь к папке записи ------------------------------------------------
+
+    fn путь(folder: Option<&str>, base: &str, transcript: bool) -> Result<PathBuf, String> {
+        recording_dir(Path::new("/записи"), folder, base, transcript)
+    }
+
+    #[test]
+    fn запись_из_корня_показывается_самим_корнем() {
+        assert_eq!(путь(None, "2026-07-17_14-30_zoom", false), Ok(PathBuf::from("/записи")));
+    }
+
+    #[test]
+    fn запись_из_месячной_папки_показывается_этой_папкой() {
+        assert_eq!(
+            путь(Some("2026-07"), "2026-07-17_14-30_zoom", false),
+            Ok(PathBuf::from("/записи/2026-07"))
+        );
+    }
+
+    #[test]
+    fn расшифровка_лежит_подпапкой_рядом_с_дорожками() {
+        assert_eq!(
+            путь(Some("2026-07"), "2026-07-17_14-30_zoom", true),
+            Ok(PathBuf::from("/записи/2026-07/2026-07-17_14-30_zoom.transcript"))
+        );
+    }
+
+    #[test]
+    fn расшифровка_записи_из_корня_лежит_в_корне() {
+        assert_eq!(
+            путь(None, "2026-07-17_14-30_zoom", true),
+            Ok(PathBuf::from("/записи/2026-07-17_14-30_zoom.transcript"))
+        );
+    }
+
+    /// Из окна приходит имя папки, а не путь. Всё, что не `YYYY-MM`, — не наша
+    /// подпапка: `collect_files` в другие и не заходит.
+    #[test]
+    fn папкой_может_быть_только_месячная() {
+        for чужое in ["..", ".", "/", "2026-7", "2026-07/..", "../2026-07", "чужое"] {
+            assert!(
+                путь(Some(чужое), "2026-07-17_14-30_zoom", false).is_err(),
+                "«{чужое}» не месячная папка и открываться не должна"
+            );
+        }
+    }
+
+    /// Основу человек меняет сам — и «Переименовать», и руками в Finder, где
+    /// правил нет вообще. Уйти по ней вверх из каталога записей нельзя.
+    #[test]
+    fn основа_имени_не_выводит_за_каталог_записей() {
+        for чужое in ["..", ".", "", "../секреты", "a/../../b", "/etc/passwd", "запись/"] {
+            assert!(
+                путь(Some("2026-07"), чужое, true).is_err(),
+                "«{чужое}» не имя записи и открываться не должно"
+            );
+        }
+    }
+
+    /// Проверка основы не зависит от того, в подпапку идём или нет: правило
+    /// «всё, что пришло из окна, проверено» не должно держаться на ветке.
+    #[test]
+    fn чужая_основа_отвергается_и_без_расшифровки() {
+        assert!(путь(Some("2026-07"), "../секреты", false).is_err());
+    }
+
+    /// Кириллица, точки и пробелы внутри имени — обычное дело после
+    /// переименования; отвергать их незачем.
+    #[test]
+    fn обычное_переименованное_имя_проходит() {
+        assert_eq!(
+            путь(Some("2026-07"), "2026-07-17_14-30_созвон с артёмом v1.2", true),
+            Ok(PathBuf::from(
+                "/записи/2026-07/2026-07-17_14-30_созвон с артёмом v1.2.transcript"
+            ))
+        );
     }
 
     // ---- tauri.conf.json ----------------------------------------------------

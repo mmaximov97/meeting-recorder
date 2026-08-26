@@ -87,10 +87,13 @@ button.sec:hover{border-color:var(--accent)}
   -webkit-mask-image:repeating-linear-gradient(to right,#000 0 3px,transparent 3px 6px);
           mask-image:repeating-linear-gradient(to right,#000 0 3px,transparent 3px 6px)}
 .disc>.t{background:var(--line)}
+/* Пиковый маркер: держит недавний максимум и сползает к текущему уровню. */
+.disc>b{position:absolute;top:0;bottom:0;width:2px;left:var(--peak,0%);background:var(--fg)}
+/* 70% и 90% — это ровно -18 дБ и -6 дБ на шкале -60..0. */
 .disc>.f{background:linear-gradient(to right,
-    var(--good) 0%,var(--good) 68%,var(--warn) 68%,var(--warn) 88%,
-    var(--error) 88%,var(--error) 100%);
-  clip-path:inset(0 calc(100% - var(--lv,0%)) 0 0);transition:clip-path .1s linear}
+    var(--good) 0%,var(--good) 70%,var(--warn) 70%,var(--warn) 90%,
+    var(--error) 90%,var(--error) 100%);
+  clip-path:inset(0 calc(100% - var(--level,0%)) 0 0);transition:clip-path .12s linear}
 .disc.sm{height:8px}
 
 /* ── Список ────────────────────────────────────────────── */
@@ -204,37 +207,42 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   border:1px solid var(--line);box-shadow:0 24px 60px rgba(0,0,0,.55)}
 .desktop .fake{position:absolute;inset:44px 24px 24px;border-radius:10px;
   background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06)}
-.toast{position:absolute;top:14px;right:14px;left:14px;
-  background:rgba(28,30,44,.93);backdrop-filter:blur(14px);
-  border:1px solid rgba(192,202,245,.14);border-radius:14px;padding:11px 12px;
-  display:flex;align-items:center;gap:11px;
-  box-shadow:0 16px 40px rgba(0,0,0,.5);overflow:hidden;
-  animation:drop .38s cubic-bezier(.22,1.2,.36,1)}
-@keyframes drop{from{transform:translateY(-130%);opacity:0}to{transform:none;opacity:1}}
-.toast .ava{width:32px;height:32px;border-radius:8px}
+/* Плашка снята с системного уведомления macOS, а не с токенов приложения:
+   это отдельное окно поверх чужих окон, и выглядеть оно должно как часть
+   системы. Живого размытия под ней добиться нельзя (под окном прозрачность,
+   а не страница), поэтому фон плотный. Собрано по ui/ask.html — правишь
+   там, правь здесь. */
+.toast{position:absolute;top:14px;right:14px;width:380px;
+  background:rgba(38,38,41,.97);border-radius:18px;padding:12px;
+  display:flex;align-items:center;gap:11px;color:#fff;
+  box-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
+  overflow:hidden;animation:drop .38s cubic-bezier(.22,1.2,.36,1)}
+@keyframes drop{from{transform:translateY(-130%)}to{transform:none}}
+.toast .ava{width:38px;height:38px;border-radius:9px;border:none;
+  background:rgba(255,255,255,.14);color:#fff;font-size:15px}
+.toast .ava.zoom{background:#0B5CFF}
+.toast .ava.teams{background:#6264A7}
+.toast .ava.slack{background:#4A154B}
+.toast .ava.discord{background:#5865F2}
 .toast .tx{flex:1;min-width:0}
-.toast .tt{font-size:13px;font-weight:600}
-.toast .ts{font-size:12px;color:var(--muted)}
-.toast .go{display:flex;align-items:center;background:var(--accent);color:var(--on-accent);
-  border-radius:9px;overflow:hidden;flex:none}
-.toast .go>button{font:inherit;font-size:13px;font-weight:600;border:none;
-  background:transparent;color:inherit;cursor:pointer;padding:8px 11px;
-  display:flex;align-items:center;gap:6px}
-.toast .go>.d{border-left:1px solid rgba(26,27,38,.28);padding:8px 7px}
-.toast .life{position:absolute;left:0;bottom:0;height:2px;background:var(--muted);
-  opacity:.5;animation:life 7s linear forwards}
-.toast:hover .life{animation-play-state:paused;background:var(--accent);opacity:.8}
+.toast .tt{display:block;font-size:13px;font-weight:600;letter-spacing:-.008em;
+  color:rgba(255,255,255,.96)}
+.toast .ts{display:block;margin-top:1px;font-size:12px;color:rgba(255,255,255,.56);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Кнопка — светлое стекло на тёмной плашке, а не цветная заливка: цветная
+   читалась бы как веб-кнопка, наклеенная поверх системного окна. */
+.toast .go{flex:none;font:inherit;font-size:13px;font-weight:600;border:none;
+  border-radius:8px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;
+  padding:7px 14px;letter-spacing:-.004em}
+.toast .go:hover{background:rgba(255,255,255,.22)}
+.toast .life{position:absolute;left:0;bottom:0;height:2px;
+  background:rgba(255,255,255,.30);animation:life 7s linear forwards}
+.toast:hover .life{animation-play-state:paused;background:rgba(255,255,255,.55)}
 .toast{cursor:grab;transition:transform .18s ease,opacity .18s ease}
 .toast.away{transform:translateX(115%);opacity:0}
-.tmenu{position:absolute;top:74px;right:14px;z-index:9;min-width:212px;
-  background:rgba(31,33,48,.97);backdrop-filter:blur(14px);
-  border:1px solid rgba(192,202,245,.14);border-radius:11px;padding:4px;
-  box-shadow:0 16px 40px rgba(0,0,0,.55)}
-.tmenu button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;
-  padding:8px 10px;border-radius:7px;border:none;background:transparent;
-  color:var(--fg);cursor:pointer}
-.tmenu button:hover{background:var(--hover)}
-.tmenu .sep{height:1px;background:rgba(192,202,245,.12);margin:4px 6px}
+.armed{display:flex;gap:10px;align-items:center;padding:0 1px;margin-bottom:12px}
+.armed>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:13px;line-height:1.4;color:var(--muted)}
 .swipe-hint{position:absolute;left:0;right:0;top:96px;text-align:center;font-size:11px;
   color:rgba(192,202,245,.45)}
 @keyframes life{from{width:100%}to{width:0}}
@@ -247,6 +255,7 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
   <h3>Состояние</h3>
   <button data-s="idle" aria-pressed="true">Покой</button>
   <button data-s="toast">Всплывашка «похоже, встреча»</button>
+  <button data-s="armed">Взвод — окно открыли, пока вопрос висит</button>
   <button data-s="recording">Идёт запись</button>
   <button data-s="menu">Меню — обычная запись</button>
   <button data-s="menudone">Меню — уже расшифрована</button>
@@ -271,24 +280,15 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 <div class="desktop" id="desktop" hidden>
   <div class="fake"></div>
   <div class="toast">
-    <span class="ava brand zoom" style="width:32px;height:32px;border-radius:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M5.033 14.649H.743a.74.74 0 0 1-.686-.458.74.74 0 0 1 .16-.808L3.19 10.41H1.06A1.06 1.06 0 0 1 0 9.35h3.957c.301 0 .57.18.686.458a.74.74 0 0 1-.161.808L1.51 13.59h2.464c.585 0 1.06.475 1.06 1.06zM24 11.338c0-1.14-.927-2.066-2.066-2.066-.61 0-1.158.265-1.537.686a2.061 2.061 0 0 0-1.536-.686c-1.14 0-2.066.926-2.066 2.066v3.311a1.06 1.06 0 0 0 1.06-1.06v-2.251a1.004 1.004 0 0 1 2.013 0v2.251c0 .586.474 1.06 1.06 1.06v-3.311a1.004 1.004 0 0 1 2.012 0v2.251c0 .586.475 1.06 1.06 1.06zM16.265 12a2.728 2.728 0 1 1-5.457 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0zm-4.82 0a2.728 2.728 0 1 1-5.458 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0z"/></svg></span>
+    <span class="ava zoom"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M5.033 14.649H.743a.74.74 0 0 1-.686-.458.74.74 0 0 1 .16-.808L3.19 10.41H1.06A1.06 1.06 0 0 1 0 9.35h3.957c.301 0 .57.18.686.458a.74.74 0 0 1-.161.808L1.51 13.59h2.464c.585 0 1.06.475 1.06 1.06zM24 11.338c0-1.14-.927-2.066-2.066-2.066-.61 0-1.158.265-1.537.686a2.061 2.061 0 0 0-1.536-.686c-1.14 0-2.066.926-2.066 2.066v3.311a1.06 1.06 0 0 0 1.06-1.06v-2.251a1.004 1.004 0 0 1 2.013 0v2.251c0 .586.474 1.06 1.06 1.06v-3.311a1.004 1.004 0 0 1 2.012 0v2.251c0 .586.475 1.06 1.06 1.06zM16.265 12a2.728 2.728 0 1 1-5.457 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0zm-4.82 0a2.728 2.728 0 1 1-5.458 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0z"/></svg></span>
     <span class="tx">
       <span class="tt">Записать встречу?</span>
       <span class="ts">Zoom</span>
     </span>
-    <span class="go">
-      <button><svg width="12" height="12" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor"/></svg>Записать</button>
-      <button class="d" id="toast-more" aria-label="Другие варианты"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg></button>
-    </span>
+    <button class="go">Записать</button>
     <span class="life"></span>
   </div>
-  <div class="tmenu" id="tmenu" hidden>
-    <button>Не записывать</button>
-    <button>Записать только меня</button>
-    <div class="sep"></div>
-    <button>Не спрашивать про Zoom сегодня</button>
-  </div>
-  <div class="swipe-hint">Смахните вправо двумя пальцами</div>
+  <div class="swipe-hint">Смахните вправо двумя пальцами — это «не записывать»</div>
 </div>
 
 <!-- ═══ Главное окно ═══ -->
@@ -303,6 +303,17 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
     </div>
 
     <div class="pinned">
+      <!-- Взвод. Вопроса здесь нет: его задаёт всплывашка, и второй раз
+           спрашивать о том же в окне значит показывать один вопрос в двух
+           местах. Остаётся состояние — «слышу встречу, жду», — поэтому строка
+           без рамки, а не баннер. «Да» говорит акцентная кнопка ниже: во взводе
+           она подтверждает вопрос. «Нет» стоит здесь, потому что сказать его
+           больше негде — всплывашка уезжает через семь секунд. -->
+      <div class="armed" id="armed" hidden>
+        <span>Похоже, встреча в Zoom</span>
+        <button class="sec">Не записывать</button>
+      </div>
+
       <div class="banner" id="nosys" hidden>
         <span>Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут.</span>
         <button class="sec">Открыть</button>
@@ -324,11 +335,11 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
         </div>
         <div class="mtr">
           <span class="ic" title="Ваш микрофон"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
-          <span class="disc sm"><span class="t"></span><span class="f" style="--lv:62%"></span></span>
+          <span class="disc sm"><span class="t"></span><span class="f" style="--level:62%"></span><b style="--peak:68%"></b></span>
         </div>
         <div class="mtr">
           <span class="ic" title="Звук системы — то, что слышно от собеседников"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
-          <span class="disc sm"><span class="t"></span><span class="f" style="--lv:38%"></span></span>
+          <span class="disc sm"><span class="t"></span><span class="f" style="--level:38%"></span><b style="--peak:44%"></b></span>
         </div>
       </div>
     </div>
@@ -361,15 +372,15 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
     <div class="body">
       <h2>Микрофон</h2>
       <div class="row">
-        <select><option>MacBook Pro Microphone</option><option>Системный по умолчанию</option></select>
+        <select><option>MacBook Pro Microphone</option><option>Как выбрано в системе</option></select>
         <button class="sec">Проверить</button>
       </div>
       <div style="margin-top:14px">
-        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--lv:58%"></span></span></div>
-        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--lv:34%"></span></span></div>
+        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:58%"></span><b style="--peak:65%"></b></span></div>
+        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:34%"></span><b style="--peak:41%"></b></span></div>
       </div>
-      <div class="hint">Говорите обычным голосом: полоска должна доходить примерно до середины и не залезать в красное.</div>
-      <div class="hint">Новый микрофон включится со следующей записи — та, что идёт сейчас, пишется прежним.</div>
+      <div class="hint">Говорите обычным голосом: полоска должна доходить примерно до конца зелёного и не залезать в красное.</div>
+      <div class="hint">Запись, которая идёт сейчас, пишется микрофоном «MacBook Pro Microphone». Новый включится со следующей.</div>
 
       <h2>Расшифровка встреч</h2>
       <div class="row" style="margin-bottom:8px"><input type="text" placeholder="Адрес сервера" value="http://10.0.0.3:8080" /></div>
@@ -399,12 +410,12 @@ const DATA = [
     {ic:"zoom",  n:"Zoom",           t:"10:00–10:40", d:"40 мин", w:"12 МБ"},
     {ic:"other", n:"Разбор метрик",  t:"14:30–15:05", d:"35 мин", w:"10 МБ", tr:true},
     {ic:"teams", n:"Teams",          t:"16:00–16:25", d:"25 мин", w:"7 МБ",
-       badTitle:"Собеседников не слышно", bad:"Записан только ваш микрофон. Скорее всего, не было доступа к звуку системы."}
+       badTitle:"Собеседников не слышно", bad:"Записан только ваш микрофон: похоже, приложению не разрешили писать звук системы. Проверьте разрешение, иначе следующая запись выйдет такой же."}
   ]],
   ["Вчера", [
     {ic:"slack", n:"Slack",  t:"11:00–11:20", d:"20 мин", w:"6 МБ"},
     {ic:"zoom",  n:"Zoom",   t:"15:00–16:10", d:"1 ч 10 мин", w:"21 МБ",
-       badTitle:"Вас слышно заметно тише", bad:"Ваш микрофон записался намного тише собеседников — расшифровка может пропустить ваши реплики."}
+       badTitle:"Вас слышно заметно тише", bad:"Ваш микрофон записался намного тише собеседников — расшифровка может пропустить ваши реплики. Проверьте его в настройках перед следующей встречей."}
   ]],
   ["15 июля", [
     {ic:"other", n:"Планёрка", t:"09:00–09:15", d:"15 мин", w:"4 МБ"}
@@ -422,8 +433,7 @@ function rowHTML(r, i, extra){
     card = " card";
     sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;
     note = `<div class="note"><span class="ni"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12v4" /> <path d="M12 20h.01" /> <path d="M8.128 16.949A7 7 0 1 1 15.71 8h1.79a1 1 0 0 1 0 9h-1.642" /></svg></span><span class="nt"><b>Расшифровка не получилась</b>
-      Сервер не ответил. Запись цела — можно попробовать ещё раз или проверить адрес
-      в настройках.<br><button class="act">Попробовать снова</button></span></div>`;
+      Запись цела — можно попробовать ещё раз или проверить адрес сервера в настройках.<br><button class="act">Попробовать снова</button></span></div>`;
   } else if (r.bad){
     card = " card";
     sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;
@@ -485,6 +495,7 @@ function apply(s){
   show("screen-list", !settings); show("screen-settings", settings);
   if (settings) return;
 
+  show("armed", s === "armed");
   show("nosys", s === "nosys");
   show("rec-btn", s !== "recording");
   show("rec-panel", s === "recording");
@@ -513,9 +524,9 @@ document.querySelectorAll(".panel button").forEach(b=>{
     app.dataset.s=b.dataset.s; apply(b.dataset.s);
   });
 });
-// всплывашка: смахнуть вверх, меню по стрелке
+// всплывашка: смахивание вправо — это «не записывать»
 (function(){
-  const t=document.querySelector(".toast"), m=document.getElementById("tmenu");
+  const t=document.querySelector(".toast");
   let y0=null;
   // два пальца по трекпаду = событие колеса с горизонтальным сдвигом
   let acc=0, back=null;
@@ -538,8 +549,6 @@ document.querySelectorAll(".panel button").forEach(b=>{
     if(d>50){t.classList.add("away");t.style.transform="";t.style.opacity="";
       setTimeout(()=>{t.classList.remove("away")},1400);}
     else{t.style.transform="";t.style.opacity="";}});
-  document.getElementById("toast-more").addEventListener("click",e=>{
-    e.stopPropagation(); m.hidden=!m.hidden;});
 })();
 document.getElementById("to-settings").addEventListener("click",()=>apply("settings"));
 document.getElementById("to-list").addEventListener("click",()=>apply("idle"));

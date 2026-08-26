@@ -19,7 +19,7 @@ use imbalance::Cache;
 use meeting_recorder::session::Event;
 use serde::Serialize;
 use status::{Snapshot, Status};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
@@ -151,6 +151,16 @@ struct Recording {
     system: bool,
     /// Суммарный размер дорожек в байтах.
     size: u64,
+    /// Рядом с дорожками лежит папка `<name>.transcript` с готовой расшифровкой.
+    ///
+    /// Только «да/нет»: разбирать содержимое папки незачем — окну нужно лишь
+    /// решить, предлагать ли «Открыть расшифровку» вместо «Расшифровать».
+    transcript: bool,
+    /// Длительность записи в секундах — по более полной из двух дорожек.
+    ///
+    /// Не по `size`: там сумма обеих дорожек, и оборвавшаяся дорожка сделала бы
+    /// из 25 минут «40». См. `duration_sec`.
+    duration_sec: u32,
     /// Насколько mic-дорожка тише system, в дБ. Заполняется в `list_recordings`
     /// после группировки — считать это здесь значило бы тащить в чистую
     /// функцию чтение файлов.
@@ -190,6 +200,35 @@ fn get_state(status: tauri::State<Status>) -> Snapshot {
     status.snapshot()
 }
 
+/// Сколько байт занимает секунда записи.
+///
+/// Формат дорожки задан в одном месте — `storage::WavSink::create`: моно,
+/// `SAMPLE_RATE`, 16 бит на отсчёт. Считаем отсюда, а не константой 32000,
+/// чтобы смена частоты дискретизации в ядре не оставила здесь молча врущую
+/// арифметику.
+const WAV_BYTES_PER_SEC: u64 = meeting_recorder::storage::SAMPLE_RATE as u64 * 2;
+
+/// Длина заголовка WAV, который пишет `hound` для моно 16 бит.
+///
+/// `hound` выбирает `PCMWAVEFORMAT` для всего, что не больше двух каналов и не
+/// глубже 16 бит (`WavWriter::new_with_spec_ex`), а у него заголовок ровно 44
+/// байта: RIFF (12) + `fmt ` (24) + шапка `data` (8). Величина мелкая — 44
+/// байта это 1,4 мс, — но вычитается честно, чтобы недописанный файл из одного
+/// заголовка давал ноль, а не единицу.
+const WAV_HEADER_BYTES: u64 = 44;
+
+/// Длительность дорожки в секундах по её размеру на диске.
+///
+/// Читать заголовок каждого файла было бы точнее лишь на бумаге: длину данных
+/// `hound` пишет туда же, откуда мы её и берём, — из размера файла, — а обход
+/// каталога и так знает размер из `metadata()`, без единого открытия файла.
+///
+/// Обрезка вниз намеренная: «40 мин» у записи 40:59 честнее, чем «41».
+/// `saturating_sub` закрывает недописанный или чужой файл короче заголовка.
+fn duration_sec(track_bytes: u64) -> u32 {
+    (track_bytes.saturating_sub(WAV_HEADER_BYTES) / WAV_BYTES_PER_SEC) as u32
+}
+
 /// Склеить дорожки в записи по основе имени И папке.
 ///
 /// Имя дорожки — `{основа}.{mic|system}.wav`, где основа это
@@ -227,6 +266,12 @@ fn get_state(status: tauri::State<Status>) -> Snapshot {
 /// порядок и есть хронологический. Наверх список отдаётся перевёрнутым:
 /// свежее сверху.
 ///
+/// `transcripts` — ключи `(основа, папка)` найденных рядом папок
+/// `<основа>.transcript`, тем же ключом, что и группировка. Одинокая папка
+/// расшифровки записи НЕ создаёт: пометка ставится только той паре, у которой
+/// на диске есть хотя бы одна дорожка, — иначе в списке появилась бы запись
+/// без единого файла, которую нельзя ни открыть, ни удалить.
+///
 /// Отделено от обхода каталога намеренно: правило склейки — это единственное
 /// здесь, что можно сломать незаметно (отсутствие дорожки в паре UI показывает
 /// предупреждением, и ошибка в группировке выглядела бы как испорченная запись).
@@ -234,6 +279,7 @@ fn get_state(status: tauri::State<Status>) -> Snapshot {
 /// ради логики, которой файлы не нужны.
 fn group_recordings(
     files: impl IntoIterator<Item = (Option<String>, String, u64)>,
+    transcripts: &HashSet<(String, Option<String>)>,
 ) -> Vec<Recording> {
     let mut found: BTreeMap<(String, Option<String>), Recording> = BTreeMap::new();
     for (folder, file, size) in files {
@@ -245,12 +291,15 @@ fn group_recordings(
             _ => continue,
         };
         let key = (base.clone(), folder.clone());
+        let transcript = transcripts.contains(&key);
         let rec = found.entry(key).or_insert(Recording {
             name: base,
             folder,
             mic: false,
             system: false,
             size: 0,
+            transcript,
+            duration_sec: 0,
             imbalance_db: None,
         });
         if is_mic {
@@ -259,6 +308,9 @@ fn group_recordings(
             rec.system = true;
         }
         rec.size += size;
+        // Именно max, а не сумма: дорожки пишутся параллельно, и запись длится
+        // столько, сколько длится более полная из них.
+        rec.duration_sec = rec.duration_sec.max(duration_sec(size));
     }
     found.into_values().rev().collect()
 }
@@ -272,29 +324,55 @@ fn is_month_folder(name: &str) -> bool {
         && b[5..].iter().all(u8::is_ascii_digit)
 }
 
+/// Что нашлось в каталоге записей за один обход.
+///
+/// Дорожки и папки расшифровок собираются вместе, потому что берутся из одного
+/// и того же `read_dir`: второй проход по тому же дереву стоил бы столько же,
+/// сколько первый, и мог бы застать каталог уже изменившимся.
+#[derive(Default, PartialEq, Debug)]
+struct Found {
+    /// `(папка, имя файла, размер)` — всё, что лежит файлами.
+    files: Vec<(Option<String>, String, u64)>,
+    /// `(основа, папка)` записей, у которых рядом есть `<основа>.transcript`.
+    transcripts: HashSet<(String, Option<String>)>,
+}
+
 /// Файлы корня плюс файлы месячных подпапок. Глубина ровно два уровня:
 /// предсказуемо и не засасывает чужое дерево, если рядом окажется постороннее.
-fn collect_files(root: &Path) -> Result<Vec<(Option<String>, String, u64)>, String> {
-    fn read(dir: &Path, folder: Option<&str>, out: &mut Vec<(Option<String>, String, u64)>) {
+///
+/// Каталоги не пропускаются целиком, как раньше: `<основа>.transcript` — это
+/// папка (внутри `.md` и `.txt`, см. `run_transcription`), и другого признака
+/// готовой расшифровки на диске нет. Внутрь мы не заходим — имени папки
+/// достаточно, чтобы ответить «расшифровка есть».
+fn collect_files(root: &Path) -> Result<Found, String> {
+    fn read(dir: &Path, folder: Option<&str>, out: &mut Found) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for e in entries.flatten() {
-            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                out.push((
+            let name = e.file_name().to_string_lossy().into_owned();
+            match e.file_type() {
+                Ok(t) if t.is_file() => out.files.push((
                     folder.map(str::to_string),
-                    e.file_name().to_string_lossy().into_owned(),
+                    name,
                     e.metadata().map(|m| m.len()).unwrap_or(0),
-                ));
+                )),
+                Ok(t) if t.is_dir() => {
+                    if let Some(base) = name.strip_suffix(".transcript") {
+                        out.transcripts
+                            .insert((base.to_string(), folder.map(str::to_string)));
+                    }
+                }
+                _ => {}
             }
         }
     }
 
-    let mut out = Vec::new();
+    let mut out = Found::default();
     let entries = match std::fs::read_dir(root) {
         Ok(e) => e,
         // Каталога нет — записей просто ещё не было. Это не ошибка.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found::default()),
         Err(e) => return Err(format!("не удалось прочитать {}: {e}", root.display())),
     };
     let mut months: Vec<PathBuf> = Vec::new();
@@ -302,7 +380,14 @@ fn collect_files(root: &Path) -> Result<Vec<(Option<String>, String, u64)>, Stri
         let name = e.file_name().to_string_lossy().into_owned();
         match e.file_type() {
             Ok(t) if t.is_dir() && is_month_folder(&name) => months.push(e.path()),
-            Ok(t) if t.is_file() => out.push((
+            // Расшифровка записи, которая осталась в корне и не переехала в
+            // месячную папку, лежит тоже в корне — рядом со своими дорожками.
+            Ok(t) if t.is_dir() => {
+                if let Some(base) = name.strip_suffix(".transcript") {
+                    out.transcripts.insert((base.to_string(), None));
+                }
+            }
+            Ok(t) if t.is_file() => out.files.push((
                 None,
                 name,
                 e.metadata().map(|m| m.len()).unwrap_or(0),
@@ -335,7 +420,8 @@ fn collect_files(root: &Path) -> Result<Vec<(Option<String>, String, u64)>, Stri
 #[tauri::command]
 fn list_recordings(cache: tauri::State<Cache>) -> Result<Vec<Recording>, String> {
     let root = recordings_root();
-    let mut list = group_recordings(collect_files(&root)?);
+    let found = collect_files(&root)?;
+    let mut list = group_recordings(found.files, &found.transcripts);
     for r in &mut list {
         // Пометка имеет смысл только для полной пары: одинокая дорожка уже
         // помечена как неполная, и второе предупреждение о ней ничего не добавит.
@@ -756,6 +842,8 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Запись без расшифровки и нулевой длительности: размеры в этих тестах
+    /// исчисляются десятками байт, то есть меньше секунды звука.
     fn rec(name: &str, folder: Option<&str>, mic: bool, system: bool, size: u64) -> Recording {
         Recording {
             name: name.to_string(),
@@ -763,16 +851,37 @@ mod tests {
             mic,
             system,
             size,
+            transcript: false,
+            duration_sec: 0,
             imbalance_db: None,
         }
     }
 
     fn group(files: &[(Option<&str>, &str, u64)]) -> Vec<Recording> {
+        group_with(files, &[])
+    }
+
+    /// То же, что `group`, но с найденными рядом папками `<основа>.transcript`
+    /// — ключом `(основа, папка)`, каким их отдаёт `collect_files`.
+    fn group_with(
+        files: &[(Option<&str>, &str, u64)],
+        transcripts: &[(&str, Option<&str>)],
+    ) -> Vec<Recording> {
+        let transcripts: HashSet<(String, Option<String>)> = transcripts
+            .iter()
+            .map(|(b, f)| (b.to_string(), f.map(str::to_string)))
+            .collect();
         group_recordings(
             files
                 .iter()
                 .map(|(f, n, s)| (f.map(str::to_string), n.to_string(), *s)),
+            &transcripts,
         )
+    }
+
+    /// Дорожка длиной ровно `sec` секунд: заголовок плюс отсчёты.
+    fn wav_bytes(sec: u64) -> u64 {
+        WAV_HEADER_BYTES + sec * WAV_BYTES_PER_SEC
     }
 
     #[test]
@@ -914,6 +1023,157 @@ mod tests {
         assert!(!is_month_folder("2026-07-30"));
         assert!(!is_month_folder("архив"));
         assert!(!is_month_folder(""));
+    }
+
+    // ---- расшифровка ---------------------------------------------------------
+
+    /// Гвоздь задачи: раньше обход каталога пропускал всё, что не файл, а
+    /// расшифровка лежит именно папкой — окно предлагало расшифровать заново
+    /// уже расшифрованную запись, и так каждый раз.
+    #[test]
+    fn папка_расшифровки_рядом_помечает_запись() {
+        let files = [
+            (None, "2026-07-17_14-45_zoom.mic.wav", 100),
+            (None, "2026-07-17_14-45_zoom.system.wav", 20),
+        ];
+        assert!(
+            !group_with(&files, &[])[0].transcript,
+            "без папки рядом расшифровки нет"
+        );
+        assert!(
+            group_with(&files, &[("2026-07-17_14-45_zoom", None)])[0].transcript,
+            "папка 2026-07-17_14-45_zoom.transcript рядом с дорожками и есть признак расшифровки"
+        );
+    }
+
+    /// Ключ пометки — тот же `(основа, папка)`, что и у группировки. Одна
+    /// основа может лежать в двух папках сразу (см.
+    /// `одна_основа_в_двух_папках_даёт_две_неполные_записи_а_не_одну_целую`), и
+    /// расшифровка корневой половины не имеет отношения к половине в `2026-07`.
+    #[test]
+    fn расшифровка_из_другой_папки_не_приписывается_записи() {
+        let list = group_with(
+            &[
+                (Some("2026-07"), "2026-07-30_13-03_chrome.mic.wav", 10),
+                (None, "2026-07-30_13-03_chrome.system.wav", 20),
+            ],
+            &[("2026-07-30_13-03_chrome", None)],
+        );
+        assert_eq!(
+            list.iter().map(|r| r.transcript).collect::<Vec<_>>(),
+            vec![false, true],
+            "помечена обязана быть корневая запись, а не тёзка из месячной папки"
+        );
+    }
+
+    /// Папка расшифровки, у которой дорожки удалили руками, — не запись:
+    /// открывать и переименовывать в ней нечего, а в списке она выглядела бы
+    /// целой строкой без единого файла.
+    #[test]
+    fn одинокая_папка_расшифровки_не_создаёт_запись() {
+        assert_eq!(group_with(&[], &[("2026-07-17_14-45_zoom", None)]), vec![]);
+    }
+
+    /// Единственный тест здесь, которому нужен настоящий диск: остальное про
+    /// расшифровку — чистая логика, а вот «обход видит папку, а не только
+    /// файлы» проверяется только обходом. Раньше `collect_files` отбрасывал всё,
+    /// что не файл, и никакая правка группировки этого бы не исправила.
+    #[test]
+    fn обход_каталога_находит_папки_расшифровок_и_в_корне_и_в_месяце() {
+        let root = std::env::temp_dir().join(format!("mr-collect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("2026-06-01_10-00_zoom.transcript")).unwrap();
+        std::fs::create_dir_all(root.join("2026-07/2026-07-30_13-03_chrome.transcript")).unwrap();
+        std::fs::create_dir_all(root.join("архив")).unwrap();
+        std::fs::write(root.join("2026-06-01_10-00_zoom.mic.wav"), b"x").unwrap();
+
+        let found = collect_files(&root).unwrap();
+        let mut got: Vec<_> = found.transcripts.iter().cloned().collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("2026-06-01_10-00_zoom".to_string(), None),
+                (
+                    "2026-07-30_13-03_chrome".to_string(),
+                    Some("2026-07".to_string())
+                ),
+            ],
+            "папка месяца и посторонний каталог расшифровками не считаются"
+        );
+        assert_eq!(
+            found.files,
+            vec![(None, "2026-06-01_10-00_zoom.mic.wav".to_string(), 1)],
+            "дорожки собираются как и раньше, внутрь .transcript обход не заходит"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- длительность --------------------------------------------------------
+
+    /// Караул при правке формата записи: `duration_sec` считается по размеру
+    /// файла, и смена частоты дискретизации или разрядности тихо сделает из неё
+    /// вранье в разы.
+    #[test]
+    fn секунда_дорожки_весит_32000_байт() {
+        assert_eq!(
+            WAV_BYTES_PER_SEC, 32_000,
+            "\n\
+             Формат дорожки изменился: моно 16 бит при 16000 Гц — это 32000 байт\n\
+             в секунду (src/storage.rs, WavSink::create).\n\
+             \n\
+             Длительность записи считается по размеру файла, а не по заголовку,\n\
+             поэтому новый формат обязан приехать сюда вместе с правкой ядра —\n\
+             иначе окно покажет «40 мин» там, где записано 20.\n"
+        );
+    }
+
+    /// Гвоздь задачи: `size` — сумма дорожек, и делить её пополам нельзя.
+    /// Ровно тот случай, который окно и так помечает предупреждением: system
+    /// оборвалась на 25-й минуте, mic писался все 40. Оценка по сумме дала бы
+    /// 32 минуты — не длительность ни одной из дорожек.
+    #[test]
+    fn длительность_считается_по_более_полной_дорожке_а_не_по_сумме() {
+        let list = group(&[
+            (None, "2026-07-17_14-45_zoom.mic.wav", wav_bytes(2400)),
+            (None, "2026-07-17_14-45_zoom.system.wav", wav_bytes(1500)),
+        ]);
+        assert_eq!(list[0].duration_sec, 2400, "40 минут, а не 32 и не 65");
+        assert_eq!(
+            list[0].size,
+            wav_bytes(2400) + wav_bytes(1500),
+            "size остаётся суммой — на нём держится показ занятого места"
+        );
+    }
+
+    #[test]
+    fn порядок_обхода_дорожек_на_длительность_не_влияет() {
+        let list = group(&[
+            (None, "2026-07-17_14-45_zoom.system.wav", wav_bytes(1500)),
+            (None, "2026-07-17_14-45_zoom.mic.wav", wav_bytes(2400)),
+        ]);
+        assert_eq!(list[0].duration_sec, 2400);
+    }
+
+    #[test]
+    fn у_одинокой_дорожки_длительность_её_собственная() {
+        let list = group(&[(None, "2026-07-17_14-45_zoom.mic.wav", wav_bytes(600))]);
+        assert_eq!(list[0].duration_sec, 600);
+    }
+
+    /// Показать «10 мин» у записи 9:59 — соврать в большую сторону. Обрезаем вниз.
+    #[test]
+    fn неполная_секунда_обрезается_вниз() {
+        assert_eq!(duration_sec(wav_bytes(599) + WAV_BYTES_PER_SEC - 1), 599);
+    }
+
+    /// Файл, у которого есть заголовок и нет данных, остаётся после падения
+    /// посреди записи. Нулевая длительность честнее единицы.
+    #[test]
+    fn файл_без_звука_или_короче_заголовка_даёт_ноль() {
+        assert_eq!(duration_sec(wav_bytes(0)), 0, "один заголовок — ноль секунд");
+        assert_eq!(duration_sec(10), 0, "обрезанный файл не уходит в минус");
+        assert_eq!(duration_sec(0), 0);
     }
 
     fn qi(base: &str) -> QueueItem {

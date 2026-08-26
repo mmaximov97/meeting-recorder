@@ -330,6 +330,43 @@
         margin-top: var(--s2);
         margin-bottom: 0;
       }
+      /* Общая ошибка — та, что не привязана ни к записи, ни к кнопке записи:
+         не дошла команда, не прочитался список устройств. Место у неё вверху,
+         сразу под шапкой, а не строкой под списком: строку внизу человек не
+         видит вовсе, если список длиннее окна.
+         Крестик здесь есть, в отличие от баннера про системный звук (2.7):
+         та проблема никуда не девается и закрывать её нечестно, а эта
+         относится к одному действию и после прочтения только занимает место. */
+      .banner.err {
+        border-color: var(--error);
+        color: var(--error);
+      }
+      .banner .x {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: none;
+        border-radius: var(--r-sm);
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        opacity: 0.7;
+        transition:
+          opacity 0.12s ease,
+          background 0.12s ease;
+      }
+      .banner .x:hover {
+        opacity: 1;
+        background: rgba(247, 118, 142, 0.14);
+      }
+      .banner .x:focus-visible {
+        opacity: 1;
+        outline: 2px solid var(--error);
+        outline-offset: 1px;
+      }
 
       /* ── Кнопка записи ───────────────────────────────────────────────── */
       .record {
@@ -558,10 +595,21 @@
           transform: translateY(6px);
         }
       }
+      /* Класс снимается по окончании въезда (см. отрисовать_список). Пока он
+         висит, анимация с `both` продолжает держать `transform` и `opacity`
+         под своим управлением, а это делает строку отдельным слоем — и
+         открытое в ней меню «⋯» оказывается заперто внутри строки, из-под
+         строк ниже. */
       .rec.новая,
       .day.новая {
         animation: строка-въезжает 0.3s var(--ease-out) both;
         animation-delay: var(--задержка, 0ms);
+      }
+      /* Строка с открытым меню поднимается над соседними. Одного z-index на
+         самом меню не хватает: если строка почему-либо окажется отдельным
+         слоем, меню не сможет из него выбраться. Поднимаем всю строку. */
+      .rec.open {
+        z-index: 5;
       }
       .rec .main {
         display: flex;
@@ -926,6 +974,74 @@
         transition: border-color 0.12s ease;
       }
 
+      /* ── Скелетон ─────────────────────────────────────────────────────────
+         Стоит в разметке с самого начала и уходит по первому же ответу
+         бэкенда — до этого под шапкой была пустота, а `list_recordings`
+         успевает сходить в файловую систему.
+         Повторяет настоящую строку: квадрат логотипа, две полоски текста,
+         время справа. Не крутилка: крутилка говорит «ждите», а скелетон —
+         «здесь будет список, и вот такой».
+         Возвращаться ему некуда: дальше список обновляется точечно, и
+         подменять готовые строки заглушками было бы враньём. */
+      .sk {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 7px var(--s2);
+        margin: 2px calc(var(--s2) * -1);
+      }
+      .sk .a {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+        flex: none;
+      }
+      .sk .c {
+        flex: 1;
+      }
+      .sk .a,
+      .sk .b,
+      .sk .t {
+        background: var(--line);
+        animation: скелетон-дышит 1.4s ease-in-out infinite;
+      }
+      .sk .b {
+        height: 10px;
+        border-radius: 4px;
+      }
+      .sk .b1 {
+        width: 44%;
+      }
+      /* Вторая полоска и время — приглушённее первой: в настоящей строке там
+         мета и время, а они и в готовом виде тише названия. Приглушение живёт
+         в самой анимации, потому что она же крутит прозрачность: отдельный
+         `opacity` она бы просто перебила. */
+      .sk .b2,
+      .sk .t {
+        --от: 0.26;
+        --до: 0.55;
+      }
+      .sk .b2 {
+        width: 26%;
+        height: 8px;
+        margin-top: 7px;
+      }
+      .sk .t {
+        width: 36px;
+        height: 9px;
+        border-radius: 4px;
+        flex: none;
+      }
+      @keyframes скелетон-дышит {
+        0%,
+        100% {
+          opacity: var(--от, 0.4);
+        }
+        50% {
+          opacity: var(--до, 0.85);
+        }
+      }
+
       /* ── Пустой список ───────────────────────────────────────────────────
          Пустое состояние всегда говорит, что делать дальше. */
       @keyframes проступает {
@@ -1125,19 +1241,6 @@
         outline-offset: 2px;
         border-radius: 3px;
       }
-      /* Ошибка «на этом тике» — не фатальная и не привязанная к конкретной
-         записи. Её место здесь временное: переработка показа ошибок идёт
-         отдельной веткой. */
-      #err {
-        color: var(--error);
-        font-size: 12px;
-        line-height: 1.4;
-        margin-top: var(--s2);
-      }
-      #err:empty {
-        display: none;
-      }
-
       /* ── Человек попросил систему поменьше двигать ────────────────────────
          Не «выключить всё»: прозрачность и цвет помогают понять, что
          произошло, и остаются. Уходит именно движение — сдвиги, масштаб и
@@ -1172,6 +1275,14 @@
           width: 100%;
           opacity: 0.55;
         }
+        /* Бесконечное мигание — ровно то, от чего укачивает. Форма строки при
+           этом остаётся: скелетон читается и неподвижным. */
+        .sk .a,
+        .sk .b,
+        .sk .t {
+          animation: none !important;
+          opacity: 0.5;
+        }
         .record:active,
         button.sec:active,
         .icon-btn:active,
@@ -1188,144 +1299,189 @@
     </style>
   </head>
   <body>
-    <!-- ═══ Экран списка ═══ -->
-    <div class="screen" id="screen-list">
-      <div class="head">
-        <h1>Записи</h1>
-        <button class="icon-btn" id="to-settings" aria-label="Настройки" title="Настройки">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></svg>
-        </button>
-      </div>
+    <!-- Экраны лежат друг на друге абсолютом, поэтому <main> собственной высоты
+         не имеет и на раскладку не влияет. Он здесь ради дерева доступности:
+         без области скринридер читает окно сплошняком, и перейти к списку
+         одной командой нельзя. По той же причине каждый экран — <section> с
+         именем, а шапка — <header>. -->
+    <main>
+      <!-- ═══ Экран списка ═══ -->
+      <section class="screen" id="screen-list" aria-label="Записи">
+        <header class="head">
+          <h1>Записи</h1>
+          <button class="icon-btn" id="to-settings" aria-label="Настройки" title="Настройки">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></svg>
+          </button>
+        </header>
 
-      <!-- Всё в закреплённой зоне живёт в слотах: появляется раскрытием по
-           высоте, а не подменой. Класс `open` ставит main.js. -->
-      <div class="pinned">
-        <div class="slot" id="s-devwarn">
-          <div class="slot-in"><div class="banner"><span id="devwarn-text"></span></div></div>
-        </div>
+        <!-- Всё в закреплённой зоне живёт в слотах: появляется раскрытием по
+             высоте, а не подменой. Класс `open` ставит main.js. -->
+        <div class="pinned">
+          <!-- Общая ошибка стоит первой в закреплённой зоне: она про то, что
+               команда не дошла вообще, и это важнее любого баннера ниже.
+               role="alert" — иначе её появление не озвучивается: текст меняется
+               в узле, который уже был в документе, и без роли скринридер
+               считает это обычной правкой разметки. -->
+          <div class="slot" id="s-err">
+            <div class="slot-in">
+              <div class="banner err" role="alert">
+                <span id="err-text"></span>
+                <button class="x" id="err-close" aria-label="Скрыть сообщение" title="Скрыть">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+                </button>
+              </div>
+            </div>
+          </div>
 
-        <div class="slot" id="s-nosys">
-          <div class="slot-in">
-            <div class="banner" id="nosysaudio">
-              <span id="nosysaudio-text"></span>
-              <button class="sec" id="nosysaudio-fix">Открыть</button>
+          <div class="slot" id="s-devwarn">
+            <div class="slot-in">
+              <div class="banner" role="status"><span id="devwarn-text"></span></div>
+            </div>
+          </div>
+
+          <div class="slot" id="s-nosys">
+            <div class="slot-in">
+              <div class="banner" id="nosysaudio" role="status">
+                <span id="nosysaudio-text"></span>
+                <button class="sec" id="nosysaudio-fix">Открыть</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Вопрос не помечен живой областью: при его появлении main.js
+               переводит фокус на «Записать», и скринридер читает группу по её
+               имени. Живая область озвучила бы то же самое второй раз. -->
+          <div class="slot" id="s-ask">
+            <div class="slot-in">
+              <div class="banner ask" role="group" aria-labelledby="ask-q">
+                <span id="ask-q">Записать встречу?<span class="who" id="ask-who"></span></span>
+                <button class="sec" id="no">Не записывать</button>
+                <button class="sec" id="yes">Записать</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="slot open" id="s-record">
+            <div class="slot-in">
+              <button class="record" id="rec-btn">
+                <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor" /></svg>
+                <span id="rec-btn-label">Начать запись</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="slot" id="s-recpanel">
+            <div class="slot-in">
+              <div class="recording" id="rec-panel">
+                <div class="top">
+                  <span class="dot"></span>
+                  <!-- Подпись пустая: её ставит main.js при переходе в запись.
+                       Живая область озвучивает смену текста, а не то, что
+                       готовый текст стал видимым, — статичная подпись здесь
+                       молчала бы. -->
+                  <span class="lbl" id="rec-lbl" role="status"></span>
+                  <span class="timer" id="rec-timer" hidden></span>
+                  <button class="sec" id="stop-btn">
+                    <svg width="11" height="11" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" /></svg>
+                    <span id="stop-btn-label">Остановить</span>
+                  </button>
+                </div>
+                <div class="mtr">
+                  <span class="ic" title="Ваш микрофон"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
+                  <span class="disc sm"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
+                </div>
+                <div class="mtr">
+                  <span class="ic" title="Звук системы — то, что слышно от собеседников"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
+                  <span class="disc sm"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="slot" id="s-fatal">
+            <div class="slot-in">
+              <div class="banner fatal" role="alert"><span id="fatal-text"></span></div>
             </div>
           </div>
         </div>
 
-        <div class="slot" id="s-ask">
-          <div class="slot-in">
-            <div class="banner ask">
-              <span>Записать встречу?<span class="who" id="ask-who"></span></span>
-              <button class="sec" id="no">Не записывать</button>
-              <button class="sec" id="yes">Записать</button>
+        <div class="body">
+          <!-- Стоит в разметке, а не ставится из JS: `list_recordings` ходит в
+               файловую систему, и до его ответа здесь была пустота. -->
+          <div id="skeleton">
+            <div class="sk"><div class="a"></div><div class="c"><div class="b b1"></div><div class="b b2"></div></div><div class="t"></div></div>
+            <div class="sk"><div class="a"></div><div class="c"><div class="b b1" style="width: 56%"></div><div class="b b2"></div></div><div class="t"></div></div>
+            <div class="sk"><div class="a"></div><div class="c"><div class="b b1" style="width: 38%"></div><div class="b b2"></div></div><div class="t"></div></div>
+          </div>
+
+          <div class="empty" id="empty" hidden>
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>
+            <strong>Записей пока нет</strong>
+            <span>Приложение само предложит записать, когда услышит звонок.<br />Или нажмите «Начать запись».</span>
+          </div>
+          <div id="list"></div>
+        </div>
+      </section>
+
+      <!-- ═══ Экран настроек ═══ -->
+      <section class="screen off" id="screen-settings" aria-label="Настройки">
+        <header class="head">
+          <button class="icon-btn" id="to-list" aria-label="Назад к записям" title="Назад">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <h1>Настройки</h1>
+        </header>
+        <div class="body">
+          <h2>Микрофон</h2>
+          <div class="row">
+            <span class="field">
+              <select id="mic"></select>
+              <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+            </span>
+            <button class="sec" id="check">Проверить</button>
+          </div>
+          <!-- Подтверждение стоит под самой выпадашкой, а не внизу экрана
+               рядом с полями расшифровки: до того «Сохранено» от смены
+               микрофона больше трёхсот пикселей, и человек его не увидит. -->
+          <div class="saved" id="mic-saved" hidden role="status">✓ Сохранено</div>
+          <!-- Не предупреждение и не ошибка: приложение делает ровно то, что
+               должно. Поэтому приглушённым цветом — это объяснение, а не тревога. -->
+          <div class="slot" id="s-mic-deferred">
+            <div class="slot-in">
+              <div class="hint">
+                Новый микрофон включится со следующей записи — та, что идёт сейчас, пишется прежним.
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="slot open" id="s-record">
-          <div class="slot-in">
-            <button class="record" id="rec-btn">
-              <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor" /></svg>
-              <span id="rec-btn-label">Начать запись</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="slot" id="s-recpanel">
-          <div class="slot-in">
-        <div class="recording" id="rec-panel">
-          <div class="top">
-            <span class="dot"></span>
-            <span class="lbl">Запись идёт</span>
-            <span class="timer" id="rec-timer" hidden></span>
-            <button class="sec" id="stop-btn">
-              <svg width="11" height="11" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" /></svg>
-              <span id="stop-btn-label">Остановить</span>
-            </button>
-          </div>
-          <div class="mtr">
-            <span class="ic" title="Ваш микрофон"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
-            <span class="disc sm"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
-          </div>
-          <div class="mtr">
-            <span class="ic" title="Звук системы — то, что слышно от собеседников"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
-            <span class="disc sm"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
-          </div>
-        </div>
-          </div>
-        </div>
-
-        <div class="slot" id="s-fatal">
-          <div class="slot-in"><div class="banner fatal"><span id="fatal-text"></span></div></div>
-        </div>
-      </div>
-
-      <div class="body">
-        <div class="empty" id="empty" hidden>
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>
-          <strong>Записей пока нет</strong>
-          <span>Приложение само предложит записать, когда услышит звонок.<br />Или нажмите «Начать запись».</span>
-        </div>
-        <div id="list"></div>
-        <div id="err"></div>
-      </div>
-    </div>
-
-    <!-- ═══ Экран настроек ═══ -->
-    <div class="screen off" id="screen-settings">
-      <div class="head">
-        <button class="icon-btn" id="to-list" aria-label="Назад к записям" title="Назад">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
-        </button>
-        <h1>Настройки</h1>
-      </div>
-      <div class="body">
-        <h2>Микрофон</h2>
-        <div class="row">
-          <span class="field">
-            <select id="mic"></select>
-            <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-          </span>
-          <button class="sec" id="check">Проверить</button>
-        </div>
-        <!-- Не предупреждение и не ошибка: приложение делает ровно то, что
-             должно. Поэтому приглушённым цветом — это объяснение, а не тревога. -->
-        <div class="slot" id="s-mic-deferred">
-          <div class="slot-in">
-            <div class="hint">
-              Новый микрофон включится со следующей записи — та, что идёт сейчас, пишется прежним.
+          <div class="meters" id="meters">
+            <div class="mrow">
+              <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em>
+              <span class="disc"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
+            </div>
+            <div class="mrow">
+              <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em>
+              <span class="disc"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
             </div>
           </div>
-        </div>
-
-        <div class="meters" id="meters">
-          <div class="mrow">
-            <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em>
-            <span class="disc"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
+          <!-- Чисел в децибелах человеку не показываем: шкала -60/-50/-40 ничего
+               ему не говорит, а вот куда должна доходить полоска — говорит. -->
+          <div class="hint">
+            Говорите обычным голосом: полоска должна доходить примерно до середины и не залезать
+            в красное.
           </div>
-          <div class="mrow">
-            <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em>
-            <span class="disc"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
+
+          <h2>Расшифровка встреч</h2>
+          <div class="row"><input type="text" id="stt-url" placeholder="Адрес сервера" /></div>
+          <div class="row"><input type="password" id="stt-key" placeholder="Ключ доступа" /></div>
+          <div class="saved" id="saved" hidden role="status">✓ Сохранено</div>
+
+          <div class="foot">
+            <button id="repo-link" class="link">github.com/mmaximov97/meeting-recorder</button>
           </div>
         </div>
-        <!-- Чисел в децибелах человеку не показываем: шкала -60/-50/-40 ничего
-             ему не говорит, а вот куда должна доходить полоска — говорит. -->
-        <div class="hint">
-          Говорите обычным голосом: полоска должна доходить примерно до середины и не залезать
-          в красное.
-        </div>
-
-        <h2>Расшифровка встреч</h2>
-        <div class="row"><input type="text" id="stt-url" placeholder="Адрес сервера" /></div>
-        <div class="row"><input type="password" id="stt-key" placeholder="Ключ доступа" /></div>
-        <div class="saved" id="saved" hidden>✓ Сохранено</div>
-
-        <div class="foot">
-          <button id="repo-link" class="link">github.com/mmaximov97/meeting-recorder</button>
-        </div>
-      </div>
-    </div>
+      </section>
+    </main>
 
     <script src="main.js"></script>
   </body>

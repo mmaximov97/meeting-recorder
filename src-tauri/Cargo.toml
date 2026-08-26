@@ -11,7 +11,11 @@ tauri-build = { version = "2", features = [] }
 # Ядро. Отсюда берутся App, WindowsDetector, poll_to_event — ровно те же, что
 # крутит консольный бинарь: GUI не имеет своей копии логики записи.
 meeting-recorder = { path = ".." }
-tauri = { version = "2", features = ["tray-icon"] }
+# `macos-private-api` — ради прозрачного фона всплывашки: на macOS Tauri
+# отдаёт `transparent: true` только с этим флагом (иначе окно падает с явной
+# ошибкой при создании). Скруглённые углы плашки рисует CSS, а без прозрачности
+# вокруг них остался бы чёрный прямоугольник окна.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 # Персистентный лог GUI: раньше ошибки захвата уходили в eprintln! stderr,
@@ -26,3 +30,9 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 tokio = { version = "1", features = ["time", "fs", "macros"] }
 thiserror = "2"
 sysinfo = "0.32"
+
+# Прямой доступ к NSWindow всплывашки. Нужен ровно для двух вещей, которых ни
+# Tauri, ни tao не отдают: поведение окна на рабочих столах (жить на всех и
+# показываться поверх полноэкранных приложений) и уровень окна.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"

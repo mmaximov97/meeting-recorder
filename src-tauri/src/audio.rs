@@ -124,8 +124,8 @@ fn ask(handle: &AppHandle, source: &str) {
     let _ = handle
         .notification()
         .builder()
-        .title("Похоже, встреча")
-        .body(format!("{source} — записать? Ответьте в окне приложения."))
+        .title("Записать встречу?")
+        .body(format!("{source} — ответьте в окне приложения."))
         .show();
 
     show_ask_popup(handle);
@@ -458,10 +458,11 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
             let _ = handle
                 .notification()
                 .builder()
-                .title("Пишется не тот микрофон")
-                .body(format!(
-                    "«{имя}» недоступен — запись идёт с системного по умолчанию."
-                ))
+                .title(format!("Микрофон «{имя}» недоступен"))
+                .body(
+                    "Пишется тот, что выбран в системе. Проверьте, подключён ли \
+                     он, или выберите другой в настройках.",
+                )
                 .show();
         }
     }

@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Вариант A — макет v2</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#1a1b26; --fg:#c0caf5; --muted:#7982a9; --line:#292e42;
+  --accent:#7aa2f7; --warn:#e0af68; --error:#f7768e; --good:#9ece6a;
+  --on-accent:#1a1b26;
+  --mono:"0xProto Nerd Font Mono","Cascadia Mono",Consolas,monospace;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px;
+  --r-sm:6px; --r-md:8px; --r-lg:10px;
+  --hover:rgba(122,162,247,.09);
+  --card:#1f2130;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#0d0d14;color:var(--fg);
+  font:14px/1.45 system-ui,"Segoe UI",sans-serif;
+  display:flex;gap:32px;padding:28px;align-items:flex-start}
+
+.panel{width:230px;flex:none;position:sticky;top:28px}
+.panel h3{font-size:11px;text-transform:uppercase;letter-spacing:.08em;
+  color:var(--muted);margin:0 0 10px}
+.panel button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;
+  margin-bottom:3px;padding:7px 10px;border-radius:var(--r-sm);cursor:pointer;
+  border:1px solid transparent;background:transparent;color:var(--muted)}
+.panel button:hover{background:var(--hover);color:var(--fg)}
+.panel button[aria-pressed="true"]{background:var(--accent);color:var(--on-accent)}
+.panel .note{font-size:11px;color:var(--muted);margin-top:16px;line-height:1.55}
+
+.stage{position:relative}
+.frame{width:460px;height:640px;background:var(--bg);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;
+  display:flex;flex-direction:column;
+  box-shadow:0 24px 60px rgba(0,0,0,.55)}
+
+/* ── Шапка ─────────────────────────────────────────────── */
+.head{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);flex:none}
+.head h1{font-size:16px;font-weight:600;margin:0;flex:1;letter-spacing:-.01em}
+.icon-btn{width:30px;height:30px;flex:none;display:grid;place-items:center;
+  border:1px solid transparent;border-radius:var(--r-sm);background:transparent;
+  color:var(--muted);cursor:pointer;padding:0}
+.icon-btn:hover{background:var(--hover);color:var(--fg)}
+.icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+svg{display:block}
+.pinned{flex:none;padding:0 var(--s4) var(--s3);
+  border-bottom:1px solid rgba(41,46,66,.75)}
+.body{flex:1;overflow-y:auto;padding:0 var(--s4) var(--s4)}
+.body::-webkit-scrollbar{width:8px}
+.body::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+
+/* ── Баннер ────────────────────────────────────────────── */
+.banner{border:1px solid var(--warn);border-radius:var(--r-lg);color:var(--warn);
+  display:flex;gap:10px;align-items:center;padding:10px var(--s3);margin-bottom:var(--s3)}
+.banner span{flex:1;font-size:13px;line-height:1.4}
+button.sec{font:inherit;font-size:13px;padding:6px 11px;border-radius:var(--r-sm);
+  border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+button.sec:hover{border-color:var(--accent)}
+
+/* ── Кнопка записи ─────────────────────────────────────── */
+.record{width:100%;height:52px;display:flex;align-items:center;justify-content:center;
+  gap:var(--s2);font:inherit;font-size:15px;font-weight:600;cursor:pointer;
+  border-radius:var(--r-lg);border:1px solid var(--accent);
+  background:var(--accent);color:var(--on-accent)}
+.record:hover{filter:brightness(1.08)}
+.record:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+
+/* спокойная панель записи */
+.recording{border:1px solid var(--line);border-radius:var(--r-lg);
+  padding:var(--s3);background:var(--card)}
+.recording .top{display:flex;align-items:center;gap:10px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--error);flex:none;
+  animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.recording .lbl{flex:1;font-size:14px;font-weight:600}
+.recording .timer{font-variant-numeric:tabular-nums;font-size:14px;color:var(--muted)}
+.recording .mtr{display:flex;gap:9px;margin-top:9px;align-items:center}
+.recording .mtr .disc{flex:1}
+.recording .mtr .ic{width:16px;flex:none;color:var(--muted);display:grid;
+  place-items:center;cursor:help}
+
+/* ── Метр в стиле Discord ──────────────────────────────── */
+.disc{position:relative;height:12px}
+.disc>.t,.disc>.f{position:absolute;inset:0;
+  -webkit-mask-image:repeating-linear-gradient(to right,#000 0 3px,transparent 3px 6px);
+          mask-image:repeating-linear-gradient(to right,#000 0 3px,transparent 3px 6px)}
+.disc>.t{background:var(--line)}
+.disc>.f{background:linear-gradient(to right,
+    var(--good) 0%,var(--good) 68%,var(--warn) 68%,var(--warn) 88%,
+    var(--error) 88%,var(--error) 100%);
+  clip-path:inset(0 calc(100% - var(--lv,0%)) 0 0);transition:clip-path .1s linear}
+.disc.sm{height:8px}
+
+/* ── Список ────────────────────────────────────────────── */
+.day{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+  margin:var(--s5) 0 var(--s1);font-weight:600}
+.day:first-of-type{margin-top:var(--s3)}
+ul{list-style:none;margin:0;padding:0}
+.rec{margin:2px calc(var(--s2)*-1);border-radius:var(--r-md);position:relative}
+.rec .main{display:flex;gap:10px;align-items:center;padding:7px var(--s2)}
+.rec.card{border:1px solid var(--warn);margin:var(--s2) calc(var(--s2)*-1)}
+.rec.card .main{padding:8px 9px}
+.rec.card .note{background:rgba(224,175,104,.10);color:var(--warn);font-size:12.5px;
+  line-height:1.45;padding:9px 11px;border-top:1px solid rgba(224,175,104,.28);
+  border-radius:0 0 7px 7px}
+.rec.card .note{display:flex;gap:9px;align-items:flex-start}
+.rec.card .note .ni{flex:none;margin-top:1px}
+.rec.card .note .nt{flex:1;min-width:0}
+.rec.card .note b{font-weight:600;display:block;margin-bottom:2px;color:var(--warn)}
+.rec.card .note .act{font:inherit;font-size:12.5px;background:none;border:none;padding:0;
+  margin-top:5px;color:var(--fg);cursor:pointer;text-decoration:underline;
+  text-underline-offset:3px;text-decoration-color:var(--muted)}
+.rec.card .note .act:hover{text-decoration-color:var(--accent);color:var(--accent)}
+.rec.card .note .act:focus-visible{outline:2px solid var(--accent);outline-offset:2px;
+  border-radius:3px}
+.rec:hover,.rec:focus-within{background:var(--hover)}
+.ava{width:34px;height:34px;flex:none;border-radius:9px;background:var(--card);
+  display:grid;place-items:center;color:var(--muted);border:1px solid var(--line)}
+.ava.brand{border-color:transparent}
+.ava.zoom{background:#0B5CFF}
+.ava.teams{background:#6264A7}
+.ava.slack{background:#4A154B}
+.col{flex:1;min-width:0}
+.l1{display:flex;align-items:baseline;gap:var(--s2)}
+.title{flex:1;min-width:0;font-size:14px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.sub{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;margin-top:1px}
+.sub .more{opacity:0;transition:opacity .12s}
+.rec:hover .sub .more,.rec:focus-within .sub .more{opacity:1}
+.sub.bad{color:var(--warn)}
+.sub.err{color:var(--error)}
+.right{flex:none;width:82px;text-align:right;position:relative;height:26px}
+.time{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;
+  font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;
+  white-space:nowrap;transition:opacity .12s}
+.dots{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;
+  opacity:0;transition:opacity .12s;pointer-events:none}
+.rec:hover .time,.rec:focus-within .time{opacity:0}
+.rec:hover .dots,.rec:focus-within .dots{opacity:1;pointer-events:auto}
+.dots button{width:26px;height:26px;display:grid;place-items:center;padding:0;
+  border:1px solid transparent;border-radius:var(--r-sm);background:transparent;
+  color:var(--muted);cursor:pointer}
+.dots button:hover{color:var(--fg);background:rgba(0,0,0,.25)}
+.dots button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* меню ⋯ */
+.menu{position:absolute;right:4px;top:38px;z-index:5;min-width:186px;
+  background:var(--card);border:1px solid var(--line);border-radius:var(--r-md);
+  padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.55)}
+.menu button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+  font:inherit;font-size:13px;padding:7px 9px;border-radius:var(--r-sm);
+  border:none;background:transparent;color:var(--fg);cursor:pointer}
+.menu button:hover{background:var(--hover)}
+.menu .sep{height:1px;background:var(--line);margin:4px 0}
+.menu small{display:block;padding:6px 9px 4px;font-size:11px;color:var(--muted)}
+
+/* очередь / прогресс */
+.prog{height:3px;border-radius:2px;background:var(--line);overflow:hidden;
+  margin-top:5px}
+.prog>i{display:block;height:100%;width:36%;background:var(--accent);
+  animation:slide 1.5s ease-in-out infinite}
+@keyframes slide{0%{transform:translateX(-110%)}100%{transform:translateX(330%)}}
+
+/* скелетон — повторяет настоящую строку */
+.sk{display:flex;gap:10px;align-items:center;padding:7px var(--s2);margin:0 -8px}
+.sk .a{width:34px;height:34px;border-radius:9px;flex:none}
+.sk .c{flex:1}
+.sk .b{height:10px;border-radius:4px;background:var(--line);animation:sh 1.4s ease-in-out infinite}
+.sk .b1{width:44%}.sk .b2{width:26%;height:8px;margin-top:7px;opacity:.65}
+.sk .a{background:var(--line);animation:sh 1.4s ease-in-out infinite}
+.sk .t{width:36px;height:9px;border-radius:4px;background:var(--line);flex:none;
+  animation:sh 1.4s ease-in-out infinite;opacity:.65}
+@keyframes sh{0%,100%{opacity:.4}50%{opacity:.85}}
+
+.empty{text-align:center;padding:60px 24px;color:var(--muted)}
+.empty strong{display:block;color:var(--fg);font-size:14px;font-weight:600;margin:var(--s3) 0 var(--s1)}
+.empty span{font-size:13px;line-height:1.55;display:block}
+
+/* ── Настройки ─────────────────────────────────────────── */
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+  margin:var(--s5) 0 var(--s2);font-weight:600}
+h2:first-child{margin-top:var(--s2)}
+.row{display:flex;gap:var(--s2)}
+select,input{font:inherit;font-size:13px;flex:1;min-width:0;padding:7px var(--s2);
+  border-radius:var(--r-sm);border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+select{-webkit-appearance:none;appearance:none;padding-right:30px;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%237982a9%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;background-size:15px}
+select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mrow{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.mrow em{font-style:normal;font-size:12px;color:var(--muted);width:96px;flex:none;
+  display:flex;align-items:center;gap:6px;white-space:nowrap}
+.mrow em svg{flex:none}
+.hint{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
+.saved{font-size:12px;color:var(--good);margin-top:6px}
+.foot{margin-top:var(--s5);text-align:center;font-size:11px;color:var(--muted)}
+
+/* ── Всплывашка (отдельное окно) ───────────────────────── */
+.desktop{width:460px;height:640px;border-radius:12px;overflow:hidden;position:relative;
+  background:linear-gradient(160deg,#2b1f4a,#1b2340 60%,#101827);
+  border:1px solid var(--line);box-shadow:0 24px 60px rgba(0,0,0,.55)}
+.desktop .fake{position:absolute;inset:44px 24px 24px;border-radius:10px;
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06)}
+.toast{position:absolute;top:14px;right:14px;left:14px;
+  background:rgba(28,30,44,.93);backdrop-filter:blur(14px);
+  border:1px solid rgba(192,202,245,.14);border-radius:14px;padding:11px 12px;
+  display:flex;align-items:center;gap:11px;
+  box-shadow:0 16px 40px rgba(0,0,0,.5);overflow:hidden;
+  animation:drop .38s cubic-bezier(.22,1.2,.36,1)}
+@keyframes drop{from{transform:translateY(-130%);opacity:0}to{transform:none;opacity:1}}
+.toast .ava{width:32px;height:32px;border-radius:8px}
+.toast .tx{flex:1;min-width:0}
+.toast .tt{font-size:13px;font-weight:600}
+.toast .ts{font-size:12px;color:var(--muted)}
+.toast .go{display:flex;align-items:center;background:var(--accent);color:var(--on-accent);
+  border-radius:9px;overflow:hidden;flex:none}
+.toast .go>button{font:inherit;font-size:13px;font-weight:600;border:none;
+  background:transparent;color:inherit;cursor:pointer;padding:8px 11px;
+  display:flex;align-items:center;gap:6px}
+.toast .go>.d{border-left:1px solid rgba(26,27,38,.28);padding:8px 7px}
+.toast .life{position:absolute;left:0;bottom:0;height:2px;background:var(--muted);
+  opacity:.5;animation:life 7s linear forwards}
+.toast:hover .life{animation-play-state:paused;background:var(--accent);opacity:.8}
+.toast{cursor:grab;transition:transform .18s ease,opacity .18s ease}
+.toast.away{transform:translateX(115%);opacity:0}
+.tmenu{position:absolute;top:74px;right:14px;z-index:9;min-width:212px;
+  background:rgba(31,33,48,.97);backdrop-filter:blur(14px);
+  border:1px solid rgba(192,202,245,.14);border-radius:11px;padding:4px;
+  box-shadow:0 16px 40px rgba(0,0,0,.55)}
+.tmenu button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;
+  padding:8px 10px;border-radius:7px;border:none;background:transparent;
+  color:var(--fg);cursor:pointer}
+.tmenu button:hover{background:var(--hover)}
+.tmenu .sep{height:1px;background:rgba(192,202,245,.12);margin:4px 6px}
+.swipe-hint{position:absolute;left:0;right:0;top:96px;text-align:center;font-size:11px;
+  color:rgba(192,202,245,.45)}
+@keyframes life{from{width:100%}to{width:0}}
+[hidden]{display:none !important}
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <h3>Состояние</h3>
+  <button data-s="idle" aria-pressed="true">Покой</button>
+  <button data-s="toast">Всплывашка «похоже, встреча»</button>
+  <button data-s="recording">Идёт запись</button>
+  <button data-s="menu">Меню — обычная запись</button>
+  <button data-s="menudone">Меню — уже расшифрована</button>
+  <button data-s="menubusy">Меню — расшифровка идёт</button>
+  <button data-s="transcribing">Идёт расшифровка</button>
+  <button data-s="queued">Очередь из трёх</button>
+  <button data-s="rowerror">Не получилось расшифровать</button>
+  <button data-s="loading">Загрузка списка</button>
+  <button data-s="empty">Пустой список</button>
+  <button data-s="nosys">Нет системного звука</button>
+  <button data-s="settings">Настройки</button>
+  <p class="note">
+    Данные подставные — Tauri-команд в браузере нет.<br><br>
+    Наведи мышь на строку: время справа сменится на «⋯», под именем появится вес.
+    То же по Tab.
+  </p>
+</div>
+
+<div class="stage">
+
+<!-- ═══ Рабочий стол со всплывашкой ═══ -->
+<div class="desktop" id="desktop" hidden>
+  <div class="fake"></div>
+  <div class="toast">
+    <span class="ava brand zoom" style="width:32px;height:32px;border-radius:8px"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M5.033 14.649H.743a.74.74 0 0 1-.686-.458.74.74 0 0 1 .16-.808L3.19 10.41H1.06A1.06 1.06 0 0 1 0 9.35h3.957c.301 0 .57.18.686.458a.74.74 0 0 1-.161.808L1.51 13.59h2.464c.585 0 1.06.475 1.06 1.06zM24 11.338c0-1.14-.927-2.066-2.066-2.066-.61 0-1.158.265-1.537.686a2.061 2.061 0 0 0-1.536-.686c-1.14 0-2.066.926-2.066 2.066v3.311a1.06 1.06 0 0 0 1.06-1.06v-2.251a1.004 1.004 0 0 1 2.013 0v2.251c0 .586.474 1.06 1.06 1.06v-3.311a1.004 1.004 0 0 1 2.012 0v2.251c0 .586.475 1.06 1.06 1.06zM16.265 12a2.728 2.728 0 1 1-5.457 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0zm-4.82 0a2.728 2.728 0 1 1-5.458 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0z"/></svg></span>
+    <span class="tx">
+      <span class="tt">Записать встречу?</span>
+      <span class="ts">Zoom</span>
+    </span>
+    <span class="go">
+      <button><svg width="12" height="12" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor"/></svg>Записать</button>
+      <button class="d" id="toast-more" aria-label="Другие варианты"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg></button>
+    </span>
+    <span class="life"></span>
+  </div>
+  <div class="tmenu" id="tmenu" hidden>
+    <button>Не записывать</button>
+    <button>Записать только меня</button>
+    <div class="sep"></div>
+    <button>Не спрашивать про Zoom сегодня</button>
+  </div>
+  <div class="swipe-hint">Смахните вправо двумя пальцами</div>
+</div>
+
+<!-- ═══ Главное окно ═══ -->
+<div class="frame" id="app" data-s="idle">
+
+  <div id="screen-list" style="display:flex;flex-direction:column;height:100%">
+    <div class="head">
+      <h1>Записи</h1>
+      <button class="icon-btn" id="to-settings" aria-label="Настройки" title="Настройки">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /> <circle cx="12" cy="12" r="3" /></svg>
+      </button>
+    </div>
+
+    <div class="pinned">
+      <div class="banner" id="nosys" hidden>
+        <span>Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут.</span>
+        <button class="sec">Открыть</button>
+      </div>
+
+      <button class="record" id="rec-btn">
+        <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor"/></svg>
+        Начать запись
+      </button>
+
+      <div class="recording" id="rec-panel" hidden>
+        <div class="top">
+          <span class="dot"></span>
+          <span class="lbl">Запись идёт</span>
+          <span class="timer">04:12</span>
+          <button class="sec" style="display:flex;align-items:center;gap:6px">
+            <svg width="11" height="11" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor"/></svg>
+            Остановить</button>
+        </div>
+        <div class="mtr">
+          <span class="ic" title="Ваш микрофон"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
+          <span class="disc sm"><span class="t"></span><span class="f" style="--lv:62%"></span></span>
+        </div>
+        <div class="mtr">
+          <span class="ic" title="Звук системы — то, что слышно от собеседников"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
+          <span class="disc sm"><span class="t"></span><span class="f" style="--lv:38%"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="body">
+      <div id="skeleton" hidden>
+        <div class="day">Сегодня</div>
+        <div class="sk"><div class="a"></div><div class="c"><div class="b b1"></div><div class="b b2"></div></div><div class="t"></div></div>
+        <div class="sk"><div class="a"></div><div class="c"><div class="b b1" style="width:56%"></div><div class="b b2"></div></div><div class="t"></div></div>
+        <div class="sk"><div class="a"></div><div class="c"><div class="b b1" style="width:38%"></div><div class="b b2"></div></div><div class="t"></div></div>
+      </div>
+
+      <div class="empty" id="empty" hidden>
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" style="margin:0 auto;opacity:.45"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>
+        <strong>Записей пока нет</strong>
+        <span>Приложение само предложит записать, когда услышит звонок.<br>Или нажмите «Начать запись».</span>
+      </div>
+
+      <div id="list"></div>
+    </div>
+  </div>
+
+  <div id="screen-settings" hidden style="display:none;flex-direction:column;height:100%">
+    <div class="head">
+      <button class="icon-btn" id="to-list" aria-label="Назад к записям" title="Назад">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
+      </button>
+      <h1>Настройки</h1>
+    </div>
+    <div class="body">
+      <h2>Микрофон</h2>
+      <div class="row">
+        <select><option>MacBook Pro Microphone</option><option>Системный по умолчанию</option></select>
+        <button class="sec">Проверить</button>
+      </div>
+      <div style="margin-top:14px">
+        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--lv:58%"></span></span></div>
+        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--lv:34%"></span></span></div>
+      </div>
+      <div class="hint">Говорите обычным голосом: полоска должна доходить примерно до середины и не залезать в красное.</div>
+      <div class="hint">Новый микрофон включится со следующей записи — та, что идёт сейчас, пишется прежним.</div>
+
+      <h2>Расшифровка встреч</h2>
+      <div class="row" style="margin-bottom:8px"><input type="text" placeholder="Адрес сервера" value="http://10.0.0.3:8080" /></div>
+      <div class="row"><input type="password" placeholder="Ключ доступа" value="abcdefgh" /></div>
+      <div class="saved">✓ Сохранено</div>
+
+      <div class="foot">github.com/mmaximov97/meeting-recorder</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const LOGO = {
+  zoom:`<span class="ava brand zoom"><svg width="17" height="17" viewBox="0 0 24 24" fill="#fff"><path d="M5.033 14.649H.743a.74.74 0 0 1-.686-.458.74.74 0 0 1 .16-.808L3.19 10.41H1.06A1.06 1.06 0 0 1 0 9.35h3.957c.301 0 .57.18.686.458a.74.74 0 0 1-.161.808L1.51 13.59h2.464c.585 0 1.06.475 1.06 1.06zM24 11.338c0-1.14-.927-2.066-2.066-2.066-.61 0-1.158.265-1.537.686a2.061 2.061 0 0 0-1.536-.686c-1.14 0-2.066.926-2.066 2.066v3.311a1.06 1.06 0 0 0 1.06-1.06v-2.251a1.004 1.004 0 0 1 2.013 0v2.251c0 .586.474 1.06 1.06 1.06v-3.311a1.004 1.004 0 0 1 2.012 0v2.251c0 .586.475 1.06 1.06 1.06zM16.265 12a2.728 2.728 0 1 1-5.457 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0zm-4.82 0a2.728 2.728 0 1 1-5.458 0 2.728 2.728 0 0 1 5.457 0zm-1.06 0a1.669 1.669 0 1 0-3.338 0 1.669 1.669 0 0 0 3.338 0z"/></svg></span>`,
+  teams:`<span class="ava brand teams"><svg width="17" height="17" viewBox="0 0 24 24" fill="#fff"><path d="M20.625 8.127q-.55 0-1.025-.205-.475-.205-.832-.563-.358-.357-.563-.832Q18 6.053 18 5.502q0-.54.205-1.02t.563-.837q.357-.358.832-.563.474-.205 1.025-.205.54 0 1.02.205t.837.563q.358.357.563.837.205.48.205 1.02 0 .55-.205 1.025-.205.475-.563.832-.357.358-.837.563-.48.205-1.02.205zm0-3.75q-.469 0-.797.328-.328.328-.328.797 0 .469.328.797.328.328.797.328.469 0 .797-.328.328-.328.328-.797 0-.469-.328-.797-.328-.328-.797-.328zM24 10.002v5.578q0 .774-.293 1.46-.293.685-.803 1.194-.51.51-1.195.803-.686.293-1.459.293-.445 0-.908-.105-.463-.106-.85-.329-.293.95-.855 1.729-.563.78-1.319 1.336-.756.557-1.67.861-.914.305-1.898.305-1.148 0-2.162-.398-1.014-.399-1.805-1.102-.79-.703-1.312-1.664t-.674-2.086h-5.8q-.411 0-.704-.293T0 16.881V6.873q0-.41.293-.703t.703-.293h8.59q-.34-.715-.34-1.5 0-.727.275-1.365.276-.639.75-1.114.475-.474 1.114-.75.638-.275 1.365-.275t1.365.275q.639.276 1.114.75.474.475.75 1.114.275.638.275 1.365t-.275 1.365q-.276.639-.75 1.113-.475.475-1.114.75-.638.276-1.365.276-.188 0-.375-.024-.188-.023-.375-.058v1.078h10.875q.469 0 .797.328.328.328.328.797zM12.75 2.373q-.41 0-.78.158-.368.158-.638.434-.27.275-.428.639-.158.363-.158.773 0 .41.158.78.159.368.428.638.27.27.639.428.369.158.779.158.41 0 .773-.158.364-.159.64-.428.274-.27.433-.639.158-.369.158-.779 0-.41-.158-.773-.159-.364-.434-.64-.275-.275-.639-.433-.363-.158-.773-.158zM6.937 9.814h2.25V7.94H2.814v1.875h2.25v6h1.875zm10.313 7.313v-6.75H12v6.504q0 .41-.293.703t-.703.293H8.309q.152.809.556 1.5.405.691.985 1.19.58.497 1.318.779.738.281 1.582.281.926 0 1.746-.352.82-.351 1.436-.966.615-.616.966-1.43.352-.815.352-1.752zm5.25-1.547v-5.203h-3.75v6.855q.305.305.691.452.387.146.809.146.469 0 .879-.176.41-.175.715-.48.304-.305.48-.715t.176-.879Z"/></svg></span>`,
+  slack:`<span class="ava brand slack"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z"/></svg></span>`,
+  other:`<span class="ava"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>`
+};
+const ava = k => LOGO[k] || LOGO.other;
+const dotsBtn = `<span class="dots"><button aria-label="Действия" title="Действия">
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="1" /> <circle cx="19" cy="12" r="1" /> <circle cx="5" cy="12" r="1" /></svg></button></span>`;
+
+const DATA = [
+  ["Сегодня", [
+    {ic:"zoom",  n:"Zoom",           t:"10:00–10:40", d:"40 мин", w:"12 МБ"},
+    {ic:"other", n:"Разбор метрик",  t:"14:30–15:05", d:"35 мин", w:"10 МБ", tr:true},
+    {ic:"teams", n:"Teams",          t:"16:00–16:25", d:"25 мин", w:"7 МБ",
+       badTitle:"Собеседников не слышно", bad:"Записан только ваш микрофон. Скорее всего, не было доступа к звуку системы."}
+  ]],
+  ["Вчера", [
+    {ic:"slack", n:"Slack",  t:"11:00–11:20", d:"20 мин", w:"6 МБ"},
+    {ic:"zoom",  n:"Zoom",   t:"15:00–16:10", d:"1 ч 10 мин", w:"21 МБ",
+       badTitle:"Вас слышно заметно тише", bad:"Ваш микрофон записался намного тише собеседников — расшифровка может пропустить ваши реплики."}
+  ]],
+  ["15 июля", [
+    {ic:"other", n:"Планёрка", t:"09:00–09:15", d:"15 мин", w:"4 МБ"}
+  ]]
+];
+
+function rowHTML(r, i, extra){
+  let sub = "", card = "", note = "";
+  if (extra === "prog" && i === 0){
+    sub = `<div class="sub">Расшифровываю…</div><div class="prog"><i></i></div>`;
+  } else if (extra === "queue"){
+    sub = i === 0 ? `<div class="sub">Расшифровываю…</div><div class="prog"><i></i></div>`
+        : `<div class="sub">В очереди №${i}</div>`;
+  } else if (extra === "err" && i === 0){
+    card = " card";
+    sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;
+    note = `<div class="note"><span class="ni"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12v4" /> <path d="M12 20h.01" /> <path d="M8.128 16.949A7 7 0 1 1 15.71 8h1.79a1 1 0 0 1 0 9h-1.642" /></svg></span><span class="nt"><b>Расшифровка не получилась</b>
+      Сервер не ответил. Запись цела — можно попробовать ещё раз или проверить адрес
+      в настройках.<br><button class="act">Попробовать снова</button></span></div>`;
+  } else if (r.bad){
+    card = " card";
+    sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;
+    note = `<div class="note"><span class="ni"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" /> <path d="M16.95 16.95A7 7 0 0 1 5 12v-2" /> <path d="M18.89 13.23A7 7 0 0 0 19 12v-2" /> <path d="m2 2 20 20" /> <path d="M9 9v3a3 3 0 0 0 5.12 2.12" /></svg></span><span class="nt"><b>${r.badTitle}</b>${r.bad}</span></div>`;
+  } else {
+    sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}${r.tr ? " · расшифровка готова" : ""}</span></div>`;
+  }
+  return `<li class="rec${card}"><div class="main">${ava(r.ic)}<div class="col">
+      <div class="l1"><span class="title">${r.n}</span></div>${sub}
+    </div><div class="right"><span class="time">${r.t}</span>${dotsBtn}</div></div>${note}</li>`;
+}
+
+function renderList(extra){
+  let h = "", i = 0;
+  for (const [day, rows] of DATA){
+    h += `<div class="day">${day}</div><ul>`;
+    for (const r of rows){ h += rowHTML(r, i, extra); i++; }
+    h += `</ul>`;
+  }
+  document.getElementById("list").innerHTML = h;
+}
+
+const MENUS = {
+  plain:`<div class="menu">
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /> <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg>Переименовать</button>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /> <path d="M14 2v5a1 1 0 0 0 1 1h5" /> <path d="M10 9H8" /> <path d="M16 13H8" /> <path d="M16 17H8" /></svg>Расшифровать встречу</button>
+    <div class="sep"></div>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>Показать файлы</button>
+    <small>2026-07-17_14-30_zoom</small>
+  </div>`,
+  done:`<div class="menu">
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /> <path d="M14 2v5a1 1 0 0 0 1 1h5" /> <path d="M10 9H8" /> <path d="M16 13H8" /> <path d="M16 17H8" /></svg>Открыть расшифровку</button>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /> <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg>Переименовать</button>
+    <div class="sep"></div>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /> <path d="M21 3v5h-5" /></svg>Расшифровать заново</button>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>Показать файлы</button>
+    <small>2026-07-17_14-30_unknown</small>
+  </div>`,
+  busy:`<div class="menu">
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /> <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg>Переименовать</button>
+    <div class="sep"></div>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>Отменить расшифровку</button>
+    <button><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>Показать файлы</button>
+    <small>Расшифровка уже идёт</small>
+  </div>`
+};
+
+const app = document.getElementById("app");
+function show(id,on){const e=document.getElementById(id);e.hidden=!on;
+  if(id.startsWith("screen-"))e.style.display=on?"flex":"none";}
+
+function apply(s){
+  const desk = s === "toast";
+  document.getElementById("desktop").hidden = !desk;
+  app.hidden = desk;
+  if (desk) return;
+
+  const settings = s === "settings";
+  show("screen-list", !settings); show("screen-settings", settings);
+  if (settings) return;
+
+  show("nosys", s === "nosys");
+  show("rec-btn", s !== "recording");
+  show("rec-panel", s === "recording");
+  show("skeleton", s === "loading");
+  show("empty", s === "empty");
+  show("list", s !== "loading" && s !== "empty");
+
+  renderList((s === "transcribing" || s === "menubusy") ? "prog" : s === "queued" ? "queue"
+           : s === "rowerror" ? "err" : null);
+
+  const MENU_FOR = {menu:[0,"plain"], menudone:[1,"done"], menubusy:[0,"busy"]};
+  if (MENU_FOR[s]){
+    const [idx, kind] = MENU_FOR[s];
+    const row = document.querySelectorAll(".rec")[idx];
+    row.style.background = "var(--hover)";
+    row.querySelector(".time").style.opacity = 0;
+    row.querySelector(".dots").style.opacity = 1;
+    row.insertAdjacentHTML("beforeend", MENUS[kind]);
+  }
+}
+
+document.querySelectorAll(".panel button").forEach(b=>{
+  b.addEventListener("click",()=>{
+    document.querySelectorAll(".panel button").forEach(x=>x.setAttribute("aria-pressed","false"));
+    b.setAttribute("aria-pressed","true");
+    app.dataset.s=b.dataset.s; apply(b.dataset.s);
+  });
+});
+// всплывашка: смахнуть вверх, меню по стрелке
+(function(){
+  const t=document.querySelector(".toast"), m=document.getElementById("tmenu");
+  let y0=null;
+  // два пальца по трекпаду = событие колеса с горизонтальным сдвигом
+  let acc=0, back=null;
+  t.addEventListener("wheel",e=>{
+    if(Math.abs(e.deltaX)<Math.abs(e.deltaY))return;
+    e.preventDefault(); acc=Math.max(0,acc-e.deltaX);
+    if(acc>90){t.classList.add("away");t.style.transform="";t.style.opacity="";acc=0;
+      clearTimeout(back);back=setTimeout(()=>t.classList.remove("away"),1400);return;}
+    t.style.transition="none";
+    t.style.transform=`translateX(${acc}px)`;t.style.opacity=String(1-acc/170);
+    clearTimeout(back);
+    back=setTimeout(()=>{acc=0;t.style.transition="";t.style.transform="";t.style.opacity="";},420);
+  },{passive:false});
+  t.addEventListener("pointerdown",e=>{y0=e.clientX;t.setPointerCapture(e.pointerId)});
+  t.addEventListener("pointermove",e=>{
+    if(y0===null)return; const d=Math.max(0,e.clientX-y0);
+    t.style.transform=`translateX(${d}px)`;t.style.opacity=String(1-d/160);});
+  t.addEventListener("pointerup",e=>{
+    if(y0===null)return; const d=e.clientX-y0; y0=null;
+    if(d>50){t.classList.add("away");t.style.transform="";t.style.opacity="";
+      setTimeout(()=>{t.classList.remove("away")},1400);}
+    else{t.style.transform="";t.style.opacity="";}});
+  document.getElementById("toast-more").addEventListener("click",e=>{
+    e.stopPropagation(); m.hidden=!m.hidden;});
+})();
+document.getElementById("to-settings").addEventListener("click",()=>apply("settings"));
+document.getElementById("to-list").addEventListener("click",()=>apply("idle"));
+apply("idle");
+</script>
+</body>
+</html>

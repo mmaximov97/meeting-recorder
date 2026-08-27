@@ -1,0 +1,40 @@
+name: check
+
+# Релизный workflow (release.yml) срабатывает только на тег v*, поэтому за весь
+# редизайн 0.2.0 Windows не собирался ни разу. Этот — на каждый push и каждый
+# pull request: дешевле поймать несобираемость на PR, чем на релизе.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # Падение одной системы не должно скрывать состояние другой: нам важно
+      # видеть обе, а не первую упавшую.
+      fail-fast: false
+      matrix:
+        platform: ['windows-latest', 'macos-latest']
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: install frontend dependencies
+        run: npm install
+
+      - name: tests
+        run: cargo test --workspace
+
+      # Без бандла: нам нужен факт, что GUI-крейт линкуется и фронтенд
+      # подхватывается, а не установщик. Бандл на macOS вдобавок требует
+      # подписи и заметно дольше.
+      - name: build (no bundle)
+        run: npx tauri build --no-bundle

@@ -103,6 +103,13 @@ struct Pending {
     /// Куда сказать идущей расшифровке «хватит». `Some` ровно тогда, когда
     /// `running` поднят и отмены ещё не было.
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Идентификаторы задач шлюза, уже отправленных для `items[0]`.
+    ///
+    /// Живут под тем же локом, что `running` и `cancel`, по той же причине:
+    /// отмена решает «снять из очереди или прервать на ходу» и «что гасить на
+    /// шлюзе» одним снимком. Читайся они порознь, отмена успела бы взять id
+    /// уже следующей записи.
+    jobs: Vec<String>,
 }
 
 /// Очередь транскрипций на всё приложение: `items[0]` обрабатывается прямо
@@ -170,6 +177,20 @@ impl TranscribeQueue {
         Some(rx)
     }
 
+    /// Запомнить отправленную задачу шлюза. Зовётся из `run_transcription`
+    /// сразу после `submit`, до того как начнётся ожидание.
+    fn note_job(&self, job_id: String) {
+        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
+        pending.jobs.push(job_id);
+    }
+
+    /// Забрать накопленные id — именно забрать: отменять одну задачу дважды
+    /// незачем, а вот попасть вторым вызовом по уже следующей записи можно.
+    fn take_jobs(&self) -> Vec<String> {
+        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
+        std::mem::take(&mut pending.jobs)
+    }
+
     /// Убирает обработанную запись с фронта и отдаёт тех, кто остался — под
     /// тем же локом, что и `enqueue`, чтобы снимок для пересчёта позиций не
     /// мог оказаться устаревшим уже в момент чтения.
@@ -177,6 +198,7 @@ impl TranscribeQueue {
         let mut pending = self.pending.lock().expect("лок очереди транскрипции");
         pending.running = false;
         pending.cancel = None;
+        pending.jobs.clear();
         pending.items.pop_front();
         pending.items.iter().cloned().collect()
     }
@@ -832,6 +854,18 @@ fn emit_transcribe_cancelled(app: &AppHandle, folder: &Option<String>, base: &st
     let _ = app.emit("transcribe-cancelled", serde_json::json!({ "folder": folder, "base": base }));
 }
 
+/// Какая из двух дорожек сейчас на шлюзе.
+///
+/// Отдельным событием, а не полем в `stage`: строка стадии уже перегружена
+/// форматом `queued:N`, и второй раз этого делать не стоит — разбор в
+/// `ui/main.js` пришлось бы усложнять ради того, что к стадии отношения не имеет.
+fn emit_transcribe_track(app: &AppHandle, folder: &Option<String>, base: &str, track: &str) {
+    let _ = app.emit(
+        "transcribe-track",
+        serde_json::json!({ "folder": folder, "base": base, "track": track }),
+    );
+}
+
 /// Ставит запись в очередь и возвращается сразу — саму транскрипцию проводит
 /// `spawn_transcribe_worker`. Позиция > 1 значит «уже что-то обрабатывается
 /// или ждёт впереди» — шлём её в UI тем же событием `transcribe-progress`,
@@ -914,11 +948,19 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
             return Err(msg);
         }
     };
-    emit_transcribe_progress(app, folder, base, "polling");
-    let (mic_res, sys_res) = tokio::join!(
-        transcribe::submit_and_poll(&client, &url, &key, &mic_path, transcribe::Label::Owner),
-        transcribe::submit_and_poll(&client, &url, &key, &sys_path, transcribe::Label::Others),
-    );
+    // Дорожки ПО ОЧЕРЕДИ, а не через join!.
+    //
+    // Ускорения параллельность не давала никогда: воркер шлюза работает с
+    // concurrency: 1 и всё равно выстраивает задачи друг за другом. Зато
+    // клиентские часы у обеих тикали одновременно, и вторая дорожка тратила
+    // свой бюджет ожидания, стоя в чужой очереди, — ровно поэтому часовые
+    // встречи не доезжали. См. docs/2026-08-27-...-design.md, раздел 2.
+    let queue = app.state::<TranscribeQueue>();
+
+    emit_transcribe_track(app, folder, base, "mic");
+    let mic_res = дорожка_целиком(&client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue).await;
+    emit_transcribe_track(app, folder, base, "system");
+    let sys_res = дорожка_целиком(&client, &url, &key, &sys_path, transcribe::Label::Others, &*queue).await;
 
     let (mic, mic_err) = match mic_res {
         Ok(r) => (Some(r), None),
@@ -978,6 +1020,23 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
 
     emit_transcribe_done(app, folder, base);
     Ok(())
+}
+
+/// Одна дорожка целиком: отправить, запомнить id для отмены, дождаться.
+///
+/// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
+/// минуту, не нашла бы что гасить на шлюзе.
+async fn дорожка_целиком(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    path: &Path,
+    label: transcribe::Label,
+    queue: &TranscribeQueue,
+) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
+    let job_id = transcribe::submit(client, url, key, path).await?;
+    queue.note_job(job_id.clone());
+    transcribe::poll_until_done(client, url, key, &job_id, label).await
 }
 
 fn main() {
@@ -1608,6 +1667,50 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(qi("b")), "мёртвая копия");
         assert!(q.start_front(&qi("b")).is_some(), "живая постановка — можно работать");
         assert_eq!(rx.try_recv(), Ok(qi("b")), "а это уже сама постановка");
+    }
+
+    /// Чтобы отменить задачу на шлюзе, надо знать её id. Он появляется только
+    /// после отправки, поэтому очередь обязана уметь его принять на ходу.
+    #[test]
+    fn идущая_запись_запоминает_id_задач_шлюза() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+
+        queue.note_job("job_mic".to_string());
+        queue.note_job("job_sys".to_string());
+
+        assert_eq!(queue.take_jobs(), vec!["job_mic".to_string(), "job_sys".to_string()]);
+    }
+
+    /// `take_jobs` именно ЗАБИРАЕТ: второй вызов не имеет права отдать те же
+    /// id снова, иначе повторная отмена била бы по чужой, уже новой задаче.
+    #[test]
+    fn забранные_id_второй_раз_не_отдаются() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+        queue.note_job("job_mic".to_string());
+
+        assert_eq!(queue.take_jobs(), vec!["job_mic".to_string()]);
+        assert!(queue.take_jobs().is_empty(), "id одноразовые");
+    }
+
+    /// Следующая запись начинает с чистого листа: id предыдущей к ней
+    /// отношения не имеют.
+    #[test]
+    fn финиш_фронта_забывает_id_задач() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("первая");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+        queue.note_job("job_old".to_string());
+
+        queue.finish_front();
+
+        assert!(queue.take_jobs().is_empty(), "id не переезжают на следующую запись");
     }
 
     // ---- путь к папке записи ------------------------------------------------

@@ -950,7 +950,11 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
                     if let Some(e) = event {
                         feed(&mut app, &handle, e, active.as_ref());
                         if let (true, Some(s)) = (app.state_is_armed(), active.as_ref()) {
-                            ask(&handle, &s.process_name);
+                            // В интерфейс уходит канонический идентификатор, а
+                            // не сырое имя процесса: на Windows оно другое
+                            // (`Zoom.exe` против `zoom.us`), и таблицы во
+                            // всплывашке на него не отзывались.
+                            ask(&handle, meeting_recorder::detector::canonical_source(&s.process_name));
                         }
                     }
                 }

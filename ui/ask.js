@@ -22,11 +22,14 @@ const ПЛАШКА = 380;
 /// Путь вправо, после которого смахивание считается состоявшимся.
 const ПОРОГ = 90;
 
+// Ключи — КАНОНИЧЕСКИЕ идентификаторы звонилок, как их шлёт событие `ask`
+// (`canonical_source` в src/detector/mod.rs). Сырые имена процессов сюда
+// класть нельзя: на macOS и Windows они разные.
 const ИСТОЧНИКИ = {
-  "zoom.us": { имя: "Zoom", класс: "zoom" },
-  "Microsoft Teams": { имя: "Teams", класс: "teams" },
-  Slack: { имя: "Slack", класс: "slack" },
-  Discord: { имя: "Discord", класс: "discord" },
+  zoom: { имя: "Zoom", класс: "zoom" },
+  teams: { имя: "Teams", класс: "teams" },
+  slack: { имя: "Slack", класс: "slack" },
+  discord: { имя: "Discord", класс: "discord" },
 };
 
 // Настоящий знак есть только у Zoom — он был в макете. Остальным буква на
@@ -262,7 +265,7 @@ listen("ask", (e) => {
   const ava = $("ava");
   ava.className = карточка ? `ava ${карточка.класс}` : "ava";
   ava.innerHTML =
-    источник === "zoom.us" ? ZOOM_SVG : карточка ? карточка.имя[0] : МИКРОФОН_SVG;
+    источник === "zoom" ? ZOOM_SVG : карточка ? карточка.имя[0] : МИКРОФОН_SVG;
   показать();
 });
 

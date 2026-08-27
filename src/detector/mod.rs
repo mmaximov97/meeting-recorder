@@ -36,3 +36,97 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
 pub trait MeetingDetector {
     fn poll(&self) -> Result<Vec<MicSession>, DetectError>;
 }
+
+/// Сырое имя процесса → идентификатор звонилки для интерфейса.
+///
+/// Одна таблица на обе системы, потому что имена процессов у них разные, а
+/// звонилка одна и та же: `zoom.us` на macOS и `Zoom.exe` на Windows — это
+/// Zoom, и логотип у него общий.
+///
+/// **Это НЕ детект.** Детект на двух системах устроен по-разному и правильно:
+/// на macOS список имён и есть детект (кто держит микрофон, система без лишних
+/// прав не показывает), а на Windows `WindowsDetector` видит настоящие сессии
+/// захвата WASAPI. Заводить этот список в детекте Windows нельзя — перестанут
+/// ловиться Zoom во вкладке браузера, Webex и всё, чего в списке нет.
+///
+/// **Имена файлов эта функция не трогает.** `recording_filename`
+/// (`src/storage.rs:22`) как прогонял сырое имя через `sanitize_source`, так и
+/// прогоняет: канонизация имён на диске переименовала бы и записи macOS, а
+/// таблица в `ui/main.js` всё равно обязана понимать всё, что когда-либо было
+/// записано.
+pub fn canonical_source(raw: &str) -> &'static str {
+    let имя = raw.trim().trim_end_matches(".exe").trim_end_matches(".EXE");
+    let имя = имя.to_ascii_lowercase();
+    match имя.as_str() {
+        "zoom.us" | "zoom" => "zoom",
+        "microsoft teams" | "ms-teams" | "teams" => "teams",
+        "slack" => "slack",
+        "discord" => "discord",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn имена_macos_канонизируются() {
+        assert_eq!(canonical_source("zoom.us"), "zoom");
+        assert_eq!(canonical_source("Microsoft Teams"), "teams");
+        assert_eq!(canonical_source("Slack"), "slack");
+        assert_eq!(canonical_source("Discord"), "discord");
+    }
+
+    /// Гвоздь задачи: на Windows имена другие, и до этой правки ни одно из них
+    /// не совпадало ни с одной таблицей в интерфейсе — у каждого звонка был
+    /// общий значок микрофона и сырое «.exe» в строке взвода.
+    #[test]
+    fn имена_windows_канонизируются_в_то_же_самое() {
+        assert_eq!(canonical_source("Zoom.exe"), "zoom");
+        assert_eq!(canonical_source("ms-teams.exe"), "teams");
+        assert_eq!(canonical_source("Teams.exe"), "teams");
+        assert_eq!(canonical_source("slack.exe"), "slack");
+        assert_eq!(canonical_source("Discord.exe"), "discord");
+    }
+
+    /// Регистр имени процесса между системами и версиями не постоянен, а
+    /// узнавание от него зависеть не должно.
+    #[test]
+    fn регистр_не_влияет() {
+        assert_eq!(canonical_source("ZOOM.EXE"), "zoom");
+        assert_eq!(canonical_source("slack"), "slack");
+    }
+
+    /// Незнакомое имя — это «встреча, программу не узнали», а не пустота:
+    /// интерфейс на этом идентификаторе рисует общий значок микрофона.
+    #[test]
+    fn незнакомое_имя_даёт_unknown() {
+        assert_eq!(canonical_source("Finder"), "unknown");
+        assert_eq!(canonical_source("explorer.exe"), "unknown");
+        assert_eq!(canonical_source(""), "unknown");
+    }
+
+    /// Вспомогательные процессы Discord не должны выдавать себя за звонилку —
+    /// то же правило, что уже зафиксировано в детекторе macOS.
+    #[test]
+    fn хелперы_не_звонилка() {
+        assert_eq!(canonical_source("Discord Helper"), "unknown");
+        assert_eq!(canonical_source("Google Chrome Helper (Renderer)"), "unknown");
+    }
+
+    /// Фиксирует решение, а не поведение: встреча в Meet — вкладка браузера, и
+    /// имя процесса у неё то же, что у почты и у YouTube. Если этот тест
+    /// «починят», добавив браузер, приложение начнёт спрашивать «записать
+    /// встречу?» на каждом видео.
+    #[test]
+    fn браузер_не_звонилка() {
+        for b in ["Google Chrome", "chrome.exe", "Arc", "Safari", "msedge.exe"] {
+            assert_eq!(
+                canonical_source(b),
+                "unknown",
+                "{b} — браузер, а не звонилка"
+            );
+        }
+    }
+}

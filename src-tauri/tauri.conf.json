@@ -1,13 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "meeting-recorder",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "identifier": "net.cypher-cloud.meeting-recorder",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -16,6 +17,24 @@
         "height": 640,
         "resizable": true,
         "visible": false
+      },
+      {
+        "label": "ask",
+        "url": "ask.html",
+        "title": "Записать встречу?",
+        "width": 876,
+        "height": 96,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": false,
+        "focus": false,
+        "focusable": false,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
+        "visible": false,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

@@ -24,7 +24,7 @@
 
 Каждая ветка живёт в своей папке-worktree со своим портом — так параллельные
 сессии не дерутся за одни файлы. Общая папка
-`/Users/birka/Projects/meeting-recorder` остаётся чистой базой, в ней не работают.
+`<каталог проектов>/meeting-recorder` остаётся чистой базой, в ней не работают.
 
 | Ветка | Папка | Порт |
 |---|---|---|
@@ -50,7 +50,7 @@
 
 Повторяется дословно во всех промтах, здесь только для справки:
 
-- репозиторий `/Users/birka/Projects/meeting-recorder`, Tauri 2 + Rust, версия 0.1.6;
+- репозиторий `<каталог проектов>/meeting-recorder`, Tauri 2 + Rust, версия 0.1.6;
 - фронтенд — ровно два файла: `ui/index.html` (472 строки, все стили внутри
   `<style>` на строках 7–400) и `ui/main.js` (606 строк). Сборки фронтенда нет:
   `frontendDist` в `src-tauri/tauri.conf.json` указывает на `../ui`;
@@ -79,14 +79,14 @@
 # PR-0 · `feat/ui-canon` — дизайн-канон
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, ветка master, Tauri 2 + Rust,
+Репозиторий <каталог проектов>/meeting-recorder, ветка master, Tauri 2 + Rust,
 версия 0.1.6. Задача: собрать дизайн-канон приложения. Кода в этой ветке не трогаем
 вообще — только документы.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-ui-canon
+Папка: <каталог проектов>/meeting-recorder-ui-canon
 Ветка: feat/ui-canon — папка уже создана и уже стоит на ней.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи.
 
 КОНТЕКСТ
@@ -180,14 +180,14 @@ npm-пакетов. Политика безопасности default-src 'self'
 # PR-1 · `feat/ui-shell` — новый экран целиком
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
 Задача: переписать главный экран приложения по утверждённому макету.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-shell
+Папка: <каталог проектов>/meeting-recorder-shell
 Ветка: feat/ui-shell — папка уже создана и уже стоит на ней.
 Порт: 3006. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -338,17 +338,17 @@ README.md, раздел «Запуск» — он описывает повед�
 # PR-2 · `feat/ui-states` — состояния, ошибки, клавиатура
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Ветка feat/ui-shell уже влита в сборочную ветку feat/ui-redesign: главный экран переписан по макету
 docs/mockups/layout-a.html, канон лежит в docs/2026-08-26-ui-design-system.md.
 Задача: добавить то, чего в приложении нет вообще — состояния загрузки,
 вменяемый показ ошибок и доступность с клавиатуры.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-states
+Папка: <каталог проектов>/meeting-recorder-states
 Ветка: feat/ui-states — папка уже создана и уже стоит на ней.
 Порт: 3010. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -460,16 +460,16 @@ docs/mockups/layout-a.html, канон лежит в docs/2026-08-26-ui-design-s
 # PR-3 · `feat/ui-copy` — все системные тексты
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Ветки feat/ui-shell и feat/ui-states уже влиты в сборочную ветку feat/ui-redesign.
 Задача: переписать все тексты, которые приложение говорит человеку — одной
 пачкой, по правилам из дизайн-канона.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-copy
+Папка: <каталог проектов>/meeting-recorder-copy
 Ветка: feat/ui-copy — папка уже создана и уже стоит на ней.
 Порт: 3011. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -546,7 +546,7 @@ README.md. Больше ничего. В master и в feat/ui-redesign не ко
 # PR-4 · `feat/ui-transcript` — расшифровка и длительность
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Ветки feat/ui-shell, feat/ui-states, feat/ui-copy влиты в сборочную ветку
 feat/ui-redesign.
 В Rust уже готовы и влиты туда же: поле transcript у записи, поле duration_sec,
@@ -554,10 +554,10 @@ feat/ui-redesign.
 Задача: подключить интерфейс к этим возможностям.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-transcript
+Папка: <каталог проектов>/meeting-recorder-transcript
 Ветка: feat/ui-transcript — папка уже создана и уже стоит на ней.
 Порт: 3012. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -638,16 +638,16 @@ feat/ui-redesign.
 ## R-1 · `feat/ask-overlay` — всплывашка «Записать встречу?»
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
 Задача: пункт 1 из docs/2026-08-26-ui-redesign-backend-tasks.md — заменить
 нынешнее поведение при обнаружении встречи на всплывающее окно поверх всех.
 Прочитай этот пункт целиком перед началом: там требования к поведению.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-ask
+Папка: <каталог проектов>/meeting-recorder-ask
 Ветка: feat/ask-overlay — папка уже создана и уже стоит на ней.
 Порт: 3004. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -697,16 +697,16 @@ cargo test --workspace до правок: 273 зелёных суммарно (�
 ## R-2 · `feat/recording-meta` — «расшифровка есть» и длительность
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Задача: пункты 2 и 4 из docs/2026-08-26-ui-redesign-backend-tasks.md — добавить
 в данные о записи два поля: есть ли расшифровка и сколько запись длится.
 Прочитай оба пункта целиком перед началом.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-meta
+Папка: <каталог проектов>/meeting-recorder-meta
 Ветка: feat/recording-transcript-duration — папка уже создана и уже стоит на ней.
 Порт: 3008. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -740,16 +740,16 @@ cargo test --workspace до правок: 273 зелёных суммарно (�
 ## R-3 · `feat/folder-commands` — открыть папку записи, отменить расшифровку
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Задача: пункты 3 и 5 из docs/2026-08-26-ui-redesign-backend-tasks.md — команда
 открытия папки конкретной записи и отмена расшифровки.
 Прочитай оба пункта целиком перед началом.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-folders
+Папка: <каталог проектов>/meeting-recorder-folders
 Ветка: feat/folder-commands — папка уже создана и уже стоит на ней.
 Порт: 3009. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -785,15 +785,15 @@ cargo test --workspace до правок: 273 зелёных суммарно (�
 ## R-4 · `feat/detect-more-apps` — Discord и Google Meet
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust.
 Задача: пункт 6 из docs/2026-08-26-ui-redesign-backend-tasks.md — научить
 приложение узнавать Discord и Google Meet.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-detect
+Папка: <каталог проектов>/meeting-recorder-detect
 Ветка: feat/detect-more-apps — папка уже создана и уже стоит на ней.
 Порт: 3005. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ
@@ -832,7 +832,7 @@ cargo test --workspace до правок: 273 зелёных суммарно (�
 смотрел на экран целиком**: каждая ветка проверяла только свой кусок.
 
 ~~~
-Репозиторий /Users/birka/Projects/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
+Репозиторий <каталог проектов>/meeting-recorder, Tauri 2 + Rust, версия 0.1.6.
 Все ветки редизайна уже слиты в сборочную ветку feat/ui-redesign:
 feat/ui-canon, feat/ui-shell, feat/ui-states, feat/ui-copy, feat/ui-transcript,
 feat/ask-popup, feat/recording-transcript-duration, feat/folder-commands,
@@ -844,10 +844,10 @@ master при этом не трогали — он остался таким, �
 Это НЕ ветка новых возможностей. Ничего нового не придумывай.
 
 ГДЕ РАБОТАТЬ
-Папка: /Users/birka/Projects/meeting-recorder-release
+Папка: <каталог проектов>/meeting-recorder-release
 Ветка: chore/ui-release — папка уже создана и уже стоит на ней.
 Порт: 3015. Если поднимаешь локальный сервер для превью — только на нём.
-НЕ работай в /Users/birka/Projects/meeting-recorder: там параллельно живут
+НЕ работай в <каталог проектов>/meeting-recorder: там параллельно живут
 другие задачи, и вы затрёте друг друга.
 
 ПЕРЕД СТАРТОМ

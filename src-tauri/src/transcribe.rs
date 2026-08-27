@@ -398,6 +398,17 @@ pub async fn poll_until_done(
 /// 404 и 409 — не ошибка: задача могла закончиться сама между нажатием и этим
 /// вызовом, и «не нашли, что отменять» здесь означает ровно то, чего человек
 /// и хотел.
+///
+/// Таймаут на `DELETE` (тот же `POLL_REQUEST_TIMEOUT`, что и на `GET` в
+/// `poll_once`) обязателен, а не «на всякий случай»: единственный вызывающий
+/// внутри пакета — `poll_until_done` при `PollLost`, то есть ровно момент,
+/// когда шесть опросов подряд уже провалились и сеть признана мёртвой (сон
+/// ноутбука, упавший VPN, протухший сокет в пуле). Без границы `.send()` на
+/// уже нерабочей сети не возвращается никогда, `poll_until_done` не
+/// возвращается вслед за ним, воркер очереди стоит, и строка навсегда
+/// остаётся в «Расшифровываю…». Тот же путь используется ручной отменой
+/// (`cancel_transcription` в `main.rs`) — без таймаута там повисшая задача
+/// просто утекала бы отдельной таской.
 pub async fn cancel_job(
     client: &reqwest::Client,
     gateway: &str,
@@ -405,7 +416,12 @@ pub async fn cancel_job(
     job_id: &str,
 ) -> Result<(), TranscribeError> {
     let url = format!("{gateway}/v1/jobs/{job_id}");
-    let resp = client.delete(&url).bearer_auth(key).send().await?;
+    let resp = client
+        .delete(&url)
+        .bearer_auth(key)
+        .timeout(POLL_REQUEST_TIMEOUT)
+        .send()
+        .await?;
     match resp.status().as_u16() {
         200 | 202 | 404 | 409 => Ok(()),
         code => Err(TranscribeError::CancelRejected(code.to_string())),
@@ -988,18 +1004,44 @@ mod tests {
     /// по 10 секунд = 60 минут, никак не связанных с `POLL_DEADLINE`): цикл
     /// обязан закончиться по НАСТОЯЩЕМУ переданному `deadline`, а не раньше и
     /// не позже, даже если опрашиваемый вечно висит в `Pending`.
+    ///
+    /// Одного `elapsed() >= deadline` тут недостаточно — это одностороннее
+    /// условие: цикл с зашитым `for _ in 0..360 { ... }` вместо `while
+    /// начало.elapsed() < deadline` тоже успевает натикать больше 30 мс (360
+    /// попыток по 5 мс = 1.8 с) и тест бы прошёл, ничего не заметив. Поэтому
+    /// вторая, верхняя граница считает сами вызовы `attempt`: при
+    /// `interval=5мс`/`deadline=30мс` их должно быть около 6, и уж точно не
+    /// 360. Время не годится для верхней границы (машина под нагрузкой может
+    /// притормозить `sleep`), а счётчик попыток детерминирован независимо от
+    /// планировщика.
     #[tokio::test]
     async fn poll_loop_уважает_переданный_deadline_а_не_зашитое_число_попыток() {
-        let всегда_pending = || std::future::ready(Ok(PollAttempt::Job(JobOutcome::Pending)));
+        let попыток = std::cell::Cell::new(0u32);
         let deadline = Duration::from_millis(30);
+        let interval = Duration::from_millis(5);
+        let всегда_pending = || {
+            попыток.set(попыток.get() + 1);
+            std::future::ready(Ok(PollAttempt::Job(JobOutcome::Pending)))
+        };
         let начало = std::time::Instant::now();
 
-        let result = poll_loop("job-1", Duration::from_millis(5), deadline, всегда_pending).await;
+        let result = poll_loop("job-1", interval, deadline, всегда_pending).await;
 
         assert!(matches!(result, Err(TranscribeError::Timeout(id)) if id == "job-1"));
         assert!(
             начало.elapsed() >= deadline,
             "цикл обязан отработать хотя бы весь переданный deadline, а не выйти раньше"
+        );
+
+        // ~6 ожидаемых попыток (30мс / 5мс) плюс запас на дрожание таймера —
+        // но никак не 360, которые дал бы зашитый потолок.
+        let потолок_попыток = (deadline.as_millis() / interval.as_millis()) as u32 + 5;
+        assert!(
+            попыток.get() <= потолок_попыток,
+            "попыток опроса {}, ожидали не больше {} — похоже, цикл крутится \
+             на зашитом числе итераций, а не на переданном deadline",
+            попыток.get(),
+            потолок_попыток
         );
     }
 

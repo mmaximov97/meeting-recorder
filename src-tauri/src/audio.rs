@@ -131,8 +131,11 @@ fn ask(handle: &AppHandle, source: &str) {
     show_ask_popup(handle);
 }
 
-/// Ширина всплывашки. Дублируется в `src-tauri/tauri.conf.json` (окно `ask`) и
-/// в `ui/ask.js`. Правишь здесь — правь во всех трёх местах.
+/// Ширина ПЛАШКИ — того, что человек видит. Окно `ask` в
+/// `src-tauri/tauri.conf.json` намеренно шире (876): справа от плашки поле, в
+/// которое она уезжает при смахивании, и оно висит за краем экрана. Третье
+/// место — `ui/ask.js` (`ПЛАШКА` и `ШИРИНА_ОКНА`). Сверено тестом
+/// `ширина_плашки_и_окна_это_разные_числа`.
 const ASK_WIDTH: f64 = 380.0;
 
 /// Высота окна всплывашки. Дублируется в `src-tauri/tauri.conf.json`.
@@ -193,7 +196,7 @@ fn show_ask_popup(handle: &AppHandle) {
             let _ = handle.run_on_main_thread(move || показать_поверх(&h));
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = w.show();
+        показать_обычным_окном(&w);
         return;
     };
 
@@ -219,7 +222,7 @@ fn show_ask_popup(handle: &AppHandle) {
         let _ = handle.run_on_main_thread(move || показать_поверх(&h));
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = w.show();
+    показать_обычным_окном(&w);
     следить_за_наведением(handle, (x, y, ASK_WIDTH, ASK_HEIGHT), масштаб);
     log::info!(
         "всплывашка: экран {:?}, плашка в ({x:.0}, {y:.0})",
@@ -327,6 +330,20 @@ fn показать_поверх(handle: &AppHandle) {
         let _: () = objc2::msg_send![окно, setIgnoresMouseEvents: false];
         let _: () = objc2::msg_send![окно, orderFrontRegardless];
     }
+}
+
+/// Показать всплывашку на системах, где обычному окну не отказывают в верхнем
+/// уровне.
+///
+/// На macOS так нельзя, и причина в докблоке `show_ask_popup`: приложение
+/// живёт в строке меню как `Accessory`, а окна плавающего уровня у неактивного
+/// приложения система не показывает вовсе. На Windows этой беды нет — там это
+/// обычный `HWND_TOPMOST`, и без него плашка вылезает ПОД окном звонка, то
+/// есть не вылезает.
+#[cfg(not(target_os = "macos"))]
+fn показать_обычным_окном(w: &tauri::WebviewWindow) {
+    let _ = w.set_always_on_top(true);
+    let _ = w.show();
 }
 
 /// Как часто спрашиваем, где мышь, пока висит всплывашка.
@@ -1867,5 +1884,27 @@ mod tests {
         }
         // Процесс появился — разгон начинается с нуля.
         взвести(&mut d, 7);
+    }
+
+    /// Комментарий у ASK_WIDTH годами утверждал, что ширина дублируется в
+    /// tauri.conf.json. Она там другая: 876 — это ширина ОКНА, с полем справа
+    /// под уезжающую плашку, а ASK_WIDTH — ширина самой плашки. Тест держит
+    /// оба числа сверенными с конфигом, чтобы комментарий больше не врал.
+    #[test]
+    fn ширина_плашки_и_окна_это_разные_числа() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("конфиг");
+        let окно = conf["app"]["windows"]
+            .as_array()
+            .expect("список окон")
+            .iter()
+            .find(|w| w["label"] == "ask")
+            .expect("окно ask");
+
+        assert_eq!(окно["height"].as_f64(), Some(ASK_HEIGHT));
+        assert!(
+            окно["width"].as_f64().expect("ширина окна") > ASK_WIDTH,
+            "окно шире плашки: справа поле, в которое она уезжает при смахивании"
+        );
     }
 }

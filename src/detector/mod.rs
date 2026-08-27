@@ -55,9 +55,14 @@ pub trait MeetingDetector {
 /// таблица в `ui/main.js` всё равно обязана понимать всё, что когда-либо было
 /// записано.
 pub fn canonical_source(raw: &str) -> &'static str {
-    let имя = raw.trim().trim_end_matches(".exe").trim_end_matches(".EXE");
-    let имя = имя.to_ascii_lowercase();
-    match имя.as_str() {
+    // Сначала lowercase, потом срез `.exe` — а не наоборот. Смешанный регистр
+    // (`Zoom.Exe`) не совпадал ни с `.exe`, ни с `.EXE` при срезе ДО lowercase,
+    // и обрезка молча не срабатывала: правило здесь обязано быть тем же самым,
+    // что и в `sanitize_tail` (`src/storage.rs`) — иначе тултип и имя файла для
+    // одного и того же процесса расходятся (см. докблок задачи).
+    let имя = raw.trim().to_ascii_lowercase();
+    let имя = имя.strip_suffix(".exe").unwrap_or(&имя);
+    match имя {
         "zoom.us" | "zoom" => "zoom",
         "microsoft teams" | "ms-teams" | "teams" => "teams",
         "slack" => "slack",
@@ -96,6 +101,17 @@ mod tests {
     fn регистр_не_влияет() {
         assert_eq!(canonical_source("ZOOM.EXE"), "zoom");
         assert_eq!(canonical_source("slack"), "slack");
+    }
+
+    /// Гвоздь задачи: смешанный регистр расширения (`Zoom.Exe`) раньше не
+    /// совпадал ни с `.exe`, ни с `.EXE` — срез не срабатывал, обрезанное имя
+    /// не попадало ни в одну ветку `match`, и результатом был `unknown` вместо
+    /// `zoom`. Правило теперь «сначала lowercase, потом срез», и регистру
+    /// расширения (а не только регистру буквы `Z`) тоже полагается не влиять.
+    #[test]
+    fn смешанный_регистр_расширения_не_ломает_узнавание() {
+        assert_eq!(canonical_source("Zoom.Exe"), "zoom");
+        assert_eq!(canonical_source("Slack.eXe"), "slack");
     }
 
     /// Незнакомое имя — это «встреча, программу не узнали», а не пустота:

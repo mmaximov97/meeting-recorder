@@ -34,7 +34,8 @@ use tauri_plugin_log::{Target, TargetKind};
 /// Конкретная запись ложится в месячную подпапку, см. `storage::month_dir`.
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\Cypher\Recordings")
+    let home = std::env::var("USERPROFILE").expect("%USERPROFILE% обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 #[cfg(target_os = "macos")]
@@ -80,7 +81,13 @@ enum Cancelled {
     /// сообщить заново; идущая запись сюда НЕ попадает (см. `cancel`).
     Dropped(Vec<(usize, QueueItem)>),
     /// Обрабатывалась прямо сейчас: воркеру послан сигнал остановиться.
-    Stopped,
+    /// Внутри — id задач шлюза, накопленных для неё (см. поле `jobs`),
+    /// заодно отобранные из-под того же лока, что принял решение
+    /// «идущая, гасим». Отдельный вызов за теми же id уже ПОСЛЕ этого не
+    /// годится: между возвратом `cancel()` и следующим захватом лока воркер,
+    /// разбуженный нашим же `oneshot`, успевает дойти до `finish_front()` и
+    /// опустошить `jobs` первым — и тогда `DELETE` на шлюз просто не улетает.
+    Stopped(Vec<String>),
 }
 
 /// Изменяемая часть очереди — под одним локом целиком.
@@ -103,6 +110,13 @@ struct Pending {
     /// Куда сказать идущей расшифровке «хватит». `Some` ровно тогда, когда
     /// `running` поднят и отмены ещё не было.
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Идентификаторы задач шлюза, уже отправленных для `items[0]`.
+    ///
+    /// Живут под тем же локом, что `running` и `cancel`, по той же причине:
+    /// отмена решает «снять из очереди или прервать на ходу» и «что гасить на
+    /// шлюзе» одним снимком. Читайся они порознь, отмена успела бы взять id
+    /// уже следующей записи.
+    jobs: Vec<String>,
 }
 
 /// Очередь транскрипций на всё приложение: `items[0]` обрабатывается прямо
@@ -170,6 +184,13 @@ impl TranscribeQueue {
         Some(rx)
     }
 
+    /// Запомнить отправленную задачу шлюза. Зовётся из `run_transcription`
+    /// сразу после `submit`, до того как начнётся ожидание.
+    fn note_job(&self, job_id: String) {
+        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
+        pending.jobs.push(job_id);
+    }
+
     /// Убирает обработанную запись с фронта и отдаёт тех, кто остался — под
     /// тем же локом, что и `enqueue`, чтобы снимок для пересчёта позиций не
     /// мог оказаться устаревшим уже в момент чтения.
@@ -177,6 +198,7 @@ impl TranscribeQueue {
         let mut pending = self.pending.lock().expect("лок очереди транскрипции");
         pending.running = false;
         pending.cancel = None;
+        pending.jobs.clear();
         pending.items.pop_front();
         pending.items.iter().cloned().collect()
     }
@@ -203,7 +225,14 @@ impl TranscribeQueue {
             if let Some(tx) = pending.cancel.take() {
                 let _ = tx.send(());
             }
-            return Ok(Cancelled::Stopped);
+            // Забираем id ИЗ ТОГО ЖЕ лока, а не отдельным вызовом снаружи:
+            // `tx.send(())` выше будит воркер немедленно, и он может успеть
+            // дойти до `finish_front()` (который чистит `jobs`) раньше, чем
+            // вызывающий код возьмёт лок ещё раз. Отдельный метод, забирающий
+            // `jobs` вторым вызовом уже после `cancel()`, — гонка, которая
+            // молча теряет id и оставляет задачу висеть на шлюзе.
+            let jobs = std::mem::take(&mut pending.jobs);
+            return Ok(Cancelled::Stopped(jobs));
         }
         pending.items.remove(pos);
         let skip = usize::from(pending.running);
@@ -232,8 +261,17 @@ impl TranscribeQueue {
 /// недоделанной. Бросить её безопасно ровно потому, что все точки ожидания у
 /// неё сетевые: файлы пишутся сплошным куском в самом конце, между ними нет ни
 /// одного `await`, и оборваться посередине набора `.md`/`.txt` расшифровка не
-/// может. Задание на стороне шлюза при этом остаётся жить — мы всего лишь
-/// перестаём ждать ответ.
+/// может.
+///
+/// Задание на стороне шлюза при этом НЕ остаётся просто висеть — но гасится
+/// не отсюда. `cancel_transcription` (см. её докблок) шлёт `DELETE` по id,
+/// отобранным из `Pending::jobs` тем же локом, что разбудил этот `select!`; а
+/// если до отмены не дошло, но связь со шлюзом пропала совсем — ту же задачу
+/// гасит сам `transcribe::poll_until_done`, вернув `PollLost`. Незагашенными
+/// остаются только два случая, и оба осознанно вне объёма: выход из
+/// приложения посреди расшифровки (это ближе к персистентной очереди) и
+/// отмена во время ещё не завершённого `submit` — id тогда ещё не существует,
+/// гасить нечего.
 fn spawn_transcribe_worker(
     app: AppHandle,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<QueueItem>,
@@ -832,6 +870,18 @@ fn emit_transcribe_cancelled(app: &AppHandle, folder: &Option<String>, base: &st
     let _ = app.emit("transcribe-cancelled", serde_json::json!({ "folder": folder, "base": base }));
 }
 
+/// Какая из двух дорожек сейчас на шлюзе.
+///
+/// Отдельным событием, а не полем в `stage`: строка стадии уже перегружена
+/// форматом `queued:N`, и второй раз этого делать не стоит — разбор в
+/// `ui/main.js` пришлось бы усложнять ради того, что к стадии отношения не имеет.
+fn emit_transcribe_track(app: &AppHandle, folder: &Option<String>, base: &str, track: &str) {
+    let _ = app.emit(
+        "transcribe-track",
+        serde_json::json!({ "folder": folder, "base": base, "track": track }),
+    );
+}
+
 /// Ставит запись в очередь и возвращается сразу — саму транскрипцию проводит
 /// `spawn_transcribe_worker`. Позиция > 1 значит «уже что-то обрабатывается
 /// или ждёт впереди» — шлём её в UI тем же событием `transcribe-progress`,
@@ -869,7 +919,37 @@ fn cancel_transcription(
         // Об идущей объявит воркер, когда она действительно остановится:
         // скажи мы это отсюда, «отменено» появилось бы на экране раньше, чем
         // расшифровка перестала писать файлы.
-        Cancelled::Stopped => {}
+        Cancelled::Stopped(jobs) => {
+            // Задача на шлюзе живёт своей жизнью и держит GPU: воркер там
+            // работает с concurrency: 1, и пока брошенная задача не погашена,
+            // следующая в НАШЕЙ очереди не двинется. Гасим её явно.
+            //
+            // `jobs` пришли вместе с исходом `cancel()`, а не отдельным
+            // вызовом следом: `cancel()` уже разбудил воркер отправкой в
+            // `oneshot`, и раздельный второй захват лока мог бы опоздать за
+            // `finish_front()`, которая тот же `jobs` чистит.
+            if !jobs.is_empty() {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let cfg = Config::load(&app);
+                    let (Some(url), Some(key)) = (cfg.stt_gateway_url, cfg.stt_api_key) else {
+                        return;
+                    };
+                    let url = url.trim().trim_end_matches('/').to_string();
+                    let Ok(client) = reqwest::Client::builder().build() else {
+                        return;
+                    };
+                    for job in jobs {
+                        // Неудача не всплывает на экран: локальная отмена уже
+                        // сработала, и красное сообщение о чужой сети поверх
+                        // собственного успешного действия только пугает.
+                        if let Err(e) = transcribe::cancel_job(&client, &url, key.trim(), &job).await {
+                            log::warn!("не удалось погасить задачу {job} на шлюзе: {e}");
+                        }
+                    }
+                });
+            }
+        }
         Cancelled::Unknown => {}
         Cancelled::Dropped(moved) => {
             emit_transcribe_cancelled(&app, &folder, &base);
@@ -905,7 +985,6 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     let mic_path = dir.join(format!("{base}.mic.wav"));
     let sys_path = dir.join(format!("{base}.system.wav"));
 
-    emit_transcribe_progress(app, folder, base, "uploading");
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -914,11 +993,23 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
             return Err(msg);
         }
     };
-    emit_transcribe_progress(app, folder, base, "polling");
-    let (mic_res, sys_res) = tokio::join!(
-        transcribe::submit_and_poll(&client, &url, &key, &mic_path, transcribe::Label::Owner),
-        transcribe::submit_and_poll(&client, &url, &key, &sys_path, transcribe::Label::Others),
-    );
+    // Дорожки ПО ОЧЕРЕДИ, а не через join!.
+    //
+    // Ускорения параллельность не давала никогда: воркер шлюза работает с
+    // concurrency: 1 и всё равно выстраивает задачи друг за другом. Зато
+    // клиентские часы у обеих тикали одновременно, и вторая дорожка тратила
+    // свой бюджет ожидания, стоя в чужой очереди, — ровно поэтому часовые
+    // встречи не доезжали. См. docs/2026-08-27-...-design.md, раздел 2.
+    let queue = app.state::<TranscribeQueue>();
+
+    emit_transcribe_track(app, folder, base, "mic");
+    let mic_res =
+        дорожка_целиком(&client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue, app, folder, base)
+            .await;
+    emit_transcribe_track(app, folder, base, "system");
+    let sys_res =
+        дорожка_целиком(&client, &url, &key, &sys_path, transcribe::Label::Others, &*queue, app, folder, base)
+            .await;
 
     let (mic, mic_err) = match mic_res {
         Ok(r) => (Some(r), None),
@@ -978,6 +1069,38 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
 
     emit_transcribe_done(app, folder, base);
     Ok(())
+}
+
+/// Одна дорожка целиком: сообщить об отправке, отправить, запомнить id для
+/// отмены, сообщить об ожидании, дождаться.
+///
+/// Обе стадии эмитятся ЗДЕСЬ, за дорожку, а не разом в `run_transcription` до
+/// начала всей работы. Раньше `uploading` ставился ДО построения клиента и ДО
+/// `submit()` у первой дорожки, а `polling` — сразу следом, тоже до реальной
+/// отправки: разница между ними жила на экране доли секунды (время собрать
+/// `reqwest::Client`), а всё время настоящей заливки — до 115 МБ дорожки —
+/// шло уже под меткой «Расшифровываю…», и «Отправляю…» не было видно вовсе.
+/// Здесь `uploading` стоит перед `submit()`, `polling` — после `note_job()`,
+/// и оба раза за дорожку (mic, потом system), а не один раз за всю запись.
+///
+/// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
+/// минуту, не нашла бы что гасить на шлюзе.
+async fn дорожка_целиком(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    path: &Path,
+    label: transcribe::Label,
+    queue: &TranscribeQueue,
+    app: &AppHandle,
+    folder: &Option<String>,
+    base: &str,
+) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
+    emit_transcribe_progress(app, folder, base, "uploading");
+    let job_id = transcribe::submit(client, url, key, path).await?;
+    queue.note_job(job_id.clone());
+    emit_transcribe_progress(app, folder, base, "polling");
+    transcribe::poll_until_done(client, url, key, &job_id, label).await
 }
 
 fn main() {
@@ -1093,6 +1216,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Каталог записей обязан выводиться из домашнего каталога ТЕКУЩЕГО
+    /// пользователя, а не быть прибитым к чьему-то конкретному профилю.
+    /// Раньше под Windows здесь стоял литерал `C:\Users\Cypher\Recordings`,
+    /// и на чужой машине приложение писало в чужой домашний каталог.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn каталог_записей_выводится_из_профиля_пользователя() {
+        let profile = std::env::var("USERPROFILE").expect("%USERPROFILE%");
+        assert_eq!(recordings_root(), PathBuf::from(profile).join("Recordings"));
+    }
+
+    /// Симметричный сторож для macOS: ветки двух систем должны оставаться
+    /// одинаковыми по смыслу, и если кто-то починит одну, вторая не должна
+    /// тихо разъехаться.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn каталог_записей_выводится_из_домашнего_каталога() {
+        let home = std::env::var("HOME").expect("$HOME");
+        assert_eq!(recordings_root(), PathBuf::from(home).join("Recordings"));
+    }
 
     /// Запись без расшифровки и нулевой длительности: размеры в этих тестах
     /// исчисляются десятками байт, то есть меньше секунды звука.
@@ -1534,7 +1678,7 @@ mod tests {
         q.enqueue(qi("b")).unwrap();
         let mut отмена = q.start_front(&qi("a")).expect("первая пошла в работу");
 
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])));
         assert!(отмена.try_recv().is_ok(), "сигнал обязан дойти до расшифровки");
         assert_eq!(
             q.finish_front(),
@@ -1554,8 +1698,8 @@ mod tests {
         q.enqueue(qi("b")).unwrap();
         q.start_front(&qi("a")).expect("первая пошла в работу");
 
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped), "повтор — не ошибка");
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])));
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])), "повтор — не ошибка");
         assert_eq!(q.finish_front(), vec![qi("b")]);
     }
 
@@ -1608,6 +1752,92 @@ mod tests {
         assert_eq!(rx.try_recv(), Ok(qi("b")), "мёртвая копия");
         assert!(q.start_front(&qi("b")).is_some(), "живая постановка — можно работать");
         assert_eq!(rx.try_recv(), Ok(qi("b")), "а это уже сама постановка");
+    }
+
+    /// Чтобы отменить задачу на шлюзе, надо знать её id. Он появляется только
+    /// после отправки, поэтому очередь обязана уметь его принять на ходу —
+    /// и вернуть вместе с исходом `cancel()`, когда запись действительно
+    /// идущая (см. `Cancelled::Stopped`).
+    #[test]
+    fn идущая_запись_запоминает_id_задач_шлюза() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+
+        queue.note_job("job_mic".to_string());
+        queue.note_job("job_sys".to_string());
+
+        assert_eq!(
+            queue.cancel(&item),
+            Ok(Cancelled::Stopped(vec!["job_mic".to_string(), "job_sys".to_string()])),
+        );
+    }
+
+    /// `Cancelled::Stopped` несёт id именно ЗАБРАННЫМИ: второй вызов
+    /// `cancel()` не имеет права отдать те же id снова, иначе повторная
+    /// отмена (см. `повторная_отмена_идущей_записи_не_съедает_следующую`)
+    /// била бы по чужой, уже следующей задаче.
+    #[test]
+    fn забранные_id_второй_раз_не_отдаются() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+        queue.note_job("job_mic".to_string());
+
+        assert_eq!(queue.cancel(&item), Ok(Cancelled::Stopped(vec!["job_mic".to_string()])));
+        assert_eq!(queue.cancel(&item), Ok(Cancelled::Stopped(vec![])), "id одноразовые");
+    }
+
+    /// Следующая запись начинает с чистого листа: id предыдущей к ней
+    /// отношения не имеют. Проверяется не напрямую (отдельного геттера для
+    /// `jobs` больше нет — только `cancel()` их когда-либо отдаёт), а через
+    /// отмену уже второй записи: не появись в ней чужой id, `finish_front`
+    /// свою работу сделала.
+    #[test]
+    fn финиш_фронта_забывает_id_задач() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let первая = qi("первая");
+        queue.enqueue(первая.clone()).expect("постановка");
+        queue.start_front(&первая).expect("старт");
+        queue.note_job("job_old".to_string());
+
+        queue.finish_front();
+
+        let вторая = qi("вторая");
+        queue.enqueue(вторая.clone()).expect("постановка");
+        queue.start_front(&вторая).expect("старт");
+
+        assert_eq!(
+            queue.cancel(&вторая),
+            Ok(Cancelled::Stopped(vec![])),
+            "id не переезжают на следующую запись"
+        );
+    }
+
+    /// Локальная отмена обязана сработать, даже если шлюз недоступен: человек
+    /// нажал кнопку, и кнопка не имеет права зависнуть от чужой сети. Неудача
+    /// уходит в лог, а не на экран.
+    ///
+    /// Id идут ВНУТРИ исхода `cancel()`, не отдельным вызовом следом за ним:
+    /// `tx.send(())` внутри `cancel()` будит воркер немедленно, и тот успевает
+    /// дойти до `finish_front()` (которая чистит `jobs`) раньше, чем снаружи
+    /// возьмут лок ещё раз отдельным вызовом. Раздельный вызов — гонка,
+    /// которая молча теряет id и оставляет задачу висеть на шлюзе.
+    #[test]
+    fn отмена_идущей_забирает_id_для_гашения_на_шлюзе() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+        queue.note_job("job_mic".to_string());
+
+        assert_eq!(
+            queue.cancel(&item),
+            Ok(Cancelled::Stopped(vec!["job_mic".to_string()])),
+            "id обязаны прийти вместе с исходом — иначе гасить на шлюзе будет нечего"
+        );
     }
 
     // ---- путь к папке записи ------------------------------------------------

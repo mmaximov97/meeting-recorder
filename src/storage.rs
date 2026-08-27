@@ -94,9 +94,15 @@ pub fn rename_tail(base: &str, new_tail: &str) -> Option<String> {
 /// Юникодные буквы сохраняются: имена процессов на кириллице (у «Яндекс.Телемост»)
 /// реальны, и человек тоже вправе назвать запись по-русски.
 fn sanitize_tail(raw: &str) -> Option<String> {
-    let stem = raw.strip_suffix(".exe").unwrap_or(raw);
+    // Сначала lowercase, потом срез `.exe` — а не наоборот. При срезе ДО
+    // lowercase смешанный регистр (`Zoom.EXE`) не совпадал с литералом
+    // `.exe`, срез молча не срабатывал, и `.exe`/`.EXE` уезжали в имя файла
+    // как обычные символы (`zoom-exe`), хотя `canonical_source`
+    // (`src/detector/mod.rs`) для того же самого имени показывал «Zoom» —
+    // правило здесь обязано быть тем же самым, что и там.
+    let lower = raw.to_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
     let cleaned: String = stem
-        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect();
@@ -210,6 +216,24 @@ mod tests {
         assert_eq!(
             recording_filename(момент(), "Zoom.exe", Track::Mic),
             "2026-07-17_14-30_zoom.mic.wav"
+        );
+    }
+
+    /// Гвоздь задачи: смешанный регистр расширения (`Zoom.Exe`) раньше не
+    /// совпадал с литералом `.exe` при срезе ДО lowercase — срез молча не
+    /// срабатывал, и в имени файла оставалось `zoom-exe` вместо `zoom`, хотя
+    /// `canonical_source` (`src/detector/mod.rs`) для того же процесса уже
+    /// узнавал «Zoom». Правило теперь то же самое в обеих функциях: сначала
+    /// lowercase, потом срез.
+    #[test]
+    fn смешанный_регистр_exe_расширения_срезается() {
+        assert_eq!(
+            recording_filename(момент(), "Zoom.Exe", Track::Mic),
+            "2026-07-17_14-30_zoom.mic.wav"
+        );
+        assert_eq!(
+            rename_tail("2026-07-30_13-03_chrome", "Zoom.Exe"),
+            Some("2026-07-30_13-03_zoom".to_string())
         );
     }
 

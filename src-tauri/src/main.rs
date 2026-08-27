@@ -83,10 +83,10 @@ enum Cancelled {
     /// Обрабатывалась прямо сейчас: воркеру послан сигнал остановиться.
     /// Внутри — id задач шлюза, накопленных для неё (см. поле `jobs`),
     /// заодно отобранные из-под того же лока, что принял решение
-    /// «идущая, гасим». Раздельный `take_jobs()` после этого не годится:
-    /// между возвратом `cancel()` и следующим захватом лока воркер, разбуженный
-    /// нашим же `oneshot`, успевает дойти до `finish_front()` и опустошить
-    /// `jobs` первым — и тогда `DELETE` на шлюз просто не улетает.
+    /// «идущая, гасим». Отдельный вызов за теми же id уже ПОСЛЕ этого не
+    /// годится: между возвратом `cancel()` и следующим захватом лока воркер,
+    /// разбуженный нашим же `oneshot`, успевает дойти до `finish_front()` и
+    /// опустошить `jobs` первым — и тогда `DELETE` на шлюз просто не улетает.
     Stopped(Vec<String>),
 }
 
@@ -228,9 +228,9 @@ impl TranscribeQueue {
             // Забираем id ИЗ ТОГО ЖЕ лока, а не отдельным вызовом снаружи:
             // `tx.send(())` выше будит воркер немедленно, и он может успеть
             // дойти до `finish_front()` (который чистит `jobs`) раньше, чем
-            // вызывающий код возьмёт лок ещё раз. Раздельный `take_jobs()`
-            // после `cancel()` — гонка, которая молча теряет id и оставляет
-            // задачу висеть на шлюзе.
+            // вызывающий код возьмёт лок ещё раз. Отдельный метод, забирающий
+            // `jobs` вторым вызовом уже после `cancel()`, — гонка, которая
+            // молча теряет id и оставляет задачу висеть на шлюзе.
             let jobs = std::mem::take(&mut pending.jobs);
             return Ok(Cancelled::Stopped(jobs));
         }
@@ -261,8 +261,17 @@ impl TranscribeQueue {
 /// недоделанной. Бросить её безопасно ровно потому, что все точки ожидания у
 /// неё сетевые: файлы пишутся сплошным куском в самом конце, между ними нет ни
 /// одного `await`, и оборваться посередине набора `.md`/`.txt` расшифровка не
-/// может. Задание на стороне шлюза при этом остаётся жить — мы всего лишь
-/// перестаём ждать ответ.
+/// может.
+///
+/// Задание на стороне шлюза при этом НЕ остаётся просто висеть — но гасится
+/// не отсюда. `cancel_transcription` (см. её докблок) шлёт `DELETE` по id,
+/// отобранным из `Pending::jobs` тем же локом, что разбудил этот `select!`; а
+/// если до отмены не дошло, но связь со шлюзом пропала совсем — ту же задачу
+/// гасит сам `transcribe::poll_until_done`, вернув `PollLost`. Незагашенными
+/// остаются только два случая, и оба осознанно вне объёма: выход из
+/// приложения посреди расшифровки (это ближе к персистентной очереди) и
+/// отмена во время ещё не завершённого `submit` — id тогда ещё не существует,
+/// гасить нечего.
 fn spawn_transcribe_worker(
     app: AppHandle,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<QueueItem>,
@@ -916,9 +925,9 @@ fn cancel_transcription(
             // следующая в НАШЕЙ очереди не двинется. Гасим её явно.
             //
             // `jobs` пришли вместе с исходом `cancel()`, а не отдельным
-            // вызовом `take_jobs()` следом: `cancel()` уже разбудил воркер
-            // отправкой в `oneshot`, и раздельный второй захват лока мог бы
-            // опоздать за `finish_front()`, которая тот же `jobs` чистит.
+            // вызовом следом: `cancel()` уже разбудил воркер отправкой в
+            // `oneshot`, и раздельный второй захват лока мог бы опоздать за
+            // `finish_front()`, которая тот же `jobs` чистит.
             if !jobs.is_empty() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -976,7 +985,6 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     let mic_path = dir.join(format!("{base}.mic.wav"));
     let sys_path = dir.join(format!("{base}.system.wav"));
 
-    emit_transcribe_progress(app, folder, base, "uploading");
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -985,7 +993,6 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
             return Err(msg);
         }
     };
-    emit_transcribe_progress(app, folder, base, "polling");
     // Дорожки ПО ОЧЕРЕДИ, а не через join!.
     //
     // Ускорения параллельность не давала никогда: воркер шлюза работает с
@@ -996,9 +1003,13 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     let queue = app.state::<TranscribeQueue>();
 
     emit_transcribe_track(app, folder, base, "mic");
-    let mic_res = дорожка_целиком(&client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue).await;
+    let mic_res =
+        дорожка_целиком(&client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue, app, folder, base)
+            .await;
     emit_transcribe_track(app, folder, base, "system");
-    let sys_res = дорожка_целиком(&client, &url, &key, &sys_path, transcribe::Label::Others, &*queue).await;
+    let sys_res =
+        дорожка_целиком(&client, &url, &key, &sys_path, transcribe::Label::Others, &*queue, app, folder, base)
+            .await;
 
     let (mic, mic_err) = match mic_res {
         Ok(r) => (Some(r), None),
@@ -1060,7 +1071,17 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     Ok(())
 }
 
-/// Одна дорожка целиком: отправить, запомнить id для отмены, дождаться.
+/// Одна дорожка целиком: сообщить об отправке, отправить, запомнить id для
+/// отмены, сообщить об ожидании, дождаться.
+///
+/// Обе стадии эмитятся ЗДЕСЬ, за дорожку, а не разом в `run_transcription` до
+/// начала всей работы. Раньше `uploading` ставился ДО построения клиента и ДО
+/// `submit()` у первой дорожки, а `polling` — сразу следом, тоже до реальной
+/// отправки: разница между ними жила на экране доли секунды (время собрать
+/// `reqwest::Client`), а всё время настоящей заливки — до 115 МБ дорожки —
+/// шло уже под меткой «Расшифровываю…», и «Отправляю…» не было видно вовсе.
+/// Здесь `uploading` стоит перед `submit()`, `polling` — после `note_job()`,
+/// и оба раза за дорожку (mic, потом system), а не один раз за всю запись.
 ///
 /// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
 /// минуту, не нашла бы что гасить на шлюзе.
@@ -1071,9 +1092,14 @@ async fn дорожка_целиком(
     path: &Path,
     label: transcribe::Label,
     queue: &TranscribeQueue,
+    app: &AppHandle,
+    folder: &Option<String>,
+    base: &str,
 ) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
+    emit_transcribe_progress(app, folder, base, "uploading");
     let job_id = transcribe::submit(client, url, key, path).await?;
     queue.note_job(job_id.clone());
+    emit_transcribe_progress(app, folder, base, "polling");
     transcribe::poll_until_done(client, url, key, &job_id, label).await
 }
 
@@ -1797,8 +1823,8 @@ mod tests {
     /// Id идут ВНУТРИ исхода `cancel()`, не отдельным вызовом следом за ним:
     /// `tx.send(())` внутри `cancel()` будит воркер немедленно, и тот успевает
     /// дойти до `finish_front()` (которая чистит `jobs`) раньше, чем снаружи
-    /// возьмут лок ещё раз за отдельным `take_jobs()`. Раздельный вызов —
-    /// гонка, которая молча теряет id и оставляет задачу висеть на шлюзе.
+    /// возьмут лок ещё раз отдельным вызовом. Раздельный вызов — гонка,
+    /// которая молча теряет id и оставляет задачу висеть на шлюзе.
     #[test]
     fn отмена_идущей_забирает_id_для_гашения_на_шлюзе() {
         let (queue, _rx) = TranscribeQueue::new();

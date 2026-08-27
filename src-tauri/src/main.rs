@@ -904,7 +904,33 @@ fn cancel_transcription(
         // Об идущей объявит воркер, когда она действительно остановится:
         // скажи мы это отсюда, «отменено» появилось бы на экране раньше, чем
         // расшифровка перестала писать файлы.
-        Cancelled::Stopped => {}
+        Cancelled::Stopped => {
+            // Задача на шлюзе живёт своей жизнью и держит GPU: воркер там
+            // работает с concurrency: 1, и пока брошенная задача не погашена,
+            // следующая в НАШЕЙ очереди не двинется. Гасим её явно.
+            let jobs = queue.take_jobs();
+            if !jobs.is_empty() {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let cfg = Config::load(&app);
+                    let (Some(url), Some(key)) = (cfg.stt_gateway_url, cfg.stt_api_key) else {
+                        return;
+                    };
+                    let url = url.trim().trim_end_matches('/').to_string();
+                    let Ok(client) = reqwest::Client::builder().build() else {
+                        return;
+                    };
+                    for job in jobs {
+                        // Неудача не всплывает на экран: локальная отмена уже
+                        // сработала, и красное сообщение о чужой сети поверх
+                        // собственного успешного действия только пугает.
+                        if let Err(e) = transcribe::cancel_job(&client, &url, key.trim(), &job).await {
+                            log::warn!("не удалось погасить задачу {job} на шлюзе: {e}");
+                        }
+                    }
+                });
+            }
+        }
         Cancelled::Unknown => {}
         Cancelled::Dropped(moved) => {
             emit_transcribe_cancelled(&app, &folder, &base);
@@ -1734,6 +1760,25 @@ mod tests {
         queue.finish_front();
 
         assert!(queue.take_jobs().is_empty(), "id не переезжают на следующую запись");
+    }
+
+    /// Локальная отмена обязана сработать, даже если шлюз недоступен: человек
+    /// нажал кнопку, и кнопка не имеет права зависнуть от чужой сети. Неудача
+    /// уходит в лог, а не на экран.
+    #[test]
+    fn отмена_идущей_забирает_id_для_гашения_на_шлюзе() {
+        let (queue, _rx) = TranscribeQueue::new();
+        let item = qi("встреча");
+        queue.enqueue(item.clone()).expect("постановка");
+        queue.start_front(&item).expect("старт");
+        queue.note_job("job_mic".to_string());
+
+        assert_eq!(queue.cancel(&item).expect("отмена"), Cancelled::Stopped);
+        assert_eq!(
+            queue.take_jobs(),
+            vec!["job_mic".to_string()],
+            "id обязаны пережить отмену — иначе гасить на шлюзе будет нечего"
+        );
     }
 
     // ---- путь к папке записи ------------------------------------------------

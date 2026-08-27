@@ -37,7 +37,8 @@ fn spawn_stdin() -> Receiver<String> {
 
 #[cfg(target_os = "windows")]
 fn recordings_root() -> PathBuf {
-    PathBuf::from(r"C:\Users\<username>\Recordings")
+    let home = std::env::var("USERPROFILE").expect("%USERPROFILE% обязан быть установлен");
+    PathBuf::from(home).join("Recordings")
 }
 
 #[cfg(target_os = "macos")]
@@ -213,5 +214,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         thread::sleep(TICK);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Каталог записей обязан выводиться из домашнего каталога ТЕКУЩЕГО
+    /// пользователя, а не быть прибитым к чьему-то конкретному профилю.
+    /// Раньше под Windows здесь стоял литерал `C:\Users\<username>\Recordings`,
+    /// и на чужой машине приложение писало в чужой домашний каталог.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn каталог_записей_выводится_из_профиля_пользователя() {
+        let profile = std::env::var("USERPROFILE").expect("%USERPROFILE%");
+        assert_eq!(recordings_root(), PathBuf::from(profile).join("Recordings"));
+    }
+
+    /// Симметричный сторож для macOS: ветки двух систем должны оставаться
+    /// одинаковыми по смыслу, и если кто-то починит одну, вторая не должна
+    /// тихо разъехаться.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn каталог_записей_выводится_из_домашнего_каталога() {
+        let home = std::env::var("HOME").expect("$HOME");
+        assert_eq!(recordings_root(), PathBuf::from(home).join("Recordings"));
     }
 }

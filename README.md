@@ -355,8 +355,8 @@ dyld до `main`, и объяснения никто не видит. Флаг �
 
 Дизайн и обоснование решений живут в Obsidian-vault, не здесь:
 
-- Спека MVP: `Cypher/Brainstorming/Открытый аналог Granola/2026-07-17-meeting-recorder-mvp-design.md`
-- Ресёрч, на который она опирается: `Cypher/Brainstorming/Открытый аналог Granola/` (MOC + 5 заметок)
+- Спека MVP — в приватном Obsidian-vault автора, вне этого репозитория
+- Ресёрч, на который она опирается, — там же (MOC + 5 заметок)
 - План реализации MVP: `docs/2026-07-17-meeting-recorder-mvp-plan.md`
 - Спека «выбор микрофона, месячные папки, переименование»: `docs/2026-07-30-device-folders-rename-design.md`
 - План реализации этой доработки: `docs/2026-07-30-device-folders-rename-plan.md`

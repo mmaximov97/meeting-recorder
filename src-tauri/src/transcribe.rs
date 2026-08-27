@@ -54,6 +54,10 @@ pub enum TranscribeError {
     JobFailed(String, String),
     #[error("задача {0} не завершилась за отведённое время")]
     Timeout(String),
+    #[error("связь со шлюзом потеряна, задача {0} осталась на нём")]
+    PollLost(String),
+    #[error("задача {0} отменена")]
+    JobCancelled(String),
 }
 
 /// Шаг опроса задачи. Прежний, десять секунд: на минутных масштабах работы
@@ -129,6 +133,9 @@ struct RawSegment {
 pub enum JobOutcome {
     Pending,
     Succeeded(TrackResult),
+    /// Отменена — на шлюзе или нами. Отдельно от `Failed`: отмену человек
+    /// сделал сам, и красное «не удалось» на своё же действие читается как сбой.
+    Cancelled,
     Failed(String),
 }
 
@@ -144,20 +151,24 @@ pub fn parse_job_response(body: &str, label: Label) -> Result<JobOutcome, Transc
                 .collect();
             Ok(JobOutcome::Succeeded(TrackResult { segments, text: result.text }))
         }
-        "failed" | "error" | "cancelled" => {
+        "cancelled" => Ok(JobOutcome::Cancelled),
+        "failed" | "error" => {
             Ok(JobOutcome::Failed(resp.error.unwrap_or_else(|| "неизвестная ошибка".to_string())))
         }
         _ => Ok(JobOutcome::Pending),
     }
 }
 
-pub async fn submit_and_poll(
+/// Отправить дорожку и вернуть id задачи.
+///
+/// Отдельно от ожидания именно ради отмены: id нужен снаружи сразу, а не
+/// через час, когда функция вернётся.
+pub async fn submit(
     client: &reqwest::Client,
     gateway: &str,
     key: &str,
     wav_path: &Path,
-    label: Label,
-) -> Result<TrackResult, TranscribeError> {
+) -> Result<String, TranscribeError> {
     let bytes = tokio::fs::read(wav_path).await?;
     let file_name = wav_path
         .file_name()
@@ -179,20 +190,81 @@ pub async fn submit_and_poll(
         return Err(TranscribeError::SubmitRejected(resp.status().to_string()));
     }
     let submit: SubmitResponse = resp.json().await?;
+    Ok(submit.id)
+}
 
-    let job_url = format!("{gateway}/v1/jobs/{}", submit.id);
-    // 360 попыток по 10с — тот же лимит (~60 минут), что уже проверен в
-    // ailab-transcribe/scripts/transcribe.sh, не изобретается заново.
-    for _ in 0..360 {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let body = client.get(&job_url).bearer_auth(key).send().await?.text().await?;
+/// Ждать задачу, пока шлюз отвечает нетерминальным статусом.
+///
+/// Предел — по настенным часам (`POLL_DEADLINE`), а не по числу итераций:
+/// повторы после сетевых неудач не имеют права укорачивать бюджет ожидания.
+pub async fn poll_until_done(
+    client: &reqwest::Client,
+    gateway: &str,
+    key: &str,
+    job_id: &str,
+    label: Label,
+) -> Result<TrackResult, TranscribeError> {
+    let job_url = format!("{gateway}/v1/jobs/{job_id}");
+    let начало = std::time::Instant::now();
+    let mut подряд_неудач: u32 = 0;
+
+    while начало.elapsed() < POLL_DEADLINE {
+        tokio::time::sleep(POLL_INTERVAL).await;
+
+        let resp = match client.get(&job_url).bearer_auth(key).send().await {
+            Ok(resp) => resp,
+            // Соединение не встало или оборвалось — это всегда преходящее.
+            Err(_) => {
+                подряд_неудач += 1;
+                if подряд_неудач >= MAX_CONSECUTIVE_POLL_FAILURES {
+                    return Err(TranscribeError::PollLost(job_id.to_string()));
+                }
+                continue;
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            match classify_poll_status(status) {
+                PollFailure::Terminal(причина) => {
+                    return Err(TranscribeError::JobFailed(job_id.to_string(), причина.to_string()));
+                }
+                PollFailure::Transient => {
+                    подряд_неудач += 1;
+                    if подряд_неудач >= MAX_CONSECUTIVE_POLL_FAILURES {
+                        return Err(TranscribeError::PollLost(job_id.to_string()));
+                    }
+                    continue;
+                }
+            }
+        }
+
+        let body = match resp.text().await {
+            Ok(body) => body,
+            Err(_) => {
+                подряд_неудач += 1;
+                if подряд_неудач >= MAX_CONSECUTIVE_POLL_FAILURES {
+                    return Err(TranscribeError::PollLost(job_id.to_string()));
+                }
+                continue;
+            }
+        };
+
+        // Дошли до ответа, который шлюз сумел составить, — значит связь есть.
+        подряд_неудач = 0;
         match parse_job_response(&body, label)? {
             JobOutcome::Pending => continue,
             JobOutcome::Succeeded(result) => return Ok(result),
-            JobOutcome::Failed(msg) => return Err(TranscribeError::JobFailed(submit.id, msg)),
+            JobOutcome::Cancelled => {
+                return Err(TranscribeError::JobCancelled(job_id.to_string()))
+            }
+            JobOutcome::Failed(msg) => {
+                return Err(TranscribeError::JobFailed(job_id.to_string(), msg))
+            }
         }
     }
-    Err(TranscribeError::Timeout(submit.id))
+
+    Err(TranscribeError::Timeout(job_id.to_string()))
 }
 
 fn fmt_ts(seconds: f64) -> String {
@@ -356,12 +428,18 @@ mod tests {
     }
 
     #[test]
-    fn ответ_error_и_cancelled_тоже_считаются_отказом() {
-        for status in ["error", "cancelled"] {
-            let body = format!(r#"{{"status":"{status}"}}"#);
-            let outcome = parse_job_response(&body, Label::Owner).unwrap();
-            assert!(matches!(outcome, JobOutcome::Failed(_)), "status={status}");
-        }
+    fn ответ_error_считается_отказом() {
+        let outcome = parse_job_response(r#"{"status":"error"}"#, Label::Owner).unwrap();
+        assert!(matches!(outcome, JobOutcome::Failed(_)));
+    }
+
+    /// Отмена — не отказ. Отдельный исход нужен, чтобы гонка «опрос увидел
+    /// отмену раньше локального сигнала» не показала красную ошибку на то,
+    /// что человек сделал сам.
+    #[test]
+    fn ответ_cancelled_это_отмена_а_не_отказ() {
+        let outcome = parse_job_response(r#"{"status":"cancelled"}"#, Label::Owner).unwrap();
+        assert!(matches!(outcome, JobOutcome::Cancelled));
     }
 
     #[test]

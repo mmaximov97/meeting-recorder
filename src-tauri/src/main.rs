@@ -81,7 +81,13 @@ enum Cancelled {
     /// сообщить заново; идущая запись сюда НЕ попадает (см. `cancel`).
     Dropped(Vec<(usize, QueueItem)>),
     /// Обрабатывалась прямо сейчас: воркеру послан сигнал остановиться.
-    Stopped,
+    /// Внутри — id задач шлюза, накопленных для неё (см. поле `jobs`),
+    /// заодно отобранные из-под того же лока, что принял решение
+    /// «идущая, гасим». Раздельный `take_jobs()` после этого не годится:
+    /// между возвратом `cancel()` и следующим захватом лока воркер, разбуженный
+    /// нашим же `oneshot`, успевает дойти до `finish_front()` и опустошить
+    /// `jobs` первым — и тогда `DELETE` на шлюз просто не улетает.
+    Stopped(Vec<String>),
 }
 
 /// Изменяемая часть очереди — под одним локом целиком.
@@ -185,13 +191,6 @@ impl TranscribeQueue {
         pending.jobs.push(job_id);
     }
 
-    /// Забрать накопленные id — именно забрать: отменять одну задачу дважды
-    /// незачем, а вот попасть вторым вызовом по уже следующей записи можно.
-    fn take_jobs(&self) -> Vec<String> {
-        let mut pending = self.pending.lock().expect("лок очереди транскрипции");
-        std::mem::take(&mut pending.jobs)
-    }
-
     /// Убирает обработанную запись с фронта и отдаёт тех, кто остался — под
     /// тем же локом, что и `enqueue`, чтобы снимок для пересчёта позиций не
     /// мог оказаться устаревшим уже в момент чтения.
@@ -226,7 +225,14 @@ impl TranscribeQueue {
             if let Some(tx) = pending.cancel.take() {
                 let _ = tx.send(());
             }
-            return Ok(Cancelled::Stopped);
+            // Забираем id ИЗ ТОГО ЖЕ лока, а не отдельным вызовом снаружи:
+            // `tx.send(())` выше будит воркер немедленно, и он может успеть
+            // дойти до `finish_front()` (который чистит `jobs`) раньше, чем
+            // вызывающий код возьмёт лок ещё раз. Раздельный `take_jobs()`
+            // после `cancel()` — гонка, которая молча теряет id и оставляет
+            // задачу висеть на шлюзе.
+            let jobs = std::mem::take(&mut pending.jobs);
+            return Ok(Cancelled::Stopped(jobs));
         }
         pending.items.remove(pos);
         let skip = usize::from(pending.running);
@@ -904,11 +910,15 @@ fn cancel_transcription(
         // Об идущей объявит воркер, когда она действительно остановится:
         // скажи мы это отсюда, «отменено» появилось бы на экране раньше, чем
         // расшифровка перестала писать файлы.
-        Cancelled::Stopped => {
+        Cancelled::Stopped(jobs) => {
             // Задача на шлюзе живёт своей жизнью и держит GPU: воркер там
             // работает с concurrency: 1, и пока брошенная задача не погашена,
             // следующая в НАШЕЙ очереди не двинется. Гасим её явно.
-            let jobs = queue.take_jobs();
+            //
+            // `jobs` пришли вместе с исходом `cancel()`, а не отдельным
+            // вызовом `take_jobs()` следом: `cancel()` уже разбудил воркер
+            // отправкой в `oneshot`, и раздельный второй захват лока мог бы
+            // опоздать за `finish_front()`, которая тот же `jobs` чистит.
             if !jobs.is_empty() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -1642,7 +1652,7 @@ mod tests {
         q.enqueue(qi("b")).unwrap();
         let mut отмена = q.start_front(&qi("a")).expect("первая пошла в работу");
 
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])));
         assert!(отмена.try_recv().is_ok(), "сигнал обязан дойти до расшифровки");
         assert_eq!(
             q.finish_front(),
@@ -1662,8 +1672,8 @@ mod tests {
         q.enqueue(qi("b")).unwrap();
         q.start_front(&qi("a")).expect("первая пошла в работу");
 
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped));
-        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped), "повтор — не ошибка");
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])));
+        assert_eq!(q.cancel(&qi("a")), Ok(Cancelled::Stopped(vec![])), "повтор — не ошибка");
         assert_eq!(q.finish_front(), vec![qi("b")]);
     }
 
@@ -1719,7 +1729,9 @@ mod tests {
     }
 
     /// Чтобы отменить задачу на шлюзе, надо знать её id. Он появляется только
-    /// после отправки, поэтому очередь обязана уметь его принять на ходу.
+    /// после отправки, поэтому очередь обязана уметь его принять на ходу —
+    /// и вернуть вместе с исходом `cancel()`, когда запись действительно
+    /// идущая (см. `Cancelled::Stopped`).
     #[test]
     fn идущая_запись_запоминает_id_задач_шлюза() {
         let (queue, _rx) = TranscribeQueue::new();
@@ -1730,11 +1742,16 @@ mod tests {
         queue.note_job("job_mic".to_string());
         queue.note_job("job_sys".to_string());
 
-        assert_eq!(queue.take_jobs(), vec!["job_mic".to_string(), "job_sys".to_string()]);
+        assert_eq!(
+            queue.cancel(&item),
+            Ok(Cancelled::Stopped(vec!["job_mic".to_string(), "job_sys".to_string()])),
+        );
     }
 
-    /// `take_jobs` именно ЗАБИРАЕТ: второй вызов не имеет права отдать те же
-    /// id снова, иначе повторная отмена била бы по чужой, уже новой задаче.
+    /// `Cancelled::Stopped` несёт id именно ЗАБРАННЫМИ: второй вызов
+    /// `cancel()` не имеет права отдать те же id снова, иначе повторная
+    /// отмена (см. `повторная_отмена_идущей_записи_не_съедает_следующую`)
+    /// била бы по чужой, уже следующей задаче.
     #[test]
     fn забранные_id_второй_раз_не_отдаются() {
         let (queue, _rx) = TranscribeQueue::new();
@@ -1743,28 +1760,45 @@ mod tests {
         queue.start_front(&item).expect("старт");
         queue.note_job("job_mic".to_string());
 
-        assert_eq!(queue.take_jobs(), vec!["job_mic".to_string()]);
-        assert!(queue.take_jobs().is_empty(), "id одноразовые");
+        assert_eq!(queue.cancel(&item), Ok(Cancelled::Stopped(vec!["job_mic".to_string()])));
+        assert_eq!(queue.cancel(&item), Ok(Cancelled::Stopped(vec![])), "id одноразовые");
     }
 
     /// Следующая запись начинает с чистого листа: id предыдущей к ней
-    /// отношения не имеют.
+    /// отношения не имеют. Проверяется не напрямую (отдельного геттера для
+    /// `jobs` больше нет — только `cancel()` их когда-либо отдаёт), а через
+    /// отмену уже второй записи: не появись в ней чужой id, `finish_front`
+    /// свою работу сделала.
     #[test]
     fn финиш_фронта_забывает_id_задач() {
         let (queue, _rx) = TranscribeQueue::new();
-        let item = qi("первая");
-        queue.enqueue(item.clone()).expect("постановка");
-        queue.start_front(&item).expect("старт");
+        let первая = qi("первая");
+        queue.enqueue(первая.clone()).expect("постановка");
+        queue.start_front(&первая).expect("старт");
         queue.note_job("job_old".to_string());
 
         queue.finish_front();
 
-        assert!(queue.take_jobs().is_empty(), "id не переезжают на следующую запись");
+        let вторая = qi("вторая");
+        queue.enqueue(вторая.clone()).expect("постановка");
+        queue.start_front(&вторая).expect("старт");
+
+        assert_eq!(
+            queue.cancel(&вторая),
+            Ok(Cancelled::Stopped(vec![])),
+            "id не переезжают на следующую запись"
+        );
     }
 
     /// Локальная отмена обязана сработать, даже если шлюз недоступен: человек
     /// нажал кнопку, и кнопка не имеет права зависнуть от чужой сети. Неудача
     /// уходит в лог, а не на экран.
+    ///
+    /// Id идут ВНУТРИ исхода `cancel()`, не отдельным вызовом следом за ним:
+    /// `tx.send(())` внутри `cancel()` будит воркер немедленно, и тот успевает
+    /// дойти до `finish_front()` (которая чистит `jobs`) раньше, чем снаружи
+    /// возьмут лок ещё раз за отдельным `take_jobs()`. Раздельный вызов —
+    /// гонка, которая молча теряет id и оставляет задачу висеть на шлюзе.
     #[test]
     fn отмена_идущей_забирает_id_для_гашения_на_шлюзе() {
         let (queue, _rx) = TranscribeQueue::new();
@@ -1773,11 +1807,10 @@ mod tests {
         queue.start_front(&item).expect("старт");
         queue.note_job("job_mic".to_string());
 
-        assert_eq!(queue.cancel(&item).expect("отмена"), Cancelled::Stopped);
         assert_eq!(
-            queue.take_jobs(),
-            vec!["job_mic".to_string()],
-            "id обязаны пережить отмену — иначе гасить на шлюзе будет нечего"
+            queue.cancel(&item),
+            Ok(Cancelled::Stopped(vec!["job_mic".to_string()])),
+            "id обязаны прийти вместе с исходом — иначе гасить на шлюзе будет нечего"
         );
     }
 

@@ -26,7 +26,11 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hound = "3.5"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+# `stream` — ради `multipart::Part::file`, который отправляет дорожку через
+# уже открытый файловый дескриптор потоком, а не читает её в память целиком:
+# двухчасовая запись это ~230 МБ на дорожку (16 кГц, моно, i16). Без этой
+# фичи `Part::file` и `impl From<File> for Body` у reqwest не существуют.
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 tokio = { version = "1", features = ["time", "fs", "macros"] }
 thiserror = "2"
 sysinfo = "0.32"

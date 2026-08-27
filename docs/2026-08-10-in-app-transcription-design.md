@@ -30,7 +30,7 @@ pub struct Config {
     pub mic_device_id: Option<String>,
     pub mic_device_name: Option<String>,
     /// Базовый URL шлюза, например `http://ai-lab.example:8080` или
-    /// `https://gateway.example`. Без хвоста `/v1/...` — его
+    /// `https://ai-lab.example`. Без хвоста `/v1/...` — его
     /// дописывает клиент транскрипции.
     pub stt_gateway_url: Option<String>,
     pub stt_api_key: Option<String>,

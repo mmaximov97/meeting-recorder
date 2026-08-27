@@ -159,6 +159,12 @@ pub fn parse_job_response(body: &str, label: Label) -> Result<JobOutcome, Transc
     }
 }
 
+/// Размер дорожки. Отдельной функцией, потому что его проверяет тест: тело
+/// `submit` без живого шлюза не проверить.
+async fn длина_файла(path: &Path) -> Result<u64, TranscribeError> {
+    Ok(tokio::fs::metadata(path).await?.len())
+}
+
 /// Отправить дорожку и вернуть id задачи.
 ///
 /// Отдельно от ожидания именно ради отмены: id нужен снаружи сразу, а не
@@ -169,13 +175,15 @@ pub async fn submit(
     key: &str,
     wav_path: &Path,
 ) -> Result<String, TranscribeError> {
-    let bytes = tokio::fs::read(wav_path).await?;
+    let длина = длина_файла(wav_path).await?;
     let file_name = wav_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("audio.wav")
         .to_string();
-    let part = reqwest::multipart::Part::bytes(bytes)
+    let файл = tokio::fs::File::open(wav_path).await?;
+    let поток = tokio_util::io::ReaderStream::new(файл);
+    let part = reqwest::multipart::Part::stream_with_length(reqwest::Body::wrap_stream(поток), длина)
         .file_name(file_name)
         .mime_str("audio/wav")?;
     let form = reqwest::multipart::Form::new()
@@ -361,6 +369,22 @@ pub fn merge_plain(mic: &TrackResult, system: &TrackResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Стрим без явной длины уехал бы chunked-передачей. Принимающая сторона —
+    /// multipart fastify (`ai-lab/src/routes/audio-routes.ts:113`), и известный
+    /// заранее размер ей полезнее. Тест держит длину видимой, а не проверяет
+    /// сам факт стрима: проверить его без сети нечем.
+    #[tokio::test]
+    async fn длина_дорожки_читается_без_чтения_файла_целиком() {
+        let dir = std::env::temp_dir().join("mr-submit-len");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("тест.mic.wav");
+        std::fs::write(&path, vec![0u8; 5000]).unwrap();
+
+        assert_eq!(длина_файла(&path).await.unwrap(), 5000);
+
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn ответ_succeeded_с_сегментами_даёт_result_с_нужной_меткой() {

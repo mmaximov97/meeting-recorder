@@ -948,6 +948,7 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
             return Err(msg);
         }
     };
+    emit_transcribe_progress(app, folder, base, "polling");
     // Дорожки ПО ОЧЕРЕДИ, а не через join!.
     //
     // Ускорения параллельность не давала никогда: воркер шлюза работает с

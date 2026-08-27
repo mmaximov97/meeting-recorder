@@ -58,6 +58,11 @@ pub enum TranscribeError {
     PollLost(String),
     #[error("задача {0} отменена")]
     JobCancelled(String),
+    /// Отдельно от `SubmitRejected`: то сообщение («проверьте ключ») пишется
+    /// про отправку новой задачи и на `DELETE` не подходит — гашение чужой
+    /// задачи на шлюзе не имеет отношения к вводу ключа.
+    #[error("шлюз отклонил отмену задачи ({0})")]
+    CancelRejected(String),
 }
 
 /// Шаг опроса задачи. Прежний, десять секунд: на минутных масштабах работы
@@ -287,7 +292,7 @@ pub async fn cancel_job(
     let resp = client.delete(&url).bearer_auth(key).send().await?;
     match resp.status().as_u16() {
         200 | 202 | 404 | 409 => Ok(()),
-        code => Err(TranscribeError::SubmitRejected(code.to_string())),
+        code => Err(TranscribeError::CancelRejected(code.to_string())),
     }
 }
 

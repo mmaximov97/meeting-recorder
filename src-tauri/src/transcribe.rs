@@ -272,6 +272,25 @@ pub async fn poll_until_done(
     Err(TranscribeError::Timeout(job_id.to_string()))
 }
 
+/// Погасить задачу на шлюзе.
+///
+/// 404 и 409 — не ошибка: задача могла закончиться сама между нажатием и этим
+/// вызовом, и «не нашли, что отменять» здесь означает ровно то, чего человек
+/// и хотел.
+pub async fn cancel_job(
+    client: &reqwest::Client,
+    gateway: &str,
+    key: &str,
+    job_id: &str,
+) -> Result<(), TranscribeError> {
+    let url = format!("{gateway}/v1/jobs/{job_id}");
+    let resp = client.delete(&url).bearer_auth(key).send().await?;
+    match resp.status().as_u16() {
+        200 | 202 | 404 | 409 => Ok(()),
+        code => Err(TranscribeError::SubmitRejected(code.to_string())),
+    }
+}
+
 fn fmt_ts(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64;
     format!("{:02}:{:02}", total / 60, total % 60)

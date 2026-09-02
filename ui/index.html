@@ -1,68 +1,11 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Записи встреч</title>
+    <title data-i18n="app.windowMain">MeetRec</title>
+    <link rel="stylesheet" href="tokens.css" />
     <style>
-      /* Палитра Tokyo Night — та же, что в терминале владельца.
-         Схема перенесена НЕ дословно: два её штатных сочетания не проходят по
-         контрасту, а это приложение на таком уже обжигалось (невидимые пункты
-         выпадашки). Заменены ровно два места, обоснование — в
-         docs/2026-08-03-tokyo-night-palette-design.md. */
-      :root {
-        /* Не `light dark`: без явного `dark` движок рисует нативный попап
-           выпадашки светлым, и тёмные пункты в нём пропадают. */
-        color-scheme: dark;
-        --bg: #1a1b26;
-        --fg: #c0caf5;
-        /* Не комментарный #565f89 из схемы: он даёт 2.76:1 на этом фоне, а это
-           цвет мета-строки — размеры, децибелы, пометка перекоса. Здесь 4.54:1. */
-        --muted: #7982a9;
-        --line: #292e42;
-        --accent: #7aa2f7;
-        --warn: #e0af68;
-        --error: #f7768e;
-        /* Зелёная зона метра уровня. Своей переменной раньше не было — жёлтый
-           и красный уже есть (--warn, --error) и совпадают по смыслу с зонами
-           «внимание»/«клиппинг», а зелёного («норма») в схеме не было вообще. */
-        --good: #9ece6a;
-        /* Текст на акцентной кнопке. Белым по этому синему — 2.52:1, то есть
-           нечитаемая кнопка «Записать»; цветом фона схемы — 6.79:1. */
-        --on-accent: #1a1b26;
-        /* Шрифт терминала. Запасные не для красоты: 0xProto установлен для
-           пользователя, а не системно, и если DirectWrite его не отдаст, окно
-           должно остаться читаемым, а не поехать. */
-        --mono: "0xProto Nerd Font Mono", "Cascadia Mono", Consolas, monospace;
-
-        /* Подсветка строки и пункта меню под курсором и под фокусом.
-           Полупрозрачный акцент, а не отдельный цвет, — ложится на любой фон. */
-        --hover: rgba(122, 162, 247, 0.09);
-        /* Фон приподнятой поверхности: панель «идёт запись», меню, плашка
-           источника у записи. */
-        --card: #1f2130;
-
-        /* Шкала отступов. Промежуточных ступеней нет: кажется, что нужно 10, —
-           берём 8 или 12. */
-        --s1: 4px;
-        --s2: 8px;
-        --s3: 12px;
-        --s4: 16px;
-        --s5: 24px;
-
-        --r-sm: 6px;
-        --r-md: 8px;
-        --r-lg: 10px;
-
-        /* Кривые движения. Штатные `ease` и `ease-out` слишком вялые: они не
-           дают того рывка в начале, по которому движение читается как ответ на
-           действие, а не как задержка. `ease-in` в интерфейсе не используется
-           нигде — он тормозит ровно в тот момент, когда человек смотрит
-           внимательнее всего, и одна и та же длительность ощущается вдвое
-           дольше. */
-        --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-        --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-      }
       * {
         box-sizing: border-box;
       }
@@ -124,10 +67,15 @@
           transform 0.24s var(--ease-out),
           visibility 0s 0.24s;
       }
-      #screen-list.off {
+      /* Слева уезжает то, что осталось в стеке (к нему ведёт «назад»), справа —
+         то, что ещё не открыто или только что закрылось назад. Одно правило
+         на все четыре экрана вместо отдельной строки на каждый: класс
+         `off-left`/`off-right` ставит показать_экран() в main.js, сверяясь
+         со стеком, а не порядковым номером экрана. */
+      .screen.off.off-left {
         transform: translateX(-18px);
       }
-      #screen-settings.off {
+      .screen.off.off-right {
         transform: translateX(18px);
       }
 
@@ -194,7 +142,7 @@
       .pinned {
         flex: none;
         padding: 0 var(--s4) var(--s3);
-        border-bottom: 1px solid rgba(41, 46, 66, 0.75);
+        border-bottom: 1px solid var(--line);
       }
       .body {
         flex: 1;
@@ -256,7 +204,7 @@
         font-size: 13px;
         padding: 6px 11px;
         border-radius: var(--r-sm);
-        border: 1px solid var(--line);
+        border: 1px solid var(--line-strong);
         background: transparent;
         color: var(--fg);
         cursor: pointer;
@@ -282,6 +230,40 @@
       button:disabled {
         opacity: 0.5;
         cursor: default;
+      }
+
+      /* ── Кнопка-действие в настройках ────────────────────────────────────
+         Отличается от выпадашки/поля рядом: заливка вместо контура, нет
+         стрелки, другой радиус. «Проверить» у микрофона и «Скачать модель» у
+         локальной расшифровки — обе одинаково заметны, ни одна не приглушена
+         под текстовую ссылку. */
+      button.btn {
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        padding: 7px 13px;
+        border-radius: var(--r-md);
+        border: 1px solid transparent;
+        background: var(--hover);
+        color: var(--fg);
+        cursor: pointer;
+        flex: none;
+        white-space: nowrap;
+        transition:
+          background 0.12s ease,
+          border-color 0.12s ease,
+          transform 0.14s var(--ease-out);
+      }
+      button.btn:hover {
+        background: var(--line);
+        border-color: var(--line-strong);
+      }
+      button.btn:active:not(:disabled) {
+        transform: scale(0.97);
+      }
+      button.btn:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
       }
 
       /* ── Баннер ───────────────────────────────────────────────────────────
@@ -378,7 +360,7 @@
       }
       .banner .x:hover {
         opacity: 1;
-        background: rgba(247, 118, 142, 0.14);
+        background: color-mix(in srgb, var(--error) 14%, transparent);
       }
       .banner .x:focus-visible {
         opacity: 1;
@@ -764,7 +746,7 @@
       }
       .dots button:hover {
         color: var(--fg);
-        background: rgba(0, 0, 0, 0.25);
+        background: color-mix(in srgb, black 25%, transparent);
       }
       .dots button:active {
         transform: scale(0.9);
@@ -774,6 +756,11 @@
         outline-offset: 1px;
       }
 
+      /* Отступ у кнопки/полоски модели под текстом её состояния — тот же шаг,
+         что у `.saved` под полем чуть выше. */
+      .local-model-action {
+        margin-top: var(--s2);
+      }
       /* Полоска прогресса неопределённая: сервер не сообщает процент, и врать
          процентом нельзя. */
       .prog {
@@ -811,12 +798,12 @@
         padding: 8px 9px;
       }
       .rec.card .note {
-        background: rgba(224, 175, 104, 0.1);
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
         color: var(--warn);
         font-size: 12.5px;
         line-height: 1.45;
         padding: 9px 11px;
-        border-top: 1px solid rgba(224, 175, 104, 0.28);
+        border-top: 1px solid color-mix(in srgb, var(--warn) 28%, transparent);
         display: flex;
         gap: 9px;
         align-items: flex-start;
@@ -868,6 +855,12 @@
         outline-offset: 2px;
         border-radius: 3px;
       }
+      /* Подтверждение удаления — единственное место, где в такой карточке
+         две кнопки, а не одна («Попробовать снова»): нужен разбег между
+         ними, иначе подписи сливаются в одно слово. */
+      .rec.card .note .act + .act {
+        margin-left: 16px;
+      }
 
       /* ── Меню «⋯» ──────────────────────────────────────────────────────── */
       .menu {
@@ -883,7 +876,7 @@
         border: 1px solid var(--line);
         border-radius: var(--r-md);
         padding: var(--s1);
-        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+        box-shadow: var(--shadow-menu);
         /* Разворачивается из своей кнопки «⋯», а не из центра: меню принадлежит
            ей, и рост из другой точки читается как чужое окно, прилетевшее
            сверху. Масштаб начинается с 0.95, а не с нуля — вещи не появляются
@@ -1110,12 +1103,52 @@
       h2:first-child {
         margin-top: var(--s2);
       }
+      /* ── Карточки настроек ────────────────────────────────────────────────
+         Каждая группа настроек — своя плашка: границы группы видно даже
+         боковым зрением, не приходится вчитываться в заголовки, чтобы понять,
+         где кончился «Микрофон» и начались «Хранение». Порядок групп в
+         разметке ниже — решение дизайнера: «Интерфейс» идёт последним, эти
+         настройки трогают реже всего. */
+      .grp {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        padding: var(--s3) var(--s3) 13px;
+        margin-bottom: var(--s3);
+      }
+      .grp:last-child {
+        margin-bottom: 0;
+      }
+      /* Заголовок группы — тот же приём, что у h2 вне карточек (мелкий капс,
+         приглушённый цвет), но без большого верхнего отступа: место уже
+         отбито паддингом самой карточки. Специфичность равна h2:first-child
+         выше — эта декларация побеждает по порядку в файле. */
+      .grp > h2 {
+        margin: 0 0 10px;
+      }
       .row {
         display: flex;
         gap: var(--s2);
       }
       .row + .row {
         margin-top: var(--s2);
+      }
+      /* Язык и тема: две равные колонки, а не поле с относящейся к нему
+         кнопкой (у тех зазор --s2) — между ними шаг шире, --s3. Верхний
+         отступ ряда — var(--s5), тот же, что у любого h2-заголовка раздела;
+         margin-top у вложенных h2 обнулён явно, чтобы не удвоился через
+         h2:first-child (h2 здесь — первый потомок .col, а не .body). Внутри
+         карточки «Интерфейс» ряд — единственное и первое содержимое, и этот
+         внешний отступ не нужен вовсе: место уже отбито паддингом карточки. */
+      .row.pair {
+        gap: var(--s3);
+        margin-top: var(--s5);
+      }
+      .row.pair h2 {
+        margin-top: 0;
+      }
+      .grp > .row.pair:first-child {
+        margin-top: 0;
       }
       select,
       input[type="text"],
@@ -1130,7 +1163,10 @@
         min-width: 0;
         padding: 7px var(--s2);
         border-radius: var(--r-sm);
-        border: 1px solid var(--line);
+        /* --line-field, не --line-strong: контур поля тише, чем у кнопки —
+           см. комментарий у токена в tokens.css. Рамка фокуса ниже
+           (:focus-visible) остаётся акцентной и сильной. */
+        border: 1px solid var(--line-field);
         /* Не `transparent`: при прозрачном фоне нативный попап рисует себя
            светлым, а буквы остаются цвета --fg — в тёмной теме почти белого.
            Невыбранные пункты в таком попапе не видно. */
@@ -1173,6 +1209,101 @@
         pointer-events: none;
         color: var(--muted);
       }
+      /* Значок-вопросик рядом с выпадашкой «где расшифровывать» — тот же
+         приём, что `.ic` у подписей уровней записи (mic/system): узкая
+         фиксированная колонка справа от растущего поля, курсор `help`
+         подсказывает, что тут есть что прочитать по наведению. */
+      .row.mode .ic {
+        width: 16px;
+        flex: none;
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: help;
+        transition: color 0.12s ease;
+      }
+      .row.mode .ic:hover,
+      .row.mode .ic:focus-visible {
+        color: var(--fg);
+      }
+      .row.mode .ic:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 3px;
+      }
+
+      /* ── Свой тултип у значка-вопросика ───────────────────────────────────
+         Заменяет системный `title`: тот появляется с задержкой и выглядит
+         чужим. Один общий пузырь на всё окно (пока в приложении один такой
+         значок) — лежит в конце <body>, а не рядом со значком: тело настроек
+         прокручивается, и пузырь внутри строки обрезался бы прокручиваемой
+         областью. Координаты и разворот (вверх/вниз) считает JS через
+         `getBoundingClientRect` — см. `позиционировать_подсказку` в main.js. */
+      .tip-bub {
+        position: fixed;
+        width: 262px;
+        padding: 9px 11px;
+        border-radius: var(--r-md);
+        background: var(--card);
+        color: var(--fg);
+        border: 1px solid var(--line-strong);
+        box-shadow: var(--shadow-menu);
+        font-size: 12px;
+        line-height: 1.5;
+        text-align: left;
+        z-index: 50;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(3px);
+        pointer-events: none;
+        transition:
+          opacity 0.13s ease,
+          transform 0.13s ease,
+          visibility 0s 0.13s;
+      }
+      .tip-bub.open {
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+        transition:
+          opacity 0.13s ease,
+          transform 0.13s ease,
+          visibility 0s;
+      }
+      .tip-bub .tt-second {
+        margin-top: 10px;
+      }
+      .tip-bub .tt-title {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 3px;
+      }
+      /* `local.noDiarization` — отдельный приглушённый абзац под основным
+         текстом подсказки, тем же приёмом, что `.hint` под полем. */
+      .tip-bub .tt-note {
+        display: block;
+        margin-top: 7px;
+        color: var(--muted);
+      }
+      /* Стрелка меняет сторону вместе с разворотом пузыря: сверху вниз, когда
+         над значком не хватило места (см. `.below` — ставит JS). Горизонтальное
+         положение стрелки — переменная `--arrow-left`, тоже от JS: пузырь
+         может быть сдвинут от центра значка к краю окна. */
+      .tip-bub::after {
+        content: "";
+        position: absolute;
+        left: var(--arrow-left, 50%);
+        margin-left: -5px;
+        border: 5px solid transparent;
+      }
+      .tip-bub:not(.below)::after {
+        top: 100%;
+        border-top-color: var(--card);
+      }
+      .tip-bub.below::after {
+        bottom: 100%;
+        border-bottom-color: var(--card);
+      }
       select,
       input[type="text"],
       input[type="password"] {
@@ -1182,6 +1313,16 @@
       input:focus-visible {
         outline: 2px solid var(--accent);
         outline-offset: 1px;
+      }
+      /* Общее гашение для полей/выпадашек, которые сейчас недоступны, но не
+         спрятаны совсем (например поле переименования записи во время
+         сохранения) — тот же приём, что `button:disabled` чуть выше по
+         файлу. Адрес и ключ шлюза в локальном режиме этим не пользуются: они
+         в этом режиме скрываются целиком, см. `#stt-url-row`/`#stt-key-row`. */
+      select:disabled,
+      input:disabled {
+        opacity: 0.5;
+        cursor: default;
       }
       /* Попап рисует браузер, а не страница, и наследование цвета доходит в
          него непоследовательно между версиями WebView2 — красим явно. */
@@ -1222,6 +1363,12 @@
         margin-top: var(--s2);
         line-height: 1.5;
       }
+      /* «Модель не скачалась» / «не хватает места» — это не поломка, а
+         «попробуйте ещё раз», поэтому жёлтый (--warn), а не красный
+         (--error): красный в этом интерфейсе занят под настоящие поломки. */
+      .hint.warn {
+        color: var(--warn);
+      }
       /* Подтверждение сохранения — строка под полем, не тост и не модалка. */
       .saved {
         font-size: 12px;
@@ -1259,6 +1406,141 @@
         outline-offset: 2px;
         border-radius: 3px;
       }
+      /* ── Вход на «о разработчиках»/«поддержать» ─────────────────────────
+         Последняя карточка настроек: имя приложения, версия под ним, и две
+         строки-ссылки с шевроном — тот же приём открытия вложенного экрана,
+         что кнопка настроек в шапке списка. */
+      .entry-links {
+        margin-top: var(--s3);
+      }
+      .entry-link {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        padding: 9px 8px;
+        margin: 0 -8px;
+        border: none;
+        border-radius: var(--r-sm);
+        background: transparent;
+        font: inherit;
+        font-size: 13px;
+        color: var(--fg);
+        cursor: pointer;
+        transition: background 0.12s ease;
+      }
+      .entry-link svg {
+        color: var(--muted);
+        flex: none;
+      }
+      .entry-link:hover,
+      .entry-link:focus-visible {
+        background: var(--hover);
+      }
+      .entry-link:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+
+      /* ── Экран «о разработчиках» ─────────────────────────────────────── */
+      .about-hero {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: var(--s2);
+        padding: var(--s4) 0 var(--s2);
+      }
+      .about-hero strong {
+        font-size: 17px;
+        font-weight: 600;
+      }
+      .about-tagline,
+      .about-by {
+        text-align: center;
+        font-size: 13px;
+        line-height: 1.5;
+        margin: 0 0 var(--s3);
+      }
+      .about-by {
+        color: var(--muted);
+        margin-bottom: var(--s4);
+      }
+      .person {
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .contacts {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .contacts li + li {
+        margin-top: 1px;
+      }
+      /* Моноширинный, как поля ввода: человек ждёт ровно те символы, что
+         скопирует или наберёт — тот же довод, что у `.tail-input` выше. */
+      .contact-link {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 5px 6px;
+        margin: 0 -6px;
+        border: none;
+        border-radius: var(--r-sm);
+        background: transparent;
+        font: inherit;
+        font-size: 12.5px;
+        font-family: var(--mono);
+        font-variant-ligatures: none;
+        color: var(--muted);
+        cursor: pointer;
+        transition:
+          color 0.12s ease,
+          background 0.12s ease;
+      }
+      .contact-link:hover,
+      .contact-link:focus-visible {
+        color: var(--accent);
+        background: var(--hover);
+      }
+      .contact-link:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      .foot > * + * {
+        margin-top: 6px;
+      }
+
+      /* ── Экран «поддержать» ──────────────────────────────────────────── */
+      .support-text {
+        font-size: 13px;
+        line-height: 1.55;
+        margin: 0 0 var(--s3);
+      }
+      .crypto-row {
+        display: flex;
+        align-items: center;
+        gap: var(--s2);
+        margin-top: var(--s2);
+      }
+      .crypto-address {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: var(--mono);
+        font-variant-ligatures: none;
+        font-size: 12.5px;
+        padding: 7px var(--s2);
+        border-radius: var(--r-sm);
+        border: 1px solid var(--line-field);
+        background: var(--bg);
+        color: var(--fg);
+      }
+
       /* ── Человек попросил систему поменьше двигать ────────────────────────
          Не «выключить всё»: прозрачность и цвет помогают понять, что
          произошло, и остаются. Уходит именно движение — сдвиги, масштаб и
@@ -1303,6 +1585,7 @@
         }
         .record:active,
         button.sec:active,
+        button.btn:active,
         .icon-btn:active,
         .dots button:active {
           transform: none !important;
@@ -1312,6 +1595,9 @@
         }
         .menu.закрывается {
           transform: none;
+        }
+        .tip-bub {
+          transition-duration: 0.01ms !important;
         }
       }
     </style>
@@ -1324,10 +1610,19 @@
          именем, а шапка — <header>. -->
     <main>
       <!-- ═══ Экран списка ═══ -->
-      <section class="screen" id="screen-list" aria-label="Записи">
+      <section class="screen" id="screen-list" data-i18n-attr="aria-label:nav.recordings" aria-label="Recordings">
         <header class="head">
-          <h1>Записи</h1>
-          <button class="icon-btn" id="to-settings" aria-label="Настройки" title="Настройки">
+          <!-- Знак MeetRec из ui/assets/logo-mark.svg, вставлен инлайном
+               (а не <img>), чтобы currentColor подхватывал --fg. Двухцветный:
+               скобки залиты фирменным var(--brand), микрофон —
+               currentColor/--fg. viewBox — исходные 0 0 512 512 от дизайнера,
+               поля не обрезаны: при 18-20px обрезка полей сужает просветы
+               между скобками и микрофоном. -->
+          <svg width="20" height="20" viewBox="0 0 512 512" fill="none" aria-hidden="true" style="color: var(--fg); flex: none">
+            <path d="M251.428 115.36C263.442 113.479 279.523 119.221 288.858 126.734C299.976 135.569 307.086 148.516 308.59 162.662C309.146 167.905 308.978 174.558 308.969 179.936L308.932 205.698L308.945 237.786C308.945 245.394 309.351 255.388 307.887 262.613C306.135 270.995 302.38 278.822 296.943 285.425C287.607 296.858 275.052 303.243 260.509 304.74C246.543 306.126 232.595 301.931 221.699 293.061C210.81 284.106 203.748 271.658 202.397 257.547C201.868 252.014 202.031 245.956 202.039 240.352L202.073 215.039L202.057 183.467C202.053 175.1 201.606 165.432 203.277 157.344C205.04 148.888 208.861 141.001 214.4 134.386C223.853 122.913 236.79 116.717 251.428 115.36Z" fill="currentColor"/> <path d="M96.2934 98.2548C114.877 97.546 134.383 98.5655 153.051 98.3346C156.527 98.2915 160.08 101.347 160.614 104.827C161.014 107.434 160.881 109.893 160.804 112.529C160.953 126.763 161.888 129.996 146.395 129.957L129.977 129.857C126.906 129.823 123.303 129.41 120.284 129.96C119.225 130.153 117.999 130.593 117.446 131.605C116.337 133.635 117.005 184.585 117.005 191.725V332.059C117.006 338.792 116.275 379.395 117.472 382.768C121.543 386.77 149.231 382.028 156.53 385.139C156.639 385.185 156.746 385.234 156.854 385.281C161.62 388.437 160.651 393.018 160.897 397.791C161.804 415.393 156.831 414.055 142.688 413.889C137.934 413.849 133.181 413.84 128.428 413.864L106.367 413.895C98.4364 413.904 86.7866 415.668 84.3648 404.366C83.767 401.576 84.0814 396.533 84.092 393.536L84.1237 375.872L84.1124 310.143L84.1127 176.594L84.1276 134.739C84.1158 126.94 84.0616 119.139 84.1188 111.34C84.1766 103.445 88.7504 99.0973 96.2934 98.2548Z" fill="var(--brand)"/> <path d="M358.775 98.1624C370.268 97.7048 383.384 98.3906 395.044 98.0989C398.84 98.0039 414.613 97.9308 417.462 98.3924C419.865 98.8025 422.102 99.8827 423.92 101.509C426.729 104.011 427.787 107.223 427.818 110.851C427.882 117.796 427.864 124.753 427.861 131.695L427.852 170.753L427.855 290.078L427.852 365.862L427.858 390.105C427.858 397.924 429.821 410.817 419.16 413.385C415.121 414.36 407.71 413.885 403.301 413.882L375.335 413.851C369.807 413.798 364.254 414.082 358.732 413.94C356.393 413.882 354.157 413.293 352.548 411.486C349.351 407.903 349.926 397.388 350.286 392.633C350.502 389.815 351.508 386.901 354.061 385.39C360.15 381.788 389.546 386.719 394.13 382.723C394.656 381.36 394.631 378.353 394.641 376.836L394.634 204.248L394.625 153.508L394.613 140.14C394.687 129.443 395.662 129.696 384.685 129.762L367.204 129.866C352.357 129.947 349.48 129.95 350.299 113.442C350.662 106.095 348.551 99.2163 358.775 98.1624Z" fill="var(--brand)"/> <path d="M168.475 236.091C184.752 235.827 188.357 234.991 187.407 253.296C186.694 267.013 190.189 280.687 197.503 292.385C207.132 308.035 222.629 319.19 240.543 323.371C257.9 327.304 276.11 324.212 291.191 314.778C309.128 303.381 321.378 284.488 323.336 263.034C324.009 256.189 322.807 248.713 323.957 241.988C325.629 234.782 332.99 236.269 338.006 236.067C351.344 235.532 349.718 241.549 349.958 251.799C350.308 266.725 348.517 279.717 342.487 293.603C332.154 317.235 312.757 335.748 288.64 344.994C281.292 347.621 276.43 348.722 268.758 349.928L268.743 371.287C268.74 373.784 268.303 382.377 269.398 383.985C272.161 385.562 290.899 384.295 295.964 384.605C304.238 384.488 306.869 388.185 306.463 396.242C306.171 402.074 308.286 412.453 298.924 412.852C292.47 413.125 285.871 412.937 279.414 412.937L240.917 412.922H221.828C208.511 412.999 203.921 414.103 204.593 398.067C204.86 391.676 203.468 386.479 211.552 384.81C217.013 383.681 238.381 386.038 241.676 383.976C242.692 382.236 242.297 354.06 242.299 349.943C227.034 347.903 212.533 342.049 200.137 332.928C179.661 318.223 165.929 295.953 162.004 271.081C160.719 262.65 160.924 251.449 161.23 242.763C161.361 239.044 164.796 236.603 168.475 236.091Z" fill="currentColor"/>
+          </svg>
+          <h1 data-i18n="nav.recordings">Recordings</h1>
+          <button class="icon-btn" id="to-settings" data-i18n-attr="aria-label:nav.settings;title:nav.settings" aria-label="Settings" title="Settings">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></svg>
           </button>
         </header>
@@ -1344,7 +1639,7 @@
             <div class="slot-in">
               <div class="banner err" role="alert">
                 <span id="err-text"></span>
-                <button class="x" id="err-close" aria-label="Скрыть сообщение" title="Скрыть">
+                <button class="x" id="err-close" data-i18n-attr="aria-label:nav.dismiss;title:nav.dismiss" aria-label="Dismiss" title="Dismiss">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
                 </button>
               </div>
@@ -1361,7 +1656,7 @@
             <div class="slot-in">
               <div class="banner" id="nosysaudio" role="status">
                 <span id="nosysaudio-text"></span>
-                <button class="sec" id="nosysaudio-fix">Открыть</button>
+                <button class="sec" id="nosysaudio-fix" data-i18n="nav.open">Open</button>
               </div>
             </div>
           </div>
@@ -1374,7 +1669,7 @@
             <div class="slot-in">
               <div class="armed" role="group" aria-labelledby="ask-q">
                 <span id="ask-q" role="status"></span>
-                <button class="sec" id="no">Не записывать</button>
+                <button class="sec" id="no" data-i18n="record.decline">Don't record</button>
               </div>
             </div>
           </div>
@@ -1383,7 +1678,7 @@
             <div class="slot-in">
               <button class="record" id="rec-btn">
                 <svg width="15" height="15" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="currentColor" /></svg>
-                <span id="rec-btn-label">Начать запись</span>
+                <span id="rec-btn-label" data-i18n="record.start">Start recording</span>
               </button>
             </div>
           </div>
@@ -1401,15 +1696,15 @@
                   <span class="timer" id="rec-timer" hidden></span>
                   <button class="sec" id="stop-btn">
                     <svg width="11" height="11" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="currentColor" /></svg>
-                    <span id="stop-btn-label">Остановить</span>
+                    <span id="stop-btn-label" data-i18n="record.stop">Stop</span>
                   </button>
                 </div>
                 <div class="mtr">
-                  <span class="ic" title="Ваш микрофон"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
+                  <span class="ic" data-i18n-attr="title:levels.mic" title="Your microphone"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
                   <span class="disc sm"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
                 </div>
                 <div class="mtr">
-                  <span class="ic" title="Звук системы — то, что слышно от собеседников"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
+                  <span class="ic" data-i18n-attr="title:levels.system" title="System audio — what you hear from the others"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>
                   <span class="disc sm"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
                 </div>
               </div>
@@ -1434,80 +1729,295 @@
 
           <div class="empty" id="empty" hidden>
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>
-            <strong>Записей пока нет</strong>
-            <span>Приложение само предложит записать, когда услышит звонок.<br />Или нажмите «Начать запись».</span>
+            <strong data-i18n="empty.title">No recordings yet</strong>
+            <span data-i18n="empty.text">MeetRec will offer to record when it hears a call start. Or press Start recording.</span>
           </div>
           <div id="list"></div>
         </div>
       </section>
 
       <!-- ═══ Экран настроек ═══ -->
-      <section class="screen off" id="screen-settings" aria-label="Настройки">
+      <section class="screen off off-right" id="screen-settings" data-i18n-attr="aria-label:nav.settings" aria-label="Settings">
         <header class="head">
-          <button class="icon-btn" id="to-list" aria-label="Назад к записям" title="Назад">
+          <button class="icon-btn" id="to-list" data-i18n-attr="aria-label:nav.back;title:nav.back" aria-label="Back to recordings" title="Back to recordings">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
           </button>
-          <h1>Настройки</h1>
+          <h1 data-i18n="nav.settings">Settings</h1>
         </header>
         <div class="body">
-          <h2>Микрофон</h2>
-          <div class="row">
-            <span class="field">
-              <select id="mic"></select>
-              <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-            </span>
-            <button class="sec" id="check">Проверить</button>
+          <!-- Настройки собраны в карточки: граница группы видна даже
+               боковым зрением. Порядок карточек — решение дизайнера:
+               «Интерфейс» идёт последним, эти настройки трогают реже всего. -->
+          <div class="grp">
+            <h2 data-i18n="settings.mic">Microphone</h2>
+            <div class="row">
+              <span class="field">
+                <select id="mic"></select>
+                <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+              </span>
+              <button class="btn" id="check" data-i18n="settings.micTest">Test</button>
+            </div>
+            <!-- Подтверждение стоит под самой выпадашкой, а не внизу экрана
+                 рядом с полями расшифровки: до того «Сохранено» от смены
+                 микрофона больше трёхсот пикселей, и человек его не увидит. -->
+            <div class="saved" id="mic-saved" hidden role="status">✓ <span data-i18n="settings.saved">Saved</span></div>
+            <!-- Не предупреждение и не ошибка: приложение делает ровно то, что
+                 должно. Поэтому приглушённым цветом — это объяснение, а не тревога. -->
+            <div class="slot" id="s-mic-deferred">
+              <div class="slot-in">
+                <!-- Текст ставит main.js: он называет микрофон по имени, а имя
+                     известно только там. Здесь — запасной вариант на случай, если
+                     слот раскрыли раньше, чем прочитались настройки. -->
+                <div class="hint" id="mic-deferred-text" data-i18n="settings.micLocked">
+                  The recording in progress keeps the old microphone. The new one starts with the next recording.
+                </div>
+              </div>
+            </div>
+
+            <div class="meters" id="meters">
+              <div class="mrow">
+                <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg><span data-i18n="levels.you">You</span></em>
+                <span class="disc"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
+              </div>
+              <div class="mrow">
+                <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg><span data-i18n="levels.them">System</span></em>
+                <span class="disc"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
+              </div>
+            </div>
+            <!-- Чисел в децибелах человеку не показываем: шкала -60/-50/-40 ничего
+                 ему не говорит, а вот куда должна доходить полоска — говорит.
+                 Ориентир — конец зелёного, а не середина: середина полоски это
+                 -30 дБ, то есть шёпот. Зелёная зона кончается на -18 дБ (70% —
+                 см. градиент `.disc > .f`), и нормальная речь доходит именно
+                 туда, задевая жёлтое. -->
+            <div class="hint" data-i18n="levels.hint">
+              Speak the way you normally would. The bar should reach about the end of the green and
+              stay out of the red.
+            </div>
           </div>
-          <!-- Подтверждение стоит под самой выпадашкой, а не внизу экрана
-               рядом с полями расшифровки: до того «Сохранено» от смены
-               микрофона больше трёхсот пикселей, и человек его не увидит. -->
-          <div class="saved" id="mic-saved" hidden role="status">✓ Сохранено</div>
-          <!-- Не предупреждение и не ошибка: приложение делает ровно то, что
-               должно. Поэтому приглушённым цветом — это объяснение, а не тревога. -->
-          <div class="slot" id="s-mic-deferred">
-            <div class="slot-in">
-              <!-- Текст ставит main.js: он называет микрофон по имени, а имя
-                   известно только там. Здесь — запасной вариант на случай, если
-                   слот раскрыли раньше, чем прочитались настройки. -->
-              <div class="hint" id="mic-deferred-text">
-                Запись, которая идёт сейчас, пишется прежним микрофоном. Новый включится со следующей.
+
+          <div class="grp">
+            <h2 data-i18n="settings.transcription">Transcription</h2>
+            <!-- Где расшифровывать: тот же выпадающий контрол, что у языка и
+                 темы ниже, но без своего h2-подзаголовка — второй заголовок
+                 подряд после «Transcription» был бы про одно и то же, а
+                 варианты в самой выпадашке («На сервере»/«На этом компьютере»)
+                 объясняют себя сами. Пояснения — `local.hint` и
+                 `local.noDiarization` — не абзацами под рядом, а в своей
+                 подсказке по наведению/фокусу на значок-вопросик рядом с
+                 выпадашкой: тот же приём `.ic`, что у подписей уровней
+                 записи выше. -->
+            <div class="row mode">
+              <span class="field">
+                <select id="transcribe-mode">
+                  <option value="server" data-i18n="local.onServer">On a server</option>
+                  <option value="local" data-i18n="local.onDevice">On this computer</option>
+                </select>
+                <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+              </span>
+              <!-- Свой тултип, не системный `title`: содержимое (`local.onDevice`
+                   заголовком, `local.hint` и `local.noDiarization` текстом) ставит
+                   JS в `показать_подсказку` при наведении/фокусе — см. main.js.
+                   Сам пузырь лежит в конце <body> (`#tip-bubble`), не здесь:
+                   тело настроек прокручивается, и пузырь внутри строки обрезался
+                   бы прокручиваемой областью. -->
+              <span class="ic" id="local-about" tabindex="0" aria-describedby="tip-bubble" data-i18n-attr="aria-label:local.about" aria-label="About transcribing on this computer">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /></svg>
+              </span>
+            </div>
+            <!-- Адрес и ключ шлюза видны только в серверном режиме — в
+                 локальном скрываются совсем (`hidden`), тем же приёмом, что и
+                 остальные блоки этого экрана (см. `local-model` ниже), а не
+                 гаснут `disabled`: в локальном режиме они не нужны вовсе, а не
+                 временно недоступны. -->
+            <div class="row" id="stt-url-row"><input type="text" id="stt-url" data-i18n-attr="placeholder:settings.serverUrl" placeholder="Server address" /></div>
+            <div class="row" id="stt-key-row"><input type="password" id="stt-key" data-i18n-attr="placeholder:settings.apiKey" placeholder="Access key" /></div>
+            <div class="saved" id="saved" hidden role="status">✓ <span data-i18n="settings.saved">Saved</span></div>
+
+            <!-- Состояние модели локальной расшифровки — виден только в режиме
+                 «на этом компьютере» (см. `отрисовать_модель` в main.js), тело
+                 собирает JS: у каждого из пяти состояний (нет/качается/готова/
+                 не хватает места/не скачалась) своя разметка. -->
+            <div id="local-model" hidden>
+              <div id="local-model-body"></div>
+            </div>
+          </div>
+
+          <div class="grp">
+            <h2 data-i18n="retention.label">Delete audio</h2>
+            <div class="row">
+              <span class="field">
+                <select id="retention">
+                  <option value="never" data-i18n="retention.never">Never</option>
+                  <option value="7" data-i18n="retention.d7">Older than 7 days</option>
+                  <option value="30" data-i18n="retention.d30">Older than 30 days</option>
+                  <option value="90" data-i18n="retention.d90">Older than 90 days</option>
+                </select>
+                <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+              </span>
+            </div>
+            <div class="hint" data-i18n="retention.hint">
+              Transcripts stay. Only the audio goes, and that is what takes up the space. Recordings
+              without a transcript are left alone.
+            </div>
+          </div>
+
+          <!-- Язык и тема — последняя карточка, в одном ряду: обе решают «как
+               показать интерфейс», а не что-то про запись или хранение, и это
+               трогают реже всего остального на экране. -->
+          <div class="grp">
+            <div class="row pair">
+              <div class="col">
+                <h2 data-i18n="lang.label">Language</h2>
+                <span class="field">
+                  <select id="lang">
+                    <option value="system" data-i18n="lang.system">Match the system</option>
+                    <option value="ru" data-i18n="lang.ru">Russian</option>
+                    <option value="en" data-i18n="lang.en">English</option>
+                  </select>
+                  <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                </span>
+              </div>
+              <div class="col">
+                <h2 data-i18n="theme.label">Theme</h2>
+                <span class="field">
+                  <select id="theme">
+                    <option value="system" data-i18n="theme.system">Match the system</option>
+                    <option value="light" data-i18n="theme.light">Light</option>
+                    <option value="dark" data-i18n="theme.dark">Dark</option>
+                  </select>
+                  <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                </span>
               </div>
             </div>
           </div>
 
-          <div class="meters" id="meters">
-            <div class="mrow">
-              <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em>
-              <span class="disc"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
-            </div>
-            <div class="mrow">
-              <em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em>
-              <span class="disc"><span class="t"></span><span class="f" data-level="system"></span><b data-peak="system"></b></span>
+          <!-- Вход на «о разработчиках» и «поддержать» — последняя карточка
+               настроек, а не подвал: это уже не настройка записи, а про само
+               приложение. Версию подставляет main.js (`getVersion()` у Tauri,
+               не хардкод). -->
+          <div class="grp">
+            <h2 data-i18n="app.name">MeetRec</h2>
+            <div class="hint" id="app-version"></div>
+            <div class="entry-links">
+              <button class="entry-link" id="to-about" type="button">
+                <span data-i18n="nav.about">About the makers</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
+              </button>
+              <button class="entry-link" id="to-support" type="button">
+                <span data-i18n="nav.support">Support</span>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6" /></svg>
+              </button>
             </div>
           </div>
-          <!-- Чисел в децибелах человеку не показываем: шкала -60/-50/-40 ничего
-               ему не говорит, а вот куда должна доходить полоска — говорит.
-               Ориентир — конец зелёного, а не середина: середина полоски это
-               -30 дБ, то есть шёпот. Зелёная зона кончается на -18 дБ (70% —
-               см. градиент `.disc > .f`), и нормальная речь доходит именно
-               туда, задевая жёлтое. -->
-          <div class="hint">
-            Говорите обычным голосом: полоска должна доходить примерно до конца зелёного и не
-            залезать в красное.
+        </div>
+      </section>
+
+      <!-- ═══ Экран «о разработчиках» ═══ -->
+      <section class="screen off off-right" id="screen-about" data-i18n-attr="aria-label:about.title" aria-label="About the makers">
+        <header class="head">
+          <button class="icon-btn" id="about-back" data-i18n-attr="aria-label:nav.back;title:nav.back" aria-label="Back" title="Back">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <h1 data-i18n="about.title">About the makers</h1>
+        </header>
+        <div class="body">
+          <div class="about-hero">
+            <svg width="48" height="48" viewBox="0 0 512 512" fill="none" aria-hidden="true" style="color: var(--fg)">
+              <path d="M251.428 115.36C263.442 113.479 279.523 119.221 288.858 126.734C299.976 135.569 307.086 148.516 308.59 162.662C309.146 167.905 308.978 174.558 308.969 179.936L308.932 205.698L308.945 237.786C308.945 245.394 309.351 255.388 307.887 262.613C306.135 270.995 302.38 278.822 296.943 285.425C287.607 296.858 275.052 303.243 260.509 304.74C246.543 306.126 232.595 301.931 221.699 293.061C210.81 284.106 203.748 271.658 202.397 257.547C201.868 252.014 202.031 245.956 202.039 240.352L202.073 215.039L202.057 183.467C202.053 175.1 201.606 165.432 203.277 157.344C205.04 148.888 208.861 141.001 214.4 134.386C223.853 122.913 236.79 116.717 251.428 115.36Z" fill="currentColor"/>
+              <path d="M96.2934 98.2548C114.877 97.546 134.383 98.5655 153.051 98.3346C156.527 98.2915 160.08 101.347 160.614 104.827C161.014 107.434 160.881 109.893 160.804 112.529C160.953 126.763 161.888 129.996 146.395 129.957L129.977 129.857C126.906 129.823 123.303 129.41 120.284 129.96C119.225 130.153 117.999 130.593 117.446 131.605C116.337 133.635 117.005 184.585 117.005 191.725V332.059C117.006 338.792 116.275 379.395 117.472 382.768C121.543 386.77 149.231 382.028 156.53 385.139C156.639 385.185 156.746 385.234 156.854 385.281C161.62 388.437 160.651 393.018 160.897 397.791C161.804 415.393 156.831 414.055 142.688 413.889C137.934 413.849 133.181 413.84 128.428 413.864L106.367 413.895C98.4364 413.904 86.7866 415.668 84.3648 404.366C83.767 401.576 84.0814 396.533 84.092 393.536L84.1237 375.872L84.1124 310.143L84.1127 176.594L84.1276 134.739C84.1158 126.94 84.0616 119.139 84.1188 111.34C84.1766 103.445 88.7504 99.0973 96.2934 98.2548Z" fill="var(--brand)"/>
+              <path d="M358.775 98.1624C370.268 97.7048 383.384 98.3906 395.044 98.0989C398.84 98.0039 414.613 97.9308 417.462 98.3924C419.865 98.8025 422.102 99.8827 423.92 101.509C426.729 104.011 427.787 107.223 427.818 110.851C427.882 117.796 427.864 124.753 427.861 131.695L427.852 170.753L427.855 290.078L427.852 365.862L427.858 390.105C427.858 397.924 429.821 410.817 419.16 413.385C415.121 414.36 407.71 413.885 403.301 413.882L375.335 413.851C369.807 413.798 364.254 414.082 358.732 413.94C356.393 413.882 354.157 413.293 352.548 411.486C349.351 407.903 349.926 397.388 350.286 392.633C350.502 389.815 351.508 386.901 354.061 385.39C360.15 381.788 389.546 386.719 394.13 382.723C394.656 381.36 394.631 378.353 394.641 376.836L394.634 204.248L394.625 153.508L394.613 140.14C394.687 129.443 395.662 129.696 384.685 129.762L367.204 129.866C352.357 129.947 349.48 129.95 350.299 113.442C350.662 106.095 348.551 99.2163 358.775 98.1624Z" fill="var(--brand)"/>
+              <path d="M168.475 236.091C184.752 235.827 188.357 234.991 187.407 253.296C186.694 267.013 190.189 280.687 197.503 292.385C207.132 308.035 222.629 319.19 240.543 323.371C257.9 327.304 276.11 324.212 291.191 314.778C309.128 303.381 321.378 284.488 323.336 263.034C324.009 256.189 322.807 248.713 323.957 241.988C325.629 234.782 332.99 236.269 338.006 236.067C351.344 235.532 349.718 241.549 349.958 251.799C350.308 266.725 348.517 279.717 342.487 293.603C332.154 317.235 312.757 335.748 288.64 344.994C281.292 347.621 276.43 348.722 268.758 349.928L268.743 371.287C268.74 373.784 268.303 382.377 269.398 383.985C272.161 385.562 290.899 384.295 295.964 384.605C304.238 384.488 306.869 388.185 306.463 396.242C306.171 402.074 308.286 412.453 298.924 412.852C292.47 413.125 285.871 412.937 279.414 412.937L240.917 412.922H221.828C208.511 412.999 203.921 414.103 204.593 398.067C204.86 391.676 203.468 386.479 211.552 384.81C217.013 383.681 238.381 386.038 241.676 383.976C242.692 382.236 242.297 354.06 242.299 349.943C227.034 347.903 212.533 342.049 200.137 332.928C179.661 318.223 165.929 295.953 162.004 271.081C160.719 262.65 160.924 251.449 161.23 242.763C161.361 239.044 164.796 236.603 168.475 236.091Z" fill="currentColor"/>
+            </svg>
+            <strong data-i18n="app.name">MeetRec</strong>
+          </div>
+          <p class="about-tagline" data-i18n="about.tagline">Records your calls from your own machine. No bot joins the meeting, and the files stay on your disk.</p>
+          <p class="about-by" data-i18n="about.by">Built by Cypher Products</p>
+
+          <div class="grp">
+            <h2 data-i18n="about.design">Design</h2>
+            <div class="person">Anna Dorogova</div>
+            <ul class="contacts" id="contacts-design"></ul>
+            <!-- Список выше не пустует — заглушка здесь только чтобы
+                 отрисовать_контакты() в main.js могла обращаться к обоим
+                 блокам одинаково, без отдельной ветки для Ани. -->
+            <div class="hint" id="contacts-design-soon" data-i18n="about.contactsSoon" hidden>Contacts coming soon</div>
           </div>
 
-          <h2>Расшифровка встреч</h2>
-          <div class="row"><input type="text" id="stt-url" placeholder="Адрес сервера" /></div>
-          <div class="row"><input type="password" id="stt-key" placeholder="Ключ доступа" /></div>
-          <div class="saved" id="saved" hidden role="status">✓ Сохранено</div>
+          <div class="grp">
+            <h2 data-i18n="about.code">Development</h2>
+            <div class="person">Mikhail Maximov</div>
+            <!-- Контактов Миши пока нет. Когда появятся: впишите их в
+                 КОНТАКТЫ_РАЗРАБОТКА в main.js тем же списком, что у
+                 КОНТАКТЫ_ДИЗАЙН чуть выше — { label, url } на каждую строку.
+                 Список отрисуется сам, а about.contactsSoon спрячется. -->
+            <ul class="contacts" id="contacts-code" hidden></ul>
+            <div class="hint" id="contacts-code-soon" data-i18n="about.contactsSoon">Contacts coming soon</div>
+          </div>
 
           <div class="foot">
-            <button id="repo-link" class="link">github.com/mmaximov97/meeting-recorder</button>
+            <button id="about-repo" class="link" data-i18n="about.repo">Source code on GitHub</button>
+            <div data-i18n="about.license">MIT license</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Экран «поддержать» ═══ -->
+      <section class="screen off off-right" id="screen-support" data-i18n-attr="aria-label:support.title" aria-label="Support the project">
+        <header class="head">
+          <button class="icon-btn" id="support-back" data-i18n-attr="aria-label:nav.back;title:nav.back" aria-label="Back" title="Back">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <h1 data-i18n="support.title">Support the project</h1>
+        </header>
+        <div class="body">
+          <p class="support-text" data-i18n="support.text">The app is free and will stay free. If it saved you an hour, you can say thank you with money.</p>
+
+          <div class="grp">
+            <h2 data-i18n="support.sponsors">Through GitHub Sponsors</h2>
+            <!-- Ссылки пока нет. Впишите её в SPONSORS_URL в main.js — кнопка
+                 появится сама вместо support.soon. -->
+            <button class="btn" id="sponsors-btn" type="button" data-i18n="support.openSponsors" hidden>Open GitHub Sponsors</button>
+            <div class="hint" id="sponsors-soon" data-i18n="support.soon">Link coming later</div>
+          </div>
+
+          <div class="grp">
+            <h2 data-i18n="support.crypto">With crypto</h2>
+            <div class="hint" data-i18n="support.cryptoWhy">If your card doesn't go through, this one works from anywhere.</div>
+            <!-- Адреса пока нет. Впишите его в CRYPTO_ADDRESS в main.js — поле
+                 с адресом и кнопка появятся сами вместо support.soon. -->
+            <div class="crypto-row" id="crypto-row" hidden>
+              <span class="crypto-address" id="crypto-address"></span>
+              <button class="btn" id="crypto-copy" type="button" data-i18n="support.copy">Copy the address</button>
+            </div>
+            <div class="hint" id="crypto-soon" data-i18n="support.soon">Link coming later</div>
+          </div>
+
+          <div class="foot">
+            <div data-i18n="support.thanks">Thank you.</div>
           </div>
         </div>
       </section>
     </main>
 
+    <!-- Пузырь подсказки — один на всё окно (сейчас в приложении один такой
+         значок), лежит вне обеих секций и вне прокручиваемого `.body`, чтобы
+         `position: fixed` не обрезался их overflow. Содержимое и координаты
+         (`top`/`left`/`--arrow-left`/класс `.below`) ставит JS перед показом —
+         см. `показать_подсказку`/`позиционировать_подсказку` в main.js. -->
+    <!-- Подсказка объясняет ВЕСЬ выбор, а не выбранный вариант: заголовок
+         про один режим над текстом, когда выбран другой, читается как
+         описание текущего состояния и врёт. Поэтому оба режима подряд. -->
+    <div class="tip-bub" id="tip-bubble" role="tooltip">
+      <b class="tt-title" id="tt-t1"></b>
+      <span class="tt-text" id="tt-x1"></span>
+      <b class="tt-title tt-second" id="tt-t2"></b>
+      <span class="tt-text" id="tt-x2"></span>
+      <span class="tt-note" id="tt-note"></span>
+    </div>
+
+    <script src="theme.js"></script>
+    <script src="i18n.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

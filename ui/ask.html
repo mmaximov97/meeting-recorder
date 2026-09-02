@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Записать встречу?</title>
+<title data-i18n="app.windowAsk">Record this meeting?</title>
+<link rel="stylesheet" href="tokens.css" />
 <style>
 /* Окно шире и выше плашки. Слева и снизу — поле под тень (CSS-тень обрезается
    границей окна), справа — запас, в который плашка уезжает при смахивании: без
@@ -21,18 +22,23 @@ body{
    заголовок 13/600, подпись 12/400. Живого размытия под окном добиться нельзя
    (backdrop-filter видит только саму страницу, а под ней прозрачное окно),
    поэтому фон плотный — на глаз он совпадает с тёмным системным материалом. */
+/* Всплывашка НЕ красится акцентом приложения: это отдельное окно поверх
+   чужих окон, оно читается как системное уведомление и живёт своим набором
+   токенов --toast-* (ui/tokens.css) — они меняются вместе с темой системы,
+   а не вместе с --accent приложения. */
 #card{
   position:relative;display:flex;align-items:center;gap:11px;
   padding:12px;border-radius:18px;
-  background:rgba(38,38,41,.97);
-  box-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
-  color:#fff;overflow:hidden;
+  background:var(--toast-bg);
+  box-shadow:var(--toast-shadow);
+  color:var(--toast-fg);overflow:hidden;
   will-change:transform;
 }
 
 .ava{width:38px;height:38px;flex:none;border-radius:9px;display:grid;
-  place-items:center;color:#fff;font-weight:600;font-size:15px;
-  background:rgba(255,255,255,.14)}
+  place-items:center;color:var(--toast-fg);font-weight:600;font-size:15px;
+  background:var(--toast-surface)}
+/* Фирменные цвета звонилок — не наши, не меняются вместе с темой. */
 .ava.zoom{background:#0B5CFF}
 .ava.teams{background:#6264A7}
 .ava.slack{background:#4A154B}
@@ -43,24 +49,25 @@ body{
 /* Трекинг зависит от кегля: крупный текст на глаз кажется разреженным, мелкий
    наоборот. Одно значение на оба было бы неверным хотя бы для одного из них. */
 .tt{display:block;font-size:13px;font-weight:600;letter-spacing:-.008em;
-  color:rgba(255,255,255,.96)}
-.ts{display:block;font-size:12px;font-weight:400;color:rgba(255,255,255,.56);
+  color:var(--toast-fg)}
+.ts{display:block;font-size:12px;font-weight:400;color:var(--toast-fg-dim);
   margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Кнопка — как действие в системном уведомлении: светлое полупрозрачное
    стекло на тёмной плашке, а не цветная заливка. Цветная читалась бы как
    веб-кнопка, наклеенная поверх системного окна. */
 .go{flex:none;font:inherit;font-size:13px;font-weight:600;border:none;
-  border-radius:8px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;
+  border-radius:8px;background:var(--toast-surface);color:var(--toast-fg);cursor:pointer;
   padding:7px 14px;letter-spacing:-.004em;transition:background 90ms ease-out}
 /* Отклик на НАЖАТИЕ, а не на отпускание: ожидание клика читается как «не
-   сработало». */
-.go:hover{background:rgba(255,255,255,.22)}
-.go:active{background:rgba(255,255,255,.30)}
+   сработало». Своего токена для нажатого состояния нет — используем тот же
+   «под наведением», третьей ступени стекла в палитре не заведено. */
+.go:hover{background:var(--toast-surface-hover)}
+.go:active{background:var(--toast-surface-hover)}
 
 /* Остаток времени — тонкая линия по нижнему краю плашки. */
 .life{position:absolute;left:0;bottom:0;height:2px;width:0;
-  background:rgba(255,255,255,.30)}
+  background:var(--toast-life)}
 #card.in .life{animation:life 7s linear forwards}
 @keyframes life{from{width:100%}to{width:0}}
 /* Пауза отсчёта, пока человек читает вопрос.
@@ -73,7 +80,7 @@ body{
    и правило с меньшей специфичностью паузу не поставит — оно просто молча не
    сработает. */
 body.наведено #card .life{animation-play-state:paused;
-  background:rgba(255,255,255,.55)}
+  background:var(--toast-life-hover)}
 
 
 [hidden]{display:none !important}
@@ -85,15 +92,17 @@ body.наведено #card .life{animation-play-state:paused;
   <div id="card">
     <span class="ava" id="ava"></span>
     <span class="tx">
-      <span class="tt">Записать встречу?</span>
+      <span class="tt" data-i18n="app.windowAsk">Record this meeting?</span>
       <span class="ts" id="src"></span>
     </span>
-    <button class="go" id="yes">Записать</button>
+    <button class="go" id="yes" data-i18n="record.confirm">Record</button>
     <span class="life" id="life"></span>
   </div>
 
 </div>
 
+<script src="theme.js"></script>
+<script src="i18n.js"></script>
 <script src="ask.js"></script>
 </body>
 </html>

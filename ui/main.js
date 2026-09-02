@@ -2087,25 +2087,24 @@ async function отрисовать_версию() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Экран «поддержать»
 //
-// Ссылки на GitHub Sponsors пока нет. Впишите её сюда, когда заведёте
-// (например, "https://github.com/sponsors/<логин>") — кнопка появится сама
-// вместо строки support.soon.
-const SPONSORS_URL = "";
-
-// Адреса крипто-кошелька пока нет. Впишите его сюда, когда заведёте — поле с
-// адресом и кнопка «Скопировать» появятся сами вместо строки support.soon.
-const CRYPTO_ADDRESS = "";
+// Единственный способ поддержать — крипта. GitHub Sponsors отложен: он требует,
+// чтобы страна проживания совпадала со страной банковского счёта, американской
+// налоговой формы и ревью GitHub без названного срока. Появится ссылка —
+// вернётся и блок.
+//
+// Адрес USDT в сети TRON (TRC-20). Тот же адрес зашит в QR внутри index.html:
+// поменяете здесь — перевыпустите и QR, иначе они разъедутся.
+const CRYPTO_ADDRESS = "TFzpPkaSRQXLCEg9ZYf4MiwHNbzD4bYCgE";
 
 function отрисовать_поддержку() {
-  $("sponsors-btn").hidden = !SPONSORS_URL;
-  $("sponsors-soon").hidden = Boolean(SPONSORS_URL);
-
-  $("crypto-row").hidden = !CRYPTO_ADDRESS;
-  $("crypto-soon").hidden = Boolean(CRYPTO_ADDRESS);
-  if (CRYPTO_ADDRESS) $("crypto-address").textContent = CRYPTO_ADDRESS;
+  const есть = Boolean(CRYPTO_ADDRESS);
+  $("crypto-row").hidden = !есть;
+  $("crypto-net").hidden = !есть;
+  $("crypto-warn").hidden = !есть;
+  $("crypto-qr").hidden = !есть;
+  $("crypto-soon").hidden = есть;
+  if (есть) $("crypto-address").textContent = CRYPTO_ADDRESS;
 }
-
-$("sponsors-btn").addEventListener("click", () => открыть_ссылку(SPONSORS_URL));
 
 // Подпись кнопки на короткое время меняется на «Скопировано» — тот же приём,
 // что показывает «Сохранено» под полями настроек (показать_сохранено), но

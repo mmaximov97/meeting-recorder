@@ -112,14 +112,20 @@ Issues and pull requests are welcome. Two things worth knowing before you open o
 <!-- TODO: подставить ссылку на Cypher Products, когда будет сайт или страница -->
 Built by [Cypher Products](#).
 
-- Mikhail Maksimov — [github.com/mmaximov97](https://github.com/mmaximov97)
+- Mikhail Maksimov — development — [github.com/mmaximov97](https://github.com/mmaximov97)
 - Anna Dorogova — design — [adorogova.com](https://adorogova.com) · [github.com/blinbirka](https://github.com/blinbirka)
 
 ## Support
 
 MeetRec is free and always will be. If it saved you an hour, you can buy the two of us a coffee.
 
-<!-- TODO: подставить настоящие ссылки, когда будет профиль GitHub Sponsors и крипто-адрес -->
+**USDT, TRON network (TRC-20)**
+
+```
+TFzpPkaSRQXLCEg9ZYf4MiwHNbzD4bYCgE
+```
+
+Send only on the TRON network. A transfer on any other network cannot be recovered.
 
 ## License
 

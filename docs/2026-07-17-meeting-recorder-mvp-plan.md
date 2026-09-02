@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Windows-приложение, которое замечает начало звонка, предлагает записать, и пишет две раздельные аудиодорожки (микрофон + системный звук) в `C:\Users\Cypher\Recordings`.
+**Goal:** Windows-приложение, которое замечает начало звонка, предлагает записать, и пишет две раздельные аудиодорожки (микрофон + системный звук) в `C:\Users\<username>\Recordings`.
 
 **Architecture:** Ядро — две чистые, платформенно-независимые единицы (`ringbuf`, `session`), тестируемые без микрофона и без встречи. Вокруг них — три платформенных адаптера за трейтами (`detector`, `capture`, `storage`) и Tauri-оболочка (`ui`). Детект встречи сделан **поллингом** WASAPI audio-сессий раз в 2 секунды, не событиями.
 
@@ -11,9 +11,9 @@
 ## Global Constraints
 
 - **Таргет только `x86_64-pc-windows-msvc`.** Код не собирается и не запускается под Linux/WSL. Все сборки — Windows-тулчейном.
-- **Код живёт на Windows-диске:** `C:\Users\Cypher\Projects\meeting-recorder` (из WSL — `/mnt/c/Users/Cypher/Projects/meeting-recorder`). Сборка Windows-овским `cargo.exe` через WSL-интероп. Не переносить в WSL-ФС: `cargo.exe`, читающий `\\wsl$\`, работает мучительно медленно.
+- **Код живёт на Windows-диске:** `C:\Users\<username>\Projects\meeting-recorder` (из WSL — `/mnt/c/Users/<username>/Projects/meeting-recorder`). Сборка Windows-овским `cargo.exe` через WSL-интероп. Не переносить в WSL-ФС: `cargo.exe`, читающий `\\wsl$\`, работает мучительно медленно.
 - **Формат аудио:** 16000 Гц, моно, 16 бит PCM, WAV. Одинаково для обеих дорожек.
-- **Каталог записей:** `C:\Users\Cypher\Recordings`. **Никогда** не внутри vault (`C:\Users\Cypher\Documents\vault\obsidian-vault`) — там git-автокоммиты.
+- **Каталог записей:** `C:\Users\<username>\Recordings`. **Никогда** не внутри vault (`C:\Users\<username>\Documents\vault\obsidian-vault`) — там git-автокоммиты.
 - **Кольцевой буфер:** 30 секунд.
 - **Интервал поллинга детектора:** 2 секунды.
 - **Аудио никогда не коммитится.** `.gitignore` уже покрывает `*.wav` и `/recordings/`.
@@ -51,14 +51,14 @@ Expected: три строки с версиями. Если `command not found` 
 
 Run:
 ```bash
-cd /mnt/c/Users/Cypher/Projects/meeting-recorder && cargo.exe new --bin linktest && cd linktest && cargo.exe run
+cd /mnt/c/Users/<username>/Projects/meeting-recorder && cargo.exe new --bin linktest && cd linktest && cargo.exe run
 ```
 Expected: `Hello, world!`. Если падает на `link.exe not found` — Build Tools встали без C++ workload, вернуться к шагу 1.
 
 - [ ] **Step 6: Убрать проверочный проект**
 
 ```bash
-cd /mnt/c/Users/Cypher/Projects/meeting-recorder && rm -rf linktest
+cd /mnt/c/Users/<username>/Projects/meeting-recorder && rm -rf linktest
 ```
 
 ---
@@ -229,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - [ ] **Step 5: Собрать**
 
-Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && cargo.exe build`
+Run: `cd /mnt/c/Users/<username>/Projects/meeting-recorder && cargo.exe build`
 Expected: компилируется. **Вероятны правки под конкретную версию `windows` 0.58** — сигнатуры `CoInitializeEx`/`Activate` менялись между версиями крейта. Если не собирается, свериться с [docs.rs/windows](https://docs.rs/windows/0.58.0/windows/Win32/Media/Audio/index.html) для точной сигнатуры, не угадывать.
 
 - [ ] **Step 6: Проверить главное допущение вручную**
@@ -247,7 +247,7 @@ Run: `cargo.exe run`
 - [ ] **Step 7: Коммит**
 
 ```bash
-cd /mnt/c/Users/Cypher/Projects/meeting-recorder
+cd /mnt/c/Users/<username>/Projects/meeting-recorder
 git add Cargo.toml Cargo.lock src/
 git commit -m "feat(detector): поллинг mic-сессий через WASAPI"
 ```
@@ -1233,7 +1233,7 @@ fn spawn_stdin() -> Receiver<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = PathBuf::from(r"C:\Users\Cypher\Recordings");
+    let dir = PathBuf::from(r"C:\Users\<username>\Recordings");
     let det = WindowsDetector::new()?;
     let mut app = App::new(dir);
     let input = spawn_stdin();
@@ -1302,7 +1302,7 @@ Expected: все тесты Task 2–5 проходят, бинарь собир
 Run: `cargo.exe run`
 
 Три сценария:
-1. **Авто:** зайти в звонок → появляется вопрос → `y` → поговорить → выйти из звонка → в `C:\Users\Cypher\Recordings` две дорожки, **и в начале слышно то, что было до ответа `y`** (проверка кольцевого буфера).
+1. **Авто:** зайти в звонок → появляется вопрос → `y` → поговорить → выйти из звонка → в `C:\Users\<username>\Recordings` две дорожки, **и в начале слышно то, что было до ответа `y`** (проверка кольцевого буфера).
 2. **Отказ:** зайти в звонок → `n` → выйти. В каталоге **не появилось ничего**.
 3. **Ручной:** без всякого звонка → `s` → поговорить → `x` → две дорожки с префиксом `manual`.
 
@@ -1379,12 +1379,12 @@ path = "src/main.rs"
 
 `src/main.rs` переключить на использование крейта (`use meeting_recorder::...`) вместо `mod`-объявлений.
 
-Run: `/mnt/c/Users/Cypher/.cargo/bin/cargo.exe test`
+Run: `/mnt/c/Users/<username>/.cargo/bin/cargo.exe test`
 Expected: все 88 тестов проходят — реструктуризация не должна ничего сломать.
 
 - [ ] **Step 2: Завести Tauri-крейт**
 
-Run: `cd /mnt/c/Users/Cypher/Projects/meeting-recorder && npm.cmd create tauri-app@latest -- --template vanilla`
+Run: `cd /mnt/c/Users/<username>/Projects/meeting-recorder && npm.cmd create tauri-app@latest -- --template vanilla`
 
 Ответить так, чтобы фронтенд лёг в `ui/`, а Rust — в `src-tauri/`. В `src-tauri/Cargo.toml`:
 
@@ -1496,7 +1496,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![send_event, list_recordings])
         .setup(move |app| {
             let handle = app.handle().clone();
-            let dir = std::path::PathBuf::from(r"C:\Users\Cypher\Recordings");
+            let dir = std::path::PathBuf::from(r"C:\Users\<username>\Recordings");
             // Аудио-поток. Всё !Send рождается ВНУТРИ него.
             std::thread::spawn(move || audio::run(handle, rx, dir));
             Ok(())
@@ -1518,7 +1518,7 @@ fn main() {
 
 - [ ] **Step 6: Окно со списком**
 
-Команда `list_recordings` читает `C:\Users\Cypher\Recordings`, группирует по префиксу `YYYY-MM-DD_HH-MM_source` (суффикс дорожки — `.mic.wav` / `.system.wav`, у повторов в ту же минуту — `_N`), возвращает пары. Фронтенд показывает список и кнопку «открыть папку».
+Команда `list_recordings` читает `C:\Users\<username>\Recordings`, группирует по префиксу `YYYY-MM-DD_HH-MM_source` (суффикс дорожки — `.mic.wav` / `.system.wav`, у повторов в ту же минуту — `_N`), возвращает пары. Фронтенд показывает список и кнопку «открыть папку».
 
 - [ ] **Step 7: Проверить**
 

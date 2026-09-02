@@ -87,7 +87,7 @@ objc2-core-foundation = "..."     # транзитивная зависимос�
 ```rust
 // src-tauri/src/main.rs
 #[cfg(target_os = "windows")]
-fn recordings_root() -> PathBuf { PathBuf::from(r"C:\Users\Cypher\Recordings") }
+fn recordings_root() -> PathBuf { PathBuf::from(r"C:\Users\<username>\Recordings") }
 
 #[cfg(target_os = "macos")]
 fn recordings_root() -> PathBuf {

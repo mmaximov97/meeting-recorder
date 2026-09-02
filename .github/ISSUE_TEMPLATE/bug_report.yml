@@ -1,0 +1,79 @@
+name: Bug report
+description: Something in MeetRec does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write in English or Russian, whichever you prefer. / Пишите по-английски или по-русски, как удобнее.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+      placeholder: |
+        1. Started a recording during a Zoom call
+        2. Expected both voices in the file
+        3. Only my microphone was recorded
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: "macOS: Apple menu → About This Mac. Windows: Settings → System → About."
+      placeholder: "macOS 14.5 / Windows 11 23H2"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: MeetRec version
+      description: Shown on the About screen in the app.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it goes wrong
+      options:
+        - Recording audio
+        - Detecting a call
+        - Transcription
+        - The interface
+        - Files and folders
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Optional, and it helps a lot. Paste any error text you saw.
+      render: text
+
+  - type: checkboxes
+    id: macos-tap
+    attributes:
+      label: If this is about missing system audio on macOS
+      options:
+        - label: My macOS is 14.4 or newer (capturing the other person's audio needs it)
+          required: false
+        - label: MeetRec has microphone permission in System Settings → Privacy & Security
+          required: false

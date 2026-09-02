@@ -1247,8 +1247,8 @@ Expected: `MIT License`.
 - [ ] **Step 3: Убрать личные пути**
 
 ```bash
-sed -i 's|`C:\\Users\\Cypher\\Recordings`|каталог записей Windows|g; s|`C:\\Users\\Cypher\\Recordings\\YYYY-MM\\`|`<каталог записей>\\YYYY-MM\\`|g' README.md
-sed -i 's|/Users/birka/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
+sed -i 's|`C:\\Users\\<username>\\Recordings`|каталог записей Windows|g; s|`C:\\Users\\<username>\\Recordings\\YYYY-MM\\`|`<каталог записей>\\YYYY-MM\\`|g' README.md
+sed -i 's|<личный каталог>/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
 sed -i 's|10\.0\.0\.3:8080|ai-lab.example:8080|g' docs/2026-08-10-in-app-transcription-design.md docs/2026-08-10-in-app-transcription-plan.md
 ```
 
@@ -1256,7 +1256,7 @@ sed -i 's|10\.0\.0\.3:8080|ai-lab.example:8080|g' docs/2026-08-10-in-app-transcr
 
 Run:
 ```bash
-grep -rn "C:\\\\Users\\\\Cypher\|/Users/birka\|10\.0\.0\.3" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
+grep -rn "C:\\\\Users\\\\<username>\|/Users/<username>\|<внутренний IP>" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
 ```
 Expected: пусто.
 
@@ -1430,10 +1430,10 @@ GPU, поэтому следующая в очереди не двигалась
 - Produces: ничего нового наружу — `recordings_root()` сохраняет сигнатуру
 
 **Почему это баг, а не гигиена.** Под macOS каталог записей выводится из `$HOME`.
-Под Windows он прибит гвоздём: `PathBuf::from(r"C:\Users\Cypher\Recordings")`. На
+Под Windows он прибит гвоздём: `PathBuf::from(r"C:\Users\<username>\Recordings")`. На
 машине любого другого человека приложение пишет записи в чужой домашний каталог,
 а не имея туда прав — не пишет вовсе. Не всплывало это ровно потому, что у автора
-пользователь и назывался `Cypher`.
+пользователь назывался личным именем.
 
 Оба файла правятся вместе и обязаны остаться одинаковыми: докблок в
 `src-tauri/src/main.rs:30-34` прямо требует, чтобы корень записей у GUI и у
@@ -1449,7 +1449,7 @@ GPU, поэтому следующая в очереди не двигалась
 ```rust
     /// Каталог записей обязан выводиться из домашнего каталога ТЕКУЩЕГО
     /// пользователя, а не быть прибитым к чьему-то конкретному профилю.
-    /// Раньше под Windows здесь стоял литерал `C:\Users\Cypher\Recordings`,
+    /// Раньше под Windows здесь стоял литерал `C:\Users\<username>\Recordings`,
     /// и на чужой машине приложение писало в чужой домашний каталог.
     #[cfg(target_os = "windows")]
     #[test]
@@ -1483,7 +1483,7 @@ mod tests {
 - [ ] **Step 2: Прогнать и убедиться, что падает**
 
 Прогон идёт в CI (локального тулчейна нет).
-Expected: на `windows-latest` тест падает — слева `C:\Users\Cypher\Recordings`,
+Expected: на `windows-latest` тест падает — слева `C:\Users\<username>\Recordings`,
 справа профиль раннера. На `macos-latest` проходит сразу: там код уже верный, и
 этот тест только фиксирует существующее поведение.
 
@@ -1511,7 +1511,7 @@ Expected: зелено на обеих системах, тестов на 2 б�
 
 Задача 9 уже переписала README на «в домашний каталог `Recordings` на Windows».
 До этой задачи это было неправдой, после — стало правдой. Убедиться, что так и
-читается, и что литерала `C:\Users\Cypher` в README не осталось.
+читается, и что литерала `C:\Users\<username>` в README не осталось.
 
 - [ ] **Step 6: Коммит**
 
@@ -1519,7 +1519,7 @@ Expected: зелено на обеих системах, тестов на 2 б�
 git add src/main.rs src-tauri/src/main.rs
 git commit -m "fix(windows): записи ложатся в домашний каталог текущего пользователя
 
-Под Windows корень записей был прибит к C:\\Users\\Cypher\\Recordings — пути
+Под Windows корень записей был прибит к C:\\Users\\<username>\\Recordings — пути
 автора. На чужой машине приложение писало в чужой домашний каталог, а без прав
 туда не писало вовсе. Под macOS тот же корень всё это время честно выводился из
 \$HOME; теперь ветки симметричны, и обе покрыты тестом."

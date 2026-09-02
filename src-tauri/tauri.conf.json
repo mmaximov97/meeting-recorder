@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "meeting-recorder",
+  "productName": "MeetRec",
   "version": "0.2.0",
   "identifier": "net.cypher-cloud.meeting-recorder",
   "build": {
@@ -12,16 +12,16 @@
     "windows": [
       {
         "label": "main",
-        "title": "Записи встреч",
+        "title": "MeetRec",
         "width": 460,
         "height": 640,
         "resizable": true,
-        "visible": false
+        "visible": true
       },
       {
         "label": "ask",
         "url": "ask.html",
-        "title": "Записать встречу?",
+        "title": "Record this meeting?",
         "width": 876,
         "height": 96,
         "resizable": false,

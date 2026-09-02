@@ -17,6 +17,7 @@
 //! настоящим состоянием, а не с захардкоженным «Ожидание встречи» из `index.html`.
 
 use crate::audio::UiState;
+use crate::i18n;
 use crate::tray;
 use serde::Serialize;
 use std::sync::Mutex;
@@ -28,7 +29,14 @@ use tauri_plugin_notification::NotificationExt;
 /// Один текст на все места, потому что случай один: канал закрыт (поток вышел)
 /// или мьютекс отравлен (поток паниковал, держа его). И то и другое — навсегда:
 /// поднимать аудио-поток заново некому, всё `!Send` умерло вместе с ним.
-pub const DEAD: &str = "аудио-поток остановился: запись не работает, перезапустите приложение";
+///
+/// Значение — ключ словаря (`ui/i18n/strings.json`), а не готовая фраза:
+/// строка уходит и в `Snapshot.fatal`/событие `fatal` (там её переводит сам
+/// webview через `window.i18n.t`), и в нативную подсказку трея (там её
+/// переводит `i18n::t` здесь, в Rust, — см. `tray::repaint`). Была бы здесь
+/// готовая фраза на языке, выбранном при старте, — смена языка в интерфейсе
+/// на лету эту конкретную строку бы не тронула.
+pub const DEAD: &str = "permission.streamDead";
 
 /// Всё, что UI должен знать о нас в любой момент времени.
 #[derive(Serialize, Clone, PartialEq, Eq, Debug, Default)]
@@ -60,6 +68,23 @@ pub struct Snapshot {
     /// запуска. Баннер, который умеет гаснуть сам, здесь врал бы: он погас бы,
     /// а вторая дорожка так и не появилась бы.
     pub no_system_audio: Option<String>,
+    /// `Some` — прямо сейчас на диск пишется ровно эта пара дорожек.
+    ///
+    /// Не событие, а факт снимка, по той же причине, что и весь остальной
+    /// модуль: `list_recordings` (см. `main.rs`) вызывается по требованию, а
+    /// не подписан ни на что, и обязан на каждый свой вызов узнавать, какая
+    /// из найденных на диске записей ещё растёт, — иначе `delete_recording`
+    /// или автоочистка старого аудио могли бы тронуть файл посреди записи.
+    pub current_recording: Option<CurrentRecording>,
+}
+
+/// Какая запись пишется прямо сейчас.
+#[derive(Serialize, Clone, PartialEq, Eq, Debug)]
+pub struct CurrentRecording {
+    /// Месячная папка (`"2026-07"`).
+    pub folder: String,
+    /// Основа имени, без суффикса дорожки и расширения.
+    pub base: String,
 }
 
 /// Что человек должен понять про режим одного микрофона.
@@ -69,12 +94,12 @@ pub struct Snapshot {
 /// нём звучит (см. `audio::mac_should_arm`), и без тапа этого сигнала нет
 /// вовсе. Умолчи об этом — и человек неделю будет думать, что сломался детект,
 /// а не что он сам нажал «Не разрешать».
-pub const NO_SYSTEM_AUDIO: &str = "Системный звук не пишется — только ваш \
-     микрофон. Встречи сами определяться не будут: приложение узнаёт звонок \
-     именно по звуку системы. Записать можно вручную — кнопкой, горячей \
-     клавишей или из трея. Разрешить можно в Системных настройках → \
-     Конфиденциальность и безопасность → Запись экрана и звука, после чего \
-     перезапустить приложение.";
+/// Ключ словаря, не готовая фраза — используется только в теле нативного
+/// уведомления (`no_system_audio` ниже), которое рисует сам Rust через
+/// `i18n::t`. В webview этот же смысл идёт отдельными ключами
+/// `permission.noSystemAudioShort`/`permission.noSystemAudio` напрямую из
+/// `ui/main.js`, минуя этот модуль, — см. `показать_отсутствие_системного_звука`.
+pub const NO_SYSTEM_AUDIO: &str = "permission.noSystemAudio";
 
 /// Разделяемое состояние. Живёт в `tauri::State`, пишется аудио-потоком (и теми,
 /// у кого не прошёл `send`), читается командой `get_state` из webview.
@@ -157,6 +182,24 @@ impl Status {
         g.no_system_audio = Some(reason.to_string());
         true
     }
+
+    /// Записать, какая запись сейчас пишется. `true` — изменилось. Снятие
+    /// (`None`, запись кончилась) — тоже изменение, по той же причине, что и
+    /// у `set_device_warning`: висящее значение соврало бы, что растёт файл,
+    /// который уже закрыт.
+    ///
+    /// Аргумент — `(папка, основа)`, а не готовый `CurrentRecording`: тот, кто
+    /// зовёт (`audio::sync`), знает пару значений из `App::current_recording`,
+    /// а собирать из неё структуру — дело этого модуля, не звонящего.
+    pub fn set_current_recording(&self, r: Option<(String, String)>) -> bool {
+        let mut g = self.lock();
+        let new = r.map(|(folder, base)| CurrentRecording { folder, base });
+        if g.current_recording == new {
+            return false;
+        }
+        g.current_recording = new;
+        true
+    }
 }
 
 /// Сообщить, что системный звук захватить не удалось и дальше пишется один
@@ -167,22 +210,27 @@ impl Status {
 /// бы соврать. Разница с `fatal` в намерении: там «дальше ничего не будет»,
 /// здесь «дальше будет половина».
 ///
-/// Окно показывается по той же причине, что и в `fatal`: стартовое окно скрыто
-/// (`"visible": false`), приложение — `ActivationPolicy::Accessory`, и
-/// предупреждение, не показанное на экране, не показано нигде. Это и есть тот
-/// «разовый диалог при старте»; постоянная же часть — баннер в окне, который
-/// живёт в `Snapshot` и переживает и перезагрузку webview, и закрытие окна.
+/// Окно показывается по той же причине, что и в `fatal`: крестик у главного
+/// окна не закрывает приложение, а прячет его (`WindowEvent::CloseRequested`
+/// в `main.rs` зовёт `hide()`, не отдаёт закрытие ОС) — оно стартует видимым
+/// (`"visible": true` в `tauri.conf.json`, политика `ActivationPolicy::Regular`),
+/// но к моменту этой ошибки могло быть уже спрятано ровно так же, как прячется
+/// по клику на крестик. Без явного показа предупреждение осталось бы только в
+/// `Snapshot`, а на экране — нигде. Постоянная же часть — баннер в окне,
+/// который живёт в `Snapshot` и переживает и перезагрузку webview, и закрытие
+/// окна.
 pub fn no_system_audio(app: &AppHandle, reason: String) {
     if !app.state::<Status>().set_no_system_audio(&reason) {
         return;
     }
     eprintln!("системный звук не захватывается: {reason}");
     let _ = app.emit("no-system-audio", reason.clone());
+    let lang = i18n::active_lang(app);
     let _ = app
         .notification()
         .builder()
-        .title("Пишется только ваш микрофон")
-        .body(NO_SYSTEM_AUDIO)
+        .title(i18n::t("notify.micOnlyTitle", &lang))
+        .body(i18n::t(NO_SYSTEM_AUDIO, &lang))
         .show();
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
@@ -206,7 +254,7 @@ pub fn no_system_audio(app: &AppHandle, reason: String) {
 /// `Status`: он работает для тех, кто ещё даже не загрузился.
 ///
 /// Окно показывается ЗДЕСЬ, а не только по клику в трее, потому что стартовое
-/// окно скрыто (`"visible": false` в `tauri.conf.json`), и без этого показа
+/// окно может быть спрятано крестиком (`hide()`, а не закрытие), и без этого показа
 /// самый ранний фатальный отказ — guard версии macOS в `audio::run()` — выглядел
 /// бы как «приложение запустилось и ничего не делает»: окна нет, тоста нет,
 /// трей серый, а причина видна только тому, кто догадался открыть окно из трея.
@@ -222,11 +270,12 @@ pub fn fatal(app: &AppHandle, msg: String) {
     eprintln!("фатально: {msg}");
     let _ = app.emit("fatal", msg.clone());
     tray::set_fatal(app, &msg);
+    let lang = i18n::active_lang(app);
     let _ = app
         .notification()
         .builder()
-        .title("Записывать сейчас не получится")
-        .body("Перезапустите приложение.")
+        .title(i18n::t("notify.fatalTitle", &lang))
+        .body(i18n::t("notify.fatalBody", &lang))
         .show();
     // Даже если webview поднялся позже этого `emit`, он спросит `get_state` и
     // покажет ту же причину (см. `ui/main.js`), — поэтому здесь достаточно
@@ -253,6 +302,7 @@ mod tests {
                 device_warning: None,
                 mic_deferred: false,
                 no_system_audio: None,
+                current_recording: None,
             }
         );
     }
@@ -383,6 +433,36 @@ mod tests {
             сн.state,
             UiState::Recording,
             "идущую запись предупреждение не останавливает"
+        );
+    }
+
+    // ---- какая запись пишется прямо сейчас ---------------------------------
+
+    #[test]
+    fn текущая_запись_сообщается_только_об_изменении() {
+        let s = Status::default();
+        assert!(s.set_current_recording(Some(("2026-07".into(), "2026-07-17_14-30_zoom".into()))));
+        assert!(!s.set_current_recording(Some((
+            "2026-07".into(),
+            "2026-07-17_14-30_zoom".into()
+        ))));
+        assert!(s.set_current_recording(None), "снятие — тоже изменение");
+        assert_eq!(s.snapshot().current_recording, None);
+    }
+
+    /// Тот, кто спросит снимок посреди записи (список записей, удаление,
+    /// автоочистка), обязан узнать текущую запись — та же причина, по которой
+    /// в снимке вообще живёт это поле.
+    #[test]
+    fn текущая_запись_видна_в_снимке() {
+        let s = Status::default();
+        s.set_current_recording(Some(("2026-07".into(), "2026-07-17_14-30_zoom".into())));
+        assert_eq!(
+            s.snapshot().current_recording,
+            Some(CurrentRecording {
+                folder: "2026-07".into(),
+                base: "2026-07-17_14-30_zoom".into(),
+            })
         );
     }
 }

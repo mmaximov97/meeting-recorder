@@ -7,8 +7,12 @@
 
 mod audio;
 mod config;
+mod delete;
+mod i18n;
 mod imbalance;
+mod local;
 mod rename;
+mod retention;
 mod status;
 mod transcribe;
 mod tray;
@@ -17,10 +21,11 @@ use audio::Ctl;
 use config::Config;
 use imbalance::Cache;
 use meeting_recorder::session::Event;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use status::{Snapshot, Status};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -57,6 +62,13 @@ impl Cmd {
             .map_err(|_| "аудио-поток не отвечает".to_string())
     }
 }
+
+/// Managed-обёртка над `audio::MonitorEpoch`: тот же счётчик, что видит
+/// аудио-поток (см. его докблок), нужен и здесь — `set_monitor` обязан
+/// ответить окну номером эпохи ДО того, как аудио-поток обработает команду
+/// (это и есть сама причина гонки, которую эпоха лечит), поэтому команда не
+/// ждёт ответа с провода, а читает общий счётчик напрямую.
+struct MonitorEpochState(audio::MonitorEpoch);
 
 /// Одна ждущая или обрабатываемая транскрипция.
 #[derive(Clone, PartialEq, Debug)]
@@ -245,6 +257,30 @@ impl TranscribeQueue {
             .collect();
         Ok(Cancelled::Dropped(moved))
     }
+
+    /// Есть ли запись в очереди — ждёт своей позиции или обрабатывается прямо
+    /// сейчас. Не различает эти два случая: обеим нельзя мешать одинаково —
+    /// трогать файлы под расшифровкой, которая вот-вот начнётся, так же
+    /// плохо, как под той, что уже идёт (см. `recording_busy`).
+    fn contains(&self, item: &QueueItem) -> bool {
+        self.pending
+            .lock()
+            .expect("лок очереди транскрипции")
+            .items
+            .contains(item)
+    }
+}
+
+/// Занята ли запись прямо сейчас — идёт запись или расшифровка (в очереди или
+/// уже в работе). Общая для `delete_recording` и автоочистки: у обеих один и
+/// тот же список исключений, и разъехаться этому списку в двух местах нельзя.
+fn recording_busy(status: &Status, queue: &TranscribeQueue, folder: Option<&str>, base: &str) -> bool {
+    let recording = status
+        .snapshot()
+        .current_recording
+        .is_some_and(|c| Some(c.folder.as_str()) == folder && c.base == base);
+    let transcribing = queue.contains(&QueueItem { folder: folder.map(str::to_string), base: base.to_string() });
+    recording || transcribing
 }
 
 /// Воркер очереди: читает канал строго по одной записи за раз, поэтому
@@ -302,6 +338,76 @@ fn spawn_transcribe_worker(
     });
 }
 
+/// Через сколько чистка старого аудио повторяет обход каталога. Раз в сутки,
+/// а не чаще: чистка ходит по файловой системе, и гонять её каждую минуту —
+/// работа без пользы. Смену конфига между тиками эта задача не пропускает: у
+/// неё нет своего кеша срока, `run_retention_cleanup` читает `Config::load`
+/// заново на каждом проходе.
+const RETENTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Завести фоновую чистку: один проход сразу после старта и затем по одному
+/// на каждые сутки, пока приложение работает.
+///
+/// `spawn_blocking` вокруг тела, а не голый цикл на async-задаче: в отличие
+/// от команд `invoke_handler`, которые Tauri сам разгружает на пул потоков,
+/// задача, поднятая напрямую через `async_runtime::spawn`, крутится на общем
+/// рантайме — синхронный обход каталога внутри неё держал бы этот рантайм
+/// занятым, пока не дочитает диск.
+fn spawn_retention_worker(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let handle = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || run_retention_cleanup(&handle)).await;
+            tokio::time::sleep(RETENTION_INTERVAL).await;
+        }
+    });
+}
+
+/// Один проход чистки: какие записи набежали за срок — у тех звук уезжает в
+/// корзину. Расшифровка не трогается никогда (см. `retention::delete_audio`).
+///
+/// Отказ на конфиге (нет срока — то есть «никогда», см. докблок поля в
+/// `config.rs`) и отказ на чтении каталога останавливают весь проход — без
+/// каталога нечего перебирать. Отказ же на отдельной записи (файл занят,
+/// нет прав) — нет: он идёт в лог и не мешает остальным записям этого же
+/// прохода.
+fn run_retention_cleanup(app: &AppHandle) {
+    let Some(days) = Config::load(app).audio_retention_days else {
+        return;
+    };
+    let root = recordings_root();
+    let found = match collect_files(&root) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("автоочистка звука: не удалось прочитать {}: {e}", root.display());
+            return;
+        }
+    };
+    let list = group_recordings(found.files, &found.transcripts, &found.durations);
+    let status = app.state::<Status>();
+    let queue = app.state::<TranscribeQueue>();
+    let candidates: Vec<retention::Candidate> = list
+        .iter()
+        .map(|r| retention::Candidate {
+            folder: r.folder.clone(),
+            base: r.name.clone(),
+            has_wav: r.mic || r.system,
+            has_transcript: r.transcript,
+            busy: recording_busy(&status, &queue, r.folder.as_deref(), &r.name),
+        })
+        .collect();
+    let now = chrono::Local::now();
+    for (folder, base) in retention::due_for_cleanup(&candidates, days, now) {
+        let dir = match &folder {
+            Some(f) => root.join(f),
+            None => root.clone(),
+        };
+        if let Err(e) = retention::delete_audio(&dir, &base) {
+            log::warn!("автоочистка звука «{base}»: {e}");
+        }
+    }
+}
+
 /// Одна запись: пара дорожек под общим именем.
 ///
 /// `Eq` из производных убран: появилось поле `f32`, на котором он не выводится.
@@ -331,6 +437,11 @@ struct Recording {
     /// функцию чтение файлов.
     #[serde(skip_serializing_if = "Option::is_none")]
     imbalance_db: Option<f32>,
+    /// `true` — на эту запись прямо сейчас пишутся дорожки. Заполняется в
+    /// `list_recordings` после группировки, сверкой со `Status::current_recording`
+    /// — та же причина, что у `imbalance_db`: группировка чистая и файлов не
+    /// читает, а это сверка не с диском, а с состоянием аудио-потока.
+    recording_now: bool,
 }
 
 #[tauri::command]
@@ -394,6 +505,33 @@ fn duration_sec(track_bytes: u64) -> u32 {
     (track_bytes.saturating_sub(WAV_HEADER_BYTES) / WAV_BYTES_PER_SEC) as u32
 }
 
+/// Файл-спутник `<основа>.meta.json`, который пишет `close_sinks` в ядре
+/// (`src/app.rs::SinkFactory::write_meta`) в момент финализации дорожек.
+///
+/// Только `duration_sec` разбирается — `v` в поле не заведён специально:
+/// формат сегодня один-единственный, и место под будущую несовместимую
+/// правку не то же самое, что код, который её уже умеет читать. Незнакомые
+/// поля `serde` тихо игнорирует сам по себе.
+#[derive(Deserialize)]
+struct RecordingMeta {
+    #[serde(default)]
+    duration_sec: u32,
+}
+
+/// Длительность из файла-спутника, если он лежит рядом и читается.
+///
+/// `None` — файла нет, он не открылся или его содержимое не разбирается как
+/// JSON нужной формы: во всех трёх случаях вызывающий обязан молча откатиться
+/// на расчёт по размеру `.wav` (`duration_sec` выше), а не уронить список
+/// записей. Битый файл-спутник — это файл, у которого повезло меньше, чем
+/// дорожкам, а не повод перестать показывать запись целиком.
+fn read_duration_meta(path: &Path) -> Option<u32> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<RecordingMeta>(&content)
+        .ok()
+        .map(|m| m.duration_sec)
+}
+
 /// Склеить дорожки в записи по основе имени И папке.
 ///
 /// Имя дорожки — `{основа}.{mic|system}.wav`, где основа это
@@ -432,19 +570,40 @@ fn duration_sec(track_bytes: u64) -> u32 {
 /// свежее сверху.
 ///
 /// `transcripts` — ключи `(основа, папка)` найденных рядом папок
-/// `<основа>.transcript`, тем же ключом, что и группировка. Одинокая папка
-/// расшифровки записи НЕ создаёт: пометка ставится только той паре, у которой
-/// на диске есть хотя бы одна дорожка, — иначе в списке появилась бы запись
-/// без единого файла, которую нельзя ни открыть, ни удалить.
+/// `<основа>.transcript`, тем же ключом, что и группировка.
+///
+/// Папка расшифровки без единой дорожки рядом — не выдумка, а прямое
+/// следствие автоочистки старого аудио (см. `retention.rs`): та трогает
+/// только `.wav`, `.transcript` не касается никогда, и после неё на диске
+/// закономерно остаётся именно такая пара. Раньше это считалось «мусором» и
+/// в список не попадало вовсе — теперь это легальное состояние записи, и
+/// вторым проходом ниже для него заводится запись с `mic: false, system:
+/// false`: показать это честно (в UI — `retention.cleared`, см. `ui/main.js`)
+/// можно только если запись вообще есть в списке, а открыть расшифровку и
+/// удалить то, что от встречи осталось, — только если у неё есть на что жать.
 ///
 /// Отделено от обхода каталога намеренно: правило склейки — это единственное
 /// здесь, что можно сломать незаметно (отсутствие дорожки в паре UI показывает
 /// предупреждением, и ошибка в группировке выглядела бы как испорченная запись).
 /// Проверять его через `read_dir` значило бы держать в тесте настоящие файлы
 /// ради логики, которой файлы не нужны.
+///
+/// `durations` — длительности из файлов-спутников `<основа>.meta.json`
+/// (см. `read_duration_meta`), тем же ключом `(основа, папка)`, что и
+/// `transcripts`. Разбор их содержимого сюда не спущен намеренно, по той же
+/// причине, что и обход каталога — это чтение файлов, а группировка обязана
+/// оставаться чистой функцией, проверяемой без диска.
+///
+/// Файл-спутник побеждает расчёт по размеру `.wav`, даже когда сам `.wav` на
+/// месте: он знает точную длительность записи (секунды от старта до стопа),
+/// расчёт по размеру — это только оценка, округлённая вниз до целой секунды и
+/// зависящая от того, что дописал `hound` в заголовок. Отсутствие или порча
+/// файла-спутника (ключа нет в `durations`) не меняет ничего — остаётся
+/// прежний расчёт по размеру, как до этой задачи.
 fn group_recordings(
     files: impl IntoIterator<Item = (Option<String>, String, u64)>,
     transcripts: &HashSet<(String, Option<String>)>,
+    durations: &HashMap<(String, Option<String>), u32>,
 ) -> Vec<Recording> {
     let mut found: BTreeMap<(String, Option<String>), Recording> = BTreeMap::new();
     for (folder, file, size) in files {
@@ -466,6 +625,7 @@ fn group_recordings(
             transcript,
             duration_sec: 0,
             imbalance_db: None,
+            recording_now: false,
         });
         if is_mic {
             rec.mic = true;
@@ -476,6 +636,32 @@ fn group_recordings(
         // Именно max, а не сумма: дорожки пишутся параллельно, и запись длится
         // столько, сколько длится более полная из них.
         rec.duration_sec = rec.duration_sec.max(duration_sec(size));
+    }
+    // Второй проход: расшифровки, у которых обеих дорожек уже нет (см. докблок
+    // выше). Только `or_insert` — запись с хотя бы одной дорожкой уже создана
+    // первым проходом и трогать её здесь незачем.
+    for key in transcripts {
+        let (base, folder) = key;
+        found.entry(key.clone()).or_insert(Recording {
+            name: base.clone(),
+            folder: folder.clone(),
+            mic: false,
+            system: false,
+            size: 0,
+            transcript: true,
+            duration_sec: 0,
+            imbalance_db: None,
+            recording_now: false,
+        });
+    }
+    // Третий проход: файл-спутник побеждает расчёт по размеру — но только для
+    // записи, которая уже есть в `found` (хотя бы дорожка или расшифровка).
+    // Файл-спутник без единого следа рядом на диске не заводит запись сам —
+    // это не его роль, он только уточняет длительность уже существующей.
+    for (key, duration) in durations {
+        if let Some(rec) = found.get_mut(key) {
+            rec.duration_sec = *duration;
+        }
     }
     found.into_values().rev().collect()
 }
@@ -500,6 +686,11 @@ struct Found {
     files: Vec<(Option<String>, String, u64)>,
     /// `(основа, папка)` записей, у которых рядом есть `<основа>.transcript`.
     transcripts: HashSet<(String, Option<String>)>,
+    /// `(основа, папка)` → длительность из `<основа>.meta.json`, если рядом
+    /// нашёлся файл-спутник и он разобрался (см. `read_duration_meta`).
+    /// Битый или отсутствующий файл просто не попадает сюда — ключа нет,
+    /// `group_recordings` откатывается на расчёт по размеру `.wav`.
+    durations: HashMap<(String, Option<String>), u32>,
 }
 
 /// Файлы корня плюс файлы месячных подпапок. Глубина ровно два уровня:
@@ -517,11 +708,19 @@ fn collect_files(root: &Path) -> Result<Found, String> {
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             match e.file_type() {
-                Ok(t) if t.is_file() => out.files.push((
-                    folder.map(str::to_string),
-                    name,
-                    e.metadata().map(|m| m.len()).unwrap_or(0),
-                )),
+                Ok(t) if t.is_file() => {
+                    if let Some(base) = name.strip_suffix(".meta.json") {
+                        if let Some(dur) = read_duration_meta(&e.path()) {
+                            out.durations
+                                .insert((base.to_string(), folder.map(str::to_string)), dur);
+                        }
+                    }
+                    out.files.push((
+                        folder.map(str::to_string),
+                        name,
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    ));
+                }
                 Ok(t) if t.is_dir() => {
                     if let Some(base) = name.strip_suffix(".transcript") {
                         out.transcripts
@@ -552,11 +751,18 @@ fn collect_files(root: &Path) -> Result<Found, String> {
                     out.transcripts.insert((base.to_string(), None));
                 }
             }
-            Ok(t) if t.is_file() => out.files.push((
-                None,
-                name,
-                e.metadata().map(|m| m.len()).unwrap_or(0),
-            )),
+            Ok(t) if t.is_file() => {
+                if let Some(base) = name.strip_suffix(".meta.json") {
+                    if let Some(dur) = read_duration_meta(&e.path()) {
+                        out.durations.insert((base.to_string(), None), dur);
+                    }
+                }
+                out.files.push((
+                    None,
+                    name,
+                    e.metadata().map(|m| m.len()).unwrap_or(0),
+                ));
+            }
             _ => {}
         }
     }
@@ -582,12 +788,20 @@ fn collect_files(root: &Path) -> Result<Found, String> {
 /// Пометка считается только для полных пар (`r.mic && r.system`): одинокая
 /// дорожка уже помечена как неполная в UI, второе предупреждение поверх неё
 /// ничего не добавит, а чтение файла стоит времени зря.
+///
+/// `recording_now` заполняется той же сверкой, что и дисбаланс, но без
+/// условия на полную пару: запись без системного звука тоже может идти
+/// прямо сейчас, и её тоже нельзя ни удалить, ни расшифровать заново.
 #[tauri::command]
-fn list_recordings(cache: tauri::State<Cache>) -> Result<Vec<Recording>, String> {
+fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> Result<Vec<Recording>, String> {
     let root = recordings_root();
     let found = collect_files(&root)?;
-    let mut list = group_recordings(found.files, &found.transcripts);
+    let mut list = group_recordings(found.files, &found.transcripts, &found.durations);
+    let current = status.snapshot().current_recording;
     for r in &mut list {
+        r.recording_now = current
+            .as_ref()
+            .is_some_and(|c| Some(c.folder.as_str()) == r.folder.as_deref() && c.base == r.name);
         // Пометка имеет смысл только для полной пары: одинокая дорожка уже
         // помечена как неполная, и второе предупреждение о ней ничего не добавит.
         if !(r.mic && r.system) {
@@ -761,6 +975,29 @@ fn open_repository() -> Result<(), String> {
     Ok(())
 }
 
+/// Открыть произвольную внешнюю ссылку — тем же способом, что `open_repository`,
+/// но параметризованно: экран «о разработчиках» ведёт на несколько разных
+/// адресов (почта, LinkedIn, личный сайт, GitHub), заводить отдельную команду
+/// на каждый незачем.
+///
+/// Схема ограничена явным списком (`http`/`https`/`mailto`) — это ровно то,
+/// что нужно ссылкам на этих экранах; разрешить фронтенду открыть что угодно
+/// значило бы доверять ему больше, чем он того заслуживает.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let разрешена = url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:");
+    if !разрешена {
+        return Err(format!("недопустимая ссылка: {url}"));
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg(&url);
+    cmd.spawn().map_err(|e| format!("не удалось открыть браузер: {e}"))?;
+    Ok(())
+}
+
 /// Доступные микрофоны для выпадашки: идентификатор и что показать.
 ///
 /// `InputDevice` уже `Serialize`? Нет — он в ядре, где serde не подключён.
@@ -803,6 +1040,32 @@ fn rename_recording(
     rename::rename_recording(&dir, &base, &new_tail)
 }
 
+/// Удалить запись целиком: обе дорожки и папку расшифровки — в корзину, не
+/// насовсем (см. `delete.rs`).
+///
+/// Путь собирается через `recording_dir`, а не прямым `join`, как у
+/// `rename_recording`: удаление необратимее переименования (пусть и с
+/// корзиной как страховкой), и лишняя проверка «`folder` — действительно
+/// месячная папка, `base` — действительно один сегмент пути» здесь дешевле,
+/// чем в rename.
+///
+/// Отказ на занятой записи — раньше проверки существования на диске: идущую
+/// запись или расшифровку нельзя трогать, даже если бы файлы уже как-то
+/// пропали.
+#[tauri::command]
+fn delete_recording(
+    folder: Option<String>,
+    base: String,
+    status: tauri::State<Status>,
+    queue: tauri::State<TranscribeQueue>,
+) -> Result<(), String> {
+    if recording_busy(&status, &queue, folder.as_deref(), &base) {
+        return Err(format!("«{base}» сейчас занята — идёт запись или расшифровка"));
+    }
+    let dir = recording_dir(&recordings_root(), folder.as_deref(), &base, false)?;
+    delete::delete_recording(&dir, &base)
+}
+
 /// `id: None` — вернуться на системный дефолт.
 ///
 /// Имя приходит вместе с идентификатором и сохраняется рядом: когда устройства
@@ -823,6 +1086,47 @@ fn set_mic_device(
         .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
 }
 
+/// `language: "system" | "ru" | "en"`. Сохраняет выбор, переключает
+/// действующий язык на процесс и перерисовывает трей — единственную часть
+/// GUI, которую webview не умеет перекрасить сам.
+///
+/// Остального интерфейса эта команда не касается: перерисовать окно —
+/// работа фронтенда (см. `ui/main.js`), у него для этого есть свежий словарь
+/// и `applyStatic()`.
+#[tauri::command]
+fn set_language(language: Option<String>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.language = language;
+    cfg.save(&app)?;
+    let lang = i18n::effective_lang(cfg.language.as_deref());
+    app.state::<i18n::ActiveLang>().set(lang);
+    tray::refresh_texts(&app);
+    Ok(())
+}
+
+/// `theme: "system" | "light" | "dark"`. Только сохраняет выбор — в отличие
+/// от `set_language`, тему не нужно ни разбирать в действующее значение (это
+/// решает CSS через `data-theme`/`prefers-color-scheme`), ни трогать трей:
+/// это выбор темы приложения, а иконка трея шаблонная и красится системой
+/// сама (см. `tray.rs`) — они независимы намеренно.
+#[tauri::command]
+fn set_theme(theme: Option<String>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.theme = theme;
+    cfg.save(&app)
+}
+
+/// `days: None` — никогда не чистить (см. докблок поля в `config.rs`). Только
+/// сохраняет выбор: расписание уже крутится своим циклом (`spawn_retention_worker`)
+/// и на следующем тике сам перечитает конфиг — второй запуск отсюда не нужен,
+/// а был бы вторым источником «когда чистить в следующий раз».
+#[tauri::command]
+fn set_audio_retention(days: Option<u32>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.audio_retention_days = days;
+    cfg.save(&app)
+}
+
 #[tauri::command]
 fn set_transcribe_config(
     gateway_url: Option<String>,
@@ -835,12 +1139,78 @@ fn set_transcribe_config(
     cfg.save(&app)
 }
 
-/// Включить/выключить проверку микрофона.
+/// `mode: "server" | "local"`. Только сохраняет выбор — тем же принципом,
+/// что и `set_theme`: разбор строки в действующий режим решает
+/// `transcribe::effective_mode`, а не эта команда.
 #[tauri::command]
-fn set_monitor(on: bool, state: tauri::State<Cmd>, app: AppHandle) -> Result<(), String> {
+fn set_transcribe_mode(mode: Option<String>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.transcribe_mode = mode;
+    cfg.save(&app)
+}
+
+/// Состояние модели локальной расшифровки — по факту на диске и на диске
+/// свободного места, не по памяти между вызовами: окно настроек могли
+/// закрыть и открыть заново, скачивание могли прервать снаружи.
+#[tauri::command]
+fn local_model_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = local::resolve_models_dir(&app)?;
+    if local::is_downloaded(&dir) {
+        return Ok(serde_json::json!({ "state": "ready", "size": local::MODEL.size_bytes }));
+    }
+    match local::check_space(&dir) {
+        Some(local::SpaceCheck::NotEnough { need, free }) => {
+            Ok(serde_json::json!({ "state": "no_space", "need": need, "free": free }))
+        }
+        _ => Ok(serde_json::json!({ "state": "missing", "size": local::MODEL.size_bytes })),
+    }
+}
+
+/// Ставит скачивание в фон и возвращается сразу — ход дела приходит
+/// событиями `local-model-progress`/`local-model-done`/`local-model-error`
+/// (см. `local::download_model`), тем же приёмом, что расшифровка на шлюзе
+/// шлёт `transcribe-progress`/`transcribe-done`/`transcribe-error`.
+#[tauri::command]
+fn local_model_download(app: AppHandle) -> Result<(), String> {
+    let dir = local::resolve_models_dir(&app)?;
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = local::download_model(&app, &dir).await {
+            let _ = app.emit("local-model-error", local::error_payload(&e));
+        } else {
+            let _ = app.emit("local-model-done", ());
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn local_model_remove(app: AppHandle) -> Result<(), String> {
+    let dir = local::resolve_models_dir(&app)?;
+    local::remove_model(&dir).map_err(|e| format!("не удалось удалить модель: {e}"))
+}
+
+/// Включить/выключить проверку микрофона.
+///
+/// Отвечает СРАЗУ, не дожидаясь, пока аудио-поток на следующем тике разберёт
+/// канал (см. докблок `audio::MonitorEpoch`) — иначе кнопка на секунды
+/// зависала бы disabled. Возвращает номер эпохи, который получится ПОСЛЕ
+/// применения этой команды: `epoch` читается уже после отправки в канал, а
+/// применяет её обработчик `Ctl::Monitor` в `audio::drain_ctl` строго по
+/// очереди следом за уже применёнными — поэтому «текущее значение + 1» и есть
+/// нижняя граница будущего результата, не завышенная ни при каких раскладах.
+/// `ui/main.js` запоминает это число и игнорирует поле `monitoring` у
+/// событий `levels` со эпохой меньше него.
+#[tauri::command]
+fn set_monitor(
+    on: bool,
+    state: tauri::State<Cmd>,
+    epoch: tauri::State<MonitorEpochState>,
+    app: AppHandle,
+) -> Result<u64, String> {
     state
         .send(Ctl::Monitor(on))
-        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))?;
+    Ok(epoch.0.load(Ordering::SeqCst) + 1)
 }
 
 fn emit_transcribe_progress(app: &AppHandle, folder: &Option<String>, base: &str, stage: &str) {
@@ -966,17 +1336,7 @@ fn cancel_transcription(
 async fn run_transcription(folder: Option<String>, base: String, app: AppHandle) -> Result<(), String> {
     let (folder, base, app) = (&folder, base.as_str(), &app);
     let cfg = Config::load(app);
-    let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
-        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (
-            u.trim().trim_end_matches('/').to_string(),
-            k.trim().to_string(),
-        ),
-        _ => {
-            let msg = "настройте URL и ключ шлюза";
-            emit_transcribe_error(app, folder, base, msg);
-            return Err(msg.to_string());
-        }
-    };
+    let mode = transcribe::effective_mode(cfg.transcribe_mode.as_deref());
 
     let dir = match folder {
         Some(f) => recordings_root().join(f),
@@ -991,6 +1351,45 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
             let msg = format!("не удалось создать HTTP-клиент: {e}");
             emit_transcribe_error(app, folder, base, &msg);
             return Err(msg);
+        }
+    };
+
+    // Локальный режим — честная заглушка, а не начало настоящей
+    // расшифровки: движок ещё не подключён (см. `local.rs`), и вторая
+    // дорожка не спасла бы первую — обе гарантированно упали бы одной и той
+    // же причиной. Поэтому сюда не доходит ни требование адреса и ключа
+    // шлюза ниже (в этом режиме они не нужны), ни очередь задач, ни слияние
+    // двух дорожек — один короткий вызов через ту же развилку
+    // `transcribe::transcribe_track`, что обслуживает обычную дорожку;
+    // просто в режиме `Local` она сразу возвращает `local.notWired`. Ключ, а
+    // не готовый текст, долетает до интерфейса как есть — см. докблок
+    // `local::LocalError`.
+    if mode == transcribe::Mode::Local {
+        let err = transcribe::transcribe_track(
+            mode,
+            &client,
+            "",
+            "",
+            &mic_path,
+            transcribe::Label::Owner,
+            |_| unreachable!("в Local-режиме job на шлюзе не заводится"),
+        )
+        .await
+        .expect_err("в Local-режиме `transcribe_track` всегда возвращает ошибку");
+        let msg = err.to_string();
+        emit_transcribe_error(app, folder, base, &msg);
+        return Err(msg);
+    }
+
+    let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
+        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (
+            u.trim().trim_end_matches('/').to_string(),
+            k.trim().to_string(),
+        ),
+        _ => {
+            let msg = "настройте URL и ключ шлюза";
+            emit_transcribe_error(app, folder, base, msg);
+            return Err(msg.to_string());
         }
     };
     // Дорожки ПО ОЧЕРЕДИ, а не через join!.
@@ -1106,6 +1505,11 @@ async fn дорожка_целиком(
 fn main() {
     let (tx, rx) = channel::<Ctl>();
     let tray_tx = tx.clone();
+    // Один счётчик на весь процесс: команда и аудио-поток обязаны видеть одно
+    // и то же число, иначе эпоха ничего не различает. См. докблок
+    // `audio::MonitorEpoch`.
+    let monitor_epoch: audio::MonitorEpoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let monitor_epoch_audio = monitor_epoch.clone();
     let hotkey_tx = tx.clone();
     let (transcribe_queue, transcribe_rx) = TranscribeQueue::new();
 
@@ -1126,6 +1530,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Cmd(Mutex::new(tx)))
+        .manage(MonitorEpochState(monitor_epoch))
         // Заводится до setup(): аудио-поток пишет сюда с первой же строки, а
         // фатальная ошибка там случается раньше, чем webview успеет подписаться.
         .manage(Status::default())
@@ -1138,40 +1543,54 @@ fn main() {
             open_folder,
             open_privacy_settings,
             open_repository,
+            open_url,
             list_mic_devices,
             get_config,
             set_mic_device,
+            set_language,
+            set_theme,
             set_transcribe_config,
+            set_transcribe_mode,
+            local_model_status,
+            local_model_download,
+            local_model_remove,
             set_monitor,
             rename_recording,
+            delete_recording,
+            set_audio_retention,
             transcribe_recording,
             cancel_transcription,
             open_recording_folder
         ])
         .setup(move |app| {
-            // Приложение строки меню, а не Dock: окно стартует скрытым, крестик
-            // его прячет, а не выходит, — иконка в Dock, за которой нет окна и
-            // по клику на которую ничего не происходит (обработчика Reopen у
-            // нас нет), только вводила бы в заблуждение.
+            // Приложение живёт в Dock как обычное (`ActivationPolicy::Regular`),
+            // а не только в строке меню. Раньше здесь стояла `Accessory`: окно
+            // стартовало скрытым, крестик его прятал, и иконка в Dock без
+            // видимого окна и без обработчика повторного открытия только вводила
+            // бы в заблуждение. Обе причины отпали: окно стартует видимым
+            // (`"visible": true` в `tauri.conf.json`), а клик по иконке теперь
+            // обрабатывает `RunEvent::Reopen` в `main()` — показывает и
+            // фокусирует главное окно, если видимых окон нет.
             //
-            // Парная половина решения — `LSUIElement` в `src-tauri/Info.plist`.
-            // Нужны обе, и вот почему ни одной по отдельности не хватает:
-            // `LSUIElement` убирает Dock на момент запуска, но tao на
-            // `applicationDidFinishLaunching` безусловно зовёт
-            // `setActivationPolicy` своим значением, а его дефолт — `Regular`
-            // (tao 0.35.3, `app_state.rs`: `launched` → `apply_activation_policy`),
-            // и иконка вернулась бы. Эта строка задаёт tao нужное значение ДО
-            // старта цикла событий, но сама по себе успела бы дать Dock'у
-            // мигнуть.
+            // Парная половина этого решения раньше была в `LSUIElement`
+            // (`src-tauri/Info.plist`) — ключ снят вместе со сменой политики,
+            // Dock теперь должен быть виден с самого запуска.
             //
             // На показ окна из `status::fatal` это не влияет: `set_focus()` в
-            // tao — это `makeKeyAndOrderFront` + `activateIgnoringOtherApps`,
-            // то есть явная активация, которую accessory-приложению как раз и
-            // положено делать самому.
+            // tao — это `makeKeyAndOrderFront` + `activateIgnoringOtherApps`, то
+            // есть явная активация, которая работает одинаково у обеих политик.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             let handle = app.handle().clone();
+
+            // Действующий язык нужен ДО tray::build(): трей рисует свои
+            // тексты один раз при сборке меню, и решать на каком языке позже
+            // уже нечем — второй сборки меню не будет, только точечные правки
+            // текста (см. set_language).
+            let lang = i18n::effective_lang(Config::load(&handle).language.as_deref());
+            app.manage(i18n::ActiveLang::new(lang));
+
             tray::build(&handle, tray_tx)?;
 
             // Ctrl+Shift+R — toggle. Что именно делать, решает аудио-поток по
@@ -1195,9 +1614,12 @@ fn main() {
 
             // Аудио-поток. Всё !Send рождается ВНУТРИ него.
             let mic = Config::load(&handle).choice();
-            std::thread::spawn(move || audio::run(handle, rx, recordings_root(), mic));
+            std::thread::spawn(move || {
+                audio::run(handle, rx, recordings_root(), mic, monitor_epoch_audio)
+            });
 
             spawn_transcribe_worker(app.handle().clone(), transcribe_rx);
+            spawn_retention_worker(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1209,8 +1631,27 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("не удалось запустить приложение");
+        .build(tauri::generate_context!())
+        .expect("не удалось запустить приложение")
+        .run(|app_handle, event| {
+            // Клик по иконке в Dock у приложения без видимых окон присылает
+            // `Reopen` — без этого обработчика повторится ровно та проблема,
+            // из-за которой Dock когда-то убирали (см. докблок в `setup()`):
+            // иконка есть, а клик по ней ничего не делает.
+            //
+            // Вариант существует только на macOS (`tauri` 2.11.5, `app.rs`,
+            // `enum RunEvent::Reopen`), поэтому и обработка — только под
+            // `cfg(target_os = "macos")`, а не веткой `match`.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1250,6 +1691,7 @@ mod tests {
             transcript: false,
             duration_sec: 0,
             imbalance_db: None,
+            recording_now: false,
         }
     }
 
@@ -1263,15 +1705,31 @@ mod tests {
         files: &[(Option<&str>, &str, u64)],
         transcripts: &[(&str, Option<&str>)],
     ) -> Vec<Recording> {
+        group_full(files, transcripts, &[])
+    }
+
+    /// Полная форма стенда: файлы, расшифровки и длительности из
+    /// файлов-спутников — тем же ключом `(основа, папка)`, каким их
+    /// собирает `collect_files` в `found.durations`.
+    fn group_full(
+        files: &[(Option<&str>, &str, u64)],
+        transcripts: &[(&str, Option<&str>)],
+        durations: &[((&str, Option<&str>), u32)],
+    ) -> Vec<Recording> {
         let transcripts: HashSet<(String, Option<String>)> = transcripts
             .iter()
             .map(|(b, f)| (b.to_string(), f.map(str::to_string)))
+            .collect();
+        let durations: HashMap<(String, Option<String>), u32> = durations
+            .iter()
+            .map(|((b, f), d)| ((b.to_string(), f.map(str::to_string)), *d))
             .collect();
         group_recordings(
             files
                 .iter()
                 .map(|(f, n, s)| (f.map(str::to_string), n.to_string(), *s)),
             &transcripts,
+            &durations,
         )
     }
 
@@ -1462,12 +1920,17 @@ mod tests {
         );
     }
 
-    /// Папка расшифровки, у которой дорожки удалили руками, — не запись:
-    /// открывать и переименовывать в ней нечего, а в списке она выглядела бы
-    /// целой строкой без единого файла.
+    /// Папка расшифровки без единой дорожки рядом — это ровно то состояние,
+    /// в которое запись приводит автоочистка старого аудио (см.
+    /// `retention.rs`): звук в корзине, расшифровка на месте. Список обязан
+    /// показать такую запись, а не проглотить её молча, — иначе от встречи
+    /// не осталось бы и следа в интерфейсе, хотя расшифровка жива на диске.
     #[test]
-    fn одинокая_папка_расшифровки_не_создаёт_запись() {
-        assert_eq!(group_with(&[], &[("2026-07-17_14-45_zoom", None)]), vec![]);
+    fn одинокая_папка_расшифровки_это_запись_с_вычищенным_звуком() {
+        let list = group_with(&[], &[("2026-07-17_14-45_zoom", None)]);
+        let mut ожидание = rec("2026-07-17_14-45_zoom", None, false, false, 0);
+        ожидание.transcript = true;
+        assert_eq!(list, vec![ожидание]);
     }
 
     /// Единственный тест здесь, которому нужен настоящий диск: остальное про
@@ -1570,6 +2033,79 @@ mod tests {
         assert_eq!(duration_sec(wav_bytes(0)), 0, "один заголовок — ноль секунд");
         assert_eq!(duration_sec(10), 0, "обрезанный файл не уходит в минус");
         assert_eq!(duration_sec(0), 0);
+    }
+
+    // ---- meta.json: длительность переживает автоочистку -----------------
+
+    /// Гвоздь задачи: файл-спутник знает точную длительность и обязан
+    /// побеждать оценку по размеру `.wav`, даже когда сам `.wav` цел и
+    /// расчёт по нему тоже возможен.
+    #[test]
+    fn meta_json_побеждает_расчёт_по_размеру_даже_когда_wav_на_месте() {
+        let list = group_full(
+            &[(None, "2026-07-17_14-45_zoom.mic.wav", wav_bytes(2400))],
+            &[],
+            &[(("2026-07-17_14-45_zoom", None), 3120)],
+        );
+        assert_eq!(
+            list[0].duration_sec, 3120,
+            "meta.json важнее расчёта по размеру, а не наоборот"
+        );
+    }
+
+    /// Ровно тот сценарий, ради которого задача и делалась: автоочистка
+    /// забрала `.wav`, расшифровка (и с ней файл-спутник) осталась —
+    /// длительность обязана остаться видимой, а не превратиться в ноль.
+    #[test]
+    fn meta_json_переживший_чистку_даёт_длительность_без_wav() {
+        let list = group_full(
+            &[],
+            &[("2026-07-17_14-45_zoom", None)],
+            &[(("2026-07-17_14-45_zoom", None), 3120)],
+        );
+        assert_eq!(list.len(), 1);
+        assert!(!list[0].mic && !list[0].system, "дорожек уже нет");
+        assert_eq!(
+            list[0].duration_sec, 3120,
+            "длительность из meta.json обязана пережить чистку .wav"
+        );
+    }
+
+    /// Без файла-спутника ничего не меняется — старые записи, для которых он
+    /// никогда не создавался, по-прежнему считаются по размеру.
+    #[test]
+    fn без_meta_json_расчёт_остаётся_по_размеру_как_раньше() {
+        let list = group(&[(None, "2026-07-17_14-45_zoom.mic.wav", wav_bytes(600))]);
+        assert_eq!(list[0].duration_sec, 600);
+    }
+
+    /// `read_duration_meta` не роняет обход каталога: битый или пустой
+    /// файл-спутник просто не даёт ключа, а не паникует и не топит остальные
+    /// записи в `collect_files`.
+    #[test]
+    fn битый_meta_json_не_читается_и_не_роняет_список() {
+        let dir = std::env::temp_dir().join(format!(
+            "mr-meta-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("создать временный каталог");
+
+        std::fs::write(dir.join("битый.meta.json"), b"{ not json").unwrap();
+        assert_eq!(read_duration_meta(&dir.join("битый.meta.json")), None);
+
+        std::fs::write(dir.join("пустой.meta.json"), b"").unwrap();
+        assert_eq!(read_duration_meta(&dir.join("пустой.meta.json")), None);
+
+        assert_eq!(read_duration_meta(&dir.join("нет-такого.meta.json")), None);
+
+        std::fs::write(dir.join("живой.meta.json"), br#"{"v":1,"duration_sec":42}"#).unwrap();
+        assert_eq!(read_duration_meta(&dir.join("живой.meta.json")), Some(42));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn qi(base: &str) -> QueueItem {
@@ -1814,6 +2350,45 @@ mod tests {
             Ok(Cancelled::Stopped(vec![])),
             "id не переезжают на следующую запись"
         );
+    }
+
+    // ---- recording_busy: общий стоп-кран для удаления и автоочистки --------
+
+    /// Свободная запись — не занята ничем: не идёт, не в очереди на
+    /// расшифровку.
+    #[test]
+    fn recording_busy_свободная_запись_не_занята() {
+        let status = Status::default();
+        let (queue, _rx) = TranscribeQueue::new();
+        assert!(!recording_busy(&status, &queue, None, "2026-07-17_14-30_zoom"));
+    }
+
+    /// Запись, которая пишется прямо сейчас, занята — и ровно она, а не
+    /// любая другая: `folder`/`base` сверяются оба, не только состояние.
+    #[test]
+    fn recording_busy_занята_пока_идёт_запись() {
+        let status = Status::default();
+        status.set_current_recording(Some(("2026-07".to_string(), "2026-07-17_14-30_zoom".to_string())));
+        let (queue, _rx) = TranscribeQueue::new();
+
+        assert!(recording_busy(&status, &queue, Some("2026-07"), "2026-07-17_14-30_zoom"));
+        assert!(
+            !recording_busy(&status, &queue, Some("2026-07"), "другая-запись"),
+            "идёт другая запись — эта свободна"
+        );
+    }
+
+    /// Запись в очереди на расшифровку (ждёт или уже обрабатывается) занята
+    /// так же, как идущая: `TranscribeQueue::contains` не различает эти два
+    /// случая намеренно — см. её докблок.
+    #[test]
+    fn recording_busy_занята_пока_расшифровывается_или_ждёт_очереди() {
+        let status = Status::default();
+        let (queue, _rx) = TranscribeQueue::new();
+        queue.enqueue(qi("2026-07-17_14-30_zoom")).expect("постановка");
+
+        assert!(recording_busy(&status, &queue, None, "2026-07-17_14-30_zoom"));
+        assert!(!recording_busy(&status, &queue, None, "другая-запись"));
     }
 
     /// Локальная отмена обязана сработать, даже если шлюз недоступен: человек

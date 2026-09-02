@@ -4,16 +4,77 @@
 <meta charset="UTF-8" />
 <title>Вариант A — макет v2</title>
 <style>
+/* Токены — та же схема, что в ui/tokens.css (макет открывается файлом,
+   без сервера, поэтому копия здесь, а не <link>: правишь один — правь и
+   другой). Светлая тема по умолчанию, тёмная — по `prefers-color-scheme`,
+   плюс ручной крючок `data-theme` на случай проверки конкретной темы. */
 :root{
-  color-scheme: dark;
-  --bg:#1a1b26; --fg:#c0caf5; --muted:#7982a9; --line:#292e42;
-  --accent:#7aa2f7; --warn:#e0af68; --error:#f7768e; --good:#9ece6a;
-  --on-accent:#1a1b26;
+  color-scheme: light dark;
+  --bg:#f4f6f8; --card:#ffffff; --fg:#1d2126; --muted:#626b76;
+  --line:#dde1e7; --line-strong:#848c99;
+  /* Контур поля (input/select) — тише, чем у --line-strong (кнопки, прочие
+     контролы). Контраст к фону сознательно ниже нормы (решение дизайнера,
+     компенсация — акцентная рамка фокуса, см. `select:focus-visible` ниже).
+     Копия токена из ui/tokens.css — правишь там, правь и здесь. */
+  --line-field:#a3aab4;
+  --accent:#2b3138; --on-accent:#ffffff;
+  --warn:#8a6d1f; --error:#b04a4a; --good:#4f7048;
+  --hover:rgba(43,49,56,.06);
+  --shadow-menu:0 12px 28px rgba(30,35,45,.16);
+
+  --toast-bg:rgba(250,250,252,.97); --toast-fg:#1c1c20;
+  --toast-fg-dim:rgba(18,18,23,.56); --toast-surface:rgba(0,0,0,.07);
+  --toast-surface-hover:rgba(0,0,0,.12); --toast-life:rgba(0,0,0,.22);
+  --toast-life-hover:rgba(0,0,0,.42);
+  --toast-shadow:0 8px 20px rgba(0,0,0,.16), 0 0 0 .5px rgba(0,0,0,.08) inset;
+
   --mono:"0xProto Nerd Font Mono","Cascadia Mono",Consolas,monospace;
   --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px;
   --r-sm:6px; --r-md:8px; --r-lg:10px;
-  --hover:rgba(122,162,247,.09);
-  --card:#1f2130;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#101215; --card:#171a1f; --fg:#dfe4ea; --muted:#868e99;
+    --line:#24282e; --line-strong:#616b79; --line-field:#4b535e;
+    --accent:#d7dee6; --on-accent:#101215;
+    --warn:#c2a35f; --error:#d07a7a; --good:#86a37f;
+    --hover:rgba(215,222,230,.07);
+    --shadow-menu:0 12px 32px rgba(0,0,0,.6);
+
+    --toast-bg:rgba(38,38,41,.97); --toast-fg:#ffffff;
+    --toast-fg-dim:rgba(255,255,255,.56); --toast-surface:rgba(255,255,255,.14);
+    --toast-surface-hover:rgba(255,255,255,.22); --toast-life:rgba(255,255,255,.30);
+    --toast-life-hover:rgba(255,255,255,.55);
+    --toast-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
+  }
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#f4f6f8; --card:#ffffff; --fg:#1d2126; --muted:#626b76;
+  --line:#dde1e7; --line-strong:#848c99; --line-field:#a3aab4;
+  --accent:#2b3138; --on-accent:#ffffff;
+  --warn:#8a6d1f; --error:#b04a4a; --good:#4f7048;
+  --hover:rgba(43,49,56,.06);
+  --shadow-menu:0 12px 28px rgba(30,35,45,.16);
+  --toast-bg:rgba(250,250,252,.97); --toast-fg:#1c1c20;
+  --toast-fg-dim:rgba(18,18,23,.56); --toast-surface:rgba(0,0,0,.07);
+  --toast-surface-hover:rgba(0,0,0,.12); --toast-life:rgba(0,0,0,.22);
+  --toast-life-hover:rgba(0,0,0,.42);
+  --toast-shadow:0 8px 20px rgba(0,0,0,.16), 0 0 0 .5px rgba(0,0,0,.08) inset;
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#101215; --card:#171a1f; --fg:#dfe4ea; --muted:#868e99;
+  --line:#24282e; --line-strong:#616b79; --line-field:#4b535e;
+  --accent:#d7dee6; --on-accent:#101215;
+  --warn:#c2a35f; --error:#d07a7a; --good:#86a37f;
+  --hover:rgba(215,222,230,.07);
+  --shadow-menu:0 12px 32px rgba(0,0,0,.6);
+  --toast-bg:rgba(38,38,41,.97); --toast-fg:#ffffff;
+  --toast-fg-dim:rgba(255,255,255,.56); --toast-surface:rgba(255,255,255,.14);
+  --toast-surface-hover:rgba(255,255,255,.22); --toast-life:rgba(255,255,255,.30);
+  --toast-life-hover:rgba(255,255,255,.55);
+  --toast-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
 }
 *{box-sizing:border-box}
 body{margin:0;background:#0d0d14;color:var(--fg);
@@ -46,7 +107,7 @@ body{margin:0;background:#0d0d14;color:var(--fg);
 .icon-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 svg{display:block}
 .pinned{flex:none;padding:0 var(--s4) var(--s3);
-  border-bottom:1px solid rgba(41,46,66,.75)}
+  border-bottom:1px solid var(--line)}
 .body{flex:1;overflow-y:auto;padding:0 var(--s4) var(--s4)}
 .body::-webkit-scrollbar{width:8px}
 .body::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
@@ -56,8 +117,17 @@ svg{display:block}
   display:flex;gap:10px;align-items:center;padding:10px var(--s3);margin-bottom:var(--s3)}
 .banner span{flex:1;font-size:13px;line-height:1.4}
 button.sec{font:inherit;font-size:13px;padding:6px 11px;border-radius:var(--r-sm);
-  border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+  border:1px solid var(--line-strong);background:transparent;color:var(--fg);cursor:pointer}
 button.sec:hover{border-color:var(--accent)}
+/* Кнопка-действие в настройках: заливка вместо контура выпадашки, свой
+   радиус, без стрелки. Копия ui/index.html (button.btn) — правишь там,
+   правь и здесь, иначе канон разойдётся с кодом. Класс `.act` уже занят
+   выше под текстовую ссылку внутри `.rec.card .note` — конфликта нет,
+   тот селектор специфичнее и побеждает в своей карточке. */
+button.btn{font:inherit;font-size:13px;font-weight:500;padding:7px 13px;
+  border-radius:var(--r-md);border:1px solid transparent;
+  background:var(--hover);color:var(--fg);cursor:pointer}
+button.btn:hover{background:var(--line);border-color:var(--line-strong)}
 
 /* ── Кнопка записи ─────────────────────────────────────── */
 .record{width:100%;height:52px;display:flex;align-items:center;justify-content:center;
@@ -105,8 +175,8 @@ ul{list-style:none;margin:0;padding:0}
 .rec .main{display:flex;gap:10px;align-items:center;padding:7px var(--s2)}
 .rec.card{border:1px solid var(--warn);margin:var(--s2) calc(var(--s2)*-1)}
 .rec.card .main{padding:8px 9px}
-.rec.card .note{background:rgba(224,175,104,.10);color:var(--warn);font-size:12.5px;
-  line-height:1.45;padding:9px 11px;border-top:1px solid rgba(224,175,104,.28);
+.rec.card .note{background:color-mix(in srgb, var(--warn) 10%, transparent);color:var(--warn);font-size:12.5px;
+  line-height:1.45;padding:9px 11px;border-top:1px solid color-mix(in srgb, var(--warn) 28%, transparent);
   border-radius:0 0 7px 7px}
 .rec.card .note{display:flex;gap:9px;align-items:flex-start}
 .rec.card .note .ni{flex:none;margin-top:1px}
@@ -146,13 +216,13 @@ ul{list-style:none;margin:0;padding:0}
 .dots button{width:26px;height:26px;display:grid;place-items:center;padding:0;
   border:1px solid transparent;border-radius:var(--r-sm);background:transparent;
   color:var(--muted);cursor:pointer}
-.dots button:hover{color:var(--fg);background:rgba(0,0,0,.25)}
+.dots button:hover{color:var(--fg);background:color-mix(in srgb, black 25%, transparent)}
 .dots button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 /* меню ⋯ */
 .menu{position:absolute;right:4px;top:38px;z-index:5;min-width:186px;
   background:var(--card);border:1px solid var(--line);border-radius:var(--r-md);
-  padding:4px;box-shadow:0 12px 32px rgba(0,0,0,.55)}
+  padding:4px;box-shadow:var(--shadow-menu)}
 .menu button{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
   font:inherit;font-size:13px;padding:7px 9px;border-radius:var(--r-sm);
   border:none;background:transparent;color:var(--fg);cursor:pointer}
@@ -186,12 +256,29 @@ ul{list-style:none;margin:0;padding:0}
 h2{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
   margin:var(--s5) 0 var(--s2);font-weight:600}
 h2:first-child{margin-top:var(--s2)}
+/* Карточки: каждая группа настроек — плашка на фоне, а не просто заголовок
+   с воздухом вокруг. Копия ui/index.html (.grp) — правишь там, правь и
+   здесь. */
+.grp{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);
+  padding:var(--s3) var(--s3) 13px;margin-bottom:var(--s3)}
+.grp:last-child{margin-bottom:0}
+.grp>h2{margin:0 0 10px}
 .row{display:flex;gap:var(--s2)}
 select,input{font:inherit;font-size:13px;flex:1;min-width:0;padding:7px var(--s2);
-  border-radius:var(--r-sm);border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+  border-radius:var(--r-sm);border:1px solid var(--line-field);background:var(--bg);color:var(--fg)}
+/* Стрелка выпадашки — только в макете (в живом приложении она инлайновым SVG
+   рядом с полем, а не в background-image — см. ui/index.html, у CSP там на
+   это отдельная причина). Цвет стрелки — --muted, но background-image не
+   умеет var() внутри data-URI, поэтому светлое/тёмное значение прописано
+   отдельно на каждую тему тем же способом, что и сами токены выше. */
 select{-webkit-appearance:none;appearance:none;padding-right:30px;cursor:pointer;
-  background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%237982a9%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");
+  background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23626b76%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");
   background-repeat:no-repeat;background-position:right 8px center;background-size:15px}
+@media (prefers-color-scheme: dark){
+  select{background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23868e99%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");}
+}
+:root[data-theme="light"] select{background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23626b76%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");}
+:root[data-theme="dark"] select{background-image:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23868e99%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22%20%2F%3E%3C%2Fsvg%3E");}
 select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .mrow{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .mrow em{font-style:normal;font-size:12px;color:var(--muted);width:96px;flex:none;
@@ -210,34 +297,35 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
 /* Плашка снята с системного уведомления macOS, а не с токенов приложения:
    это отдельное окно поверх чужих окон, и выглядеть оно должно как часть
    системы. Живого размытия под ней добиться нельзя (под окном прозрачность,
-   а не страница), поэтому фон плотный. Собрано по ui/ask.html — правишь
-   там, правь здесь. */
+   а не страница), поэтому фон плотный. Живёт своими токенами --toast-*
+   (см. блок :root выше) — они меняются вместе с темой системы, а не с
+   --accent приложения. Собрано по ui/ask.html — правишь там, правь здесь. */
 .toast{position:absolute;top:14px;right:14px;width:380px;
-  background:rgba(38,38,41,.97);border-radius:18px;padding:12px;
-  display:flex;align-items:center;gap:11px;color:#fff;
-  box-shadow:0 8px 20px rgba(0,0,0,.38), 0 0 0 .5px rgba(255,255,255,.10) inset;
+  background:var(--toast-bg);border-radius:18px;padding:12px;
+  display:flex;align-items:center;gap:11px;color:var(--toast-fg);
+  box-shadow:var(--toast-shadow);
   overflow:hidden;animation:drop .38s cubic-bezier(.22,1.2,.36,1)}
 @keyframes drop{from{transform:translateY(-130%)}to{transform:none}}
 .toast .ava{width:38px;height:38px;border-radius:9px;border:none;
-  background:rgba(255,255,255,.14);color:#fff;font-size:15px}
+  background:var(--toast-surface);color:var(--toast-fg);font-size:15px}
 .toast .ava.zoom{background:#0B5CFF}
 .toast .ava.teams{background:#6264A7}
 .toast .ava.slack{background:#4A154B}
 .toast .ava.discord{background:#5865F2}
 .toast .tx{flex:1;min-width:0}
 .toast .tt{display:block;font-size:13px;font-weight:600;letter-spacing:-.008em;
-  color:rgba(255,255,255,.96)}
-.toast .ts{display:block;margin-top:1px;font-size:12px;color:rgba(255,255,255,.56);
+  color:var(--toast-fg)}
+.toast .ts{display:block;margin-top:1px;font-size:12px;color:var(--toast-fg-dim);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Кнопка — светлое стекло на тёмной плашке, а не цветная заливка: цветная
    читалась бы как веб-кнопка, наклеенная поверх системного окна. */
 .toast .go{flex:none;font:inherit;font-size:13px;font-weight:600;border:none;
-  border-radius:8px;background:rgba(255,255,255,.15);color:#fff;cursor:pointer;
+  border-radius:8px;background:var(--toast-surface);color:var(--toast-fg);cursor:pointer;
   padding:7px 14px;letter-spacing:-.004em}
-.toast .go:hover{background:rgba(255,255,255,.22)}
+.toast .go:hover{background:var(--toast-surface-hover)}
 .toast .life{position:absolute;left:0;bottom:0;height:2px;
-  background:rgba(255,255,255,.30);animation:life 7s linear forwards}
-.toast:hover .life{animation-play-state:paused;background:rgba(255,255,255,.55)}
+  background:var(--toast-life);animation:life 7s linear forwards}
+.toast:hover .life{animation-play-state:paused;background:var(--toast-life-hover)}
 .toast{cursor:grab;transition:transform .18s ease,opacity .18s ease}
 .toast.away{transform:translateX(115%);opacity:0}
 .armed{display:flex;gap:10px;align-items:center;padding:0 1px;margin-bottom:12px}
@@ -370,22 +458,26 @@ select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline
       <h1>Настройки</h1>
     </div>
     <div class="body">
-      <h2>Микрофон</h2>
-      <div class="row">
-        <select><option>MacBook Pro Microphone</option><option>Как выбрано в системе</option></select>
-        <button class="sec">Проверить</button>
+      <div class="grp">
+        <h2>Микрофон</h2>
+        <div class="row">
+          <select><option>MacBook Pro Microphone</option><option>Как выбрано в системе</option></select>
+          <button class="btn">Проверить</button>
+        </div>
+        <div style="margin-top:14px">
+          <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:58%"></span><b style="--peak:65%"></b></span></div>
+          <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:34%"></span><b style="--peak:41%"></b></span></div>
+        </div>
+        <div class="hint">Говорите обычным голосом: полоска должна доходить примерно до конца зелёного и не залезать в красное.</div>
+        <div class="hint">Запись, которая идёт сейчас, пишется микрофоном «MacBook Pro Microphone». Новый включится со следующей.</div>
       </div>
-      <div style="margin-top:14px">
-        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /> <path d="M19 10v2a7 7 0 0 1-14 0v-2" /> <rect x="9" y="2" width="6" height="13" rx="3" /></svg>Вы</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:58%"></span><b style="--peak:65%"></b></span></div>
-        <div class="mrow"><em><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /> <path d="M16 9a5 5 0 0 1 0 6" /> <path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg>Система</em><span class="disc" style="flex:1"><span class="t"></span><span class="f" style="--level:34%"></span><b style="--peak:41%"></b></span></div>
-      </div>
-      <div class="hint">Говорите обычным голосом: полоска должна доходить примерно до конца зелёного и не залезать в красное.</div>
-      <div class="hint">Запись, которая идёт сейчас, пишется микрофоном «MacBook Pro Microphone». Новый включится со следующей.</div>
 
-      <h2>Расшифровка встреч</h2>
-      <div class="row" style="margin-bottom:8px"><input type="text" placeholder="Адрес сервера" value="http://10.0.0.3:8080" /></div>
-      <div class="row"><input type="password" placeholder="Ключ доступа" value="abcdefgh" /></div>
-      <div class="saved">✓ Сохранено</div>
+      <div class="grp">
+        <h2>Расшифровка встреч</h2>
+        <div class="row" style="margin-bottom:8px"><input type="text" placeholder="Адрес сервера" value="http://10.0.0.3:8080" /></div>
+        <div class="row"><input type="password" placeholder="Ключ доступа" value="abcdefgh" /></div>
+        <div class="saved">✓ Сохранено</div>
+      </div>
 
       <div class="foot">github.com/mmaximov97/meeting-recorder</div>
     </div>
@@ -433,7 +525,7 @@ function rowHTML(r, i, extra){
     card = " card";
     sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;
     note = `<div class="note"><span class="ni"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12v4" /> <path d="M12 20h.01" /> <path d="M8.128 16.949A7 7 0 1 1 15.71 8h1.79a1 1 0 0 1 0 9h-1.642" /></svg></span><span class="nt"><b>Расшифровка не получилась</b>
-      Запись цела — можно попробовать ещё раз или проверить адрес сервера в настройках.<br><button class="act">Попробовать снова</button></span></div>`;
+      Запись цела — можно попробовать ещё раз или проверить адрес сервера в настройках.<br><button class="btn">Попробовать снова</button></span></div>`;
   } else if (r.bad){
     card = " card";
     sub = `<div class="sub">${r.d}<span class="more"> · ${r.w}</span></div>`;

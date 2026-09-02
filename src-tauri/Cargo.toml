@@ -15,7 +15,10 @@ meeting-recorder = { path = ".." }
 # отдаёт `transparent: true` только с этим флагом (иначе окно падает с явной
 # ошибкой при создании). Скруглённые углы плашки рисует CSS, а без прозрачности
 # вокруг них остался бы чёрный прямоугольник окна.
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+# `image-png` — только ради загрузки готовой PNG-иконки покоя трея
+# (`icons/tray.png`) через `Image::from_bytes`; сами активные состояния
+# (идёт запись, взвод, отказ) по-прежнему рисуются кодом.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
 tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 # Персистентный лог GUI: раньше ошибки захвата уходили в eprintln! stderr,
@@ -31,9 +34,18 @@ hound = "3.5"
 # двухчасовая запись это ~230 МБ на дорожку (16 кГц, моно, i16). Без этой
 # фичи `Part::file` и `impl From<File> for Body` у reqwest не существуют.
 reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
-tokio = { version = "1", features = ["time", "fs", "macros"] }
+# `io-util` — ради `AsyncWriteExt` в `local.rs`: скачивание модели пишет
+# приходящие по сети чанки в файл, не блокируя рантайм синхронным
+# `std::fs::write` на каждый чанк.
+tokio = { version = "1", features = ["time", "fs", "macros", "io-util"] }
 thiserror = "2"
 sysinfo = "0.32"
+sys-locale = "0.3.2"
+trash = { version = "5.2.6", default-features = false }
+# Разбор даты из имени записи в `retention.rs` — та же версия, что тянет
+# ядро (`../Cargo.toml`), чтобы `DateTime<Local>` здесь был тем же типом, а
+# не двумя одноимёнными по недоразумению.
+chrono = "0.4"
 
 # Прямой доступ к NSWindow всплывашки. Нужен ровно для двух вещей, которых ни
 # Tauri, ни tao не отдают: поведение окна на рабочих столах (жить на всех и

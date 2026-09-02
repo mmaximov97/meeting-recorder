@@ -21,7 +21,9 @@ use meeting_recorder::detector::{MeetingDetector, MicSession, POLL_INTERVAL};
 use meeting_recorder::session::{Event, State};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalPosition, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -36,6 +38,25 @@ const TICK: Duration = Duration::from_millis(200);
 
 /// Через сколько проверка микрофона выключается сама.
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Эпоха проверки микрофона: растёт на каждую команду `Ctl::Monitor`,
+/// применённую в `drain_ctl`, независимо от того, поменялось ли состояние.
+///
+/// Нужна из-за гонки между командой и событием: `set_monitor` в `main.rs`
+/// отвечает окну сразу, до того как аудио-поток разобрал канал (см. докблок
+/// `drain_ctl`), поэтому событие `levels`, отправленное ДО обработки команды,
+/// может прийти УЖЕ ПОСЛЕ ответа на неё и нести устаревшее `monitoring`.
+/// Таймеры здесь не годятся — на медленной машине они разъедутся. Эпоха
+/// решает это без времени: `main.rs` возвращает окну номер эпохи, который
+/// получится после применения его команды, `levels` несёт номер эпохи, с
+/// которой он посчитан, а окно верит полю `monitoring` только у событий с
+/// эпохой не меньше последней своей.
+///
+/// `Arc<AtomicU64>`, а не поле `App`: счётчик должен быть виден и потоку
+/// команд Tauri (чтобы `set_monitor` мог прочитать его синхронно), и аудио-
+/// потоку (чтобы `drain_ctl` мог его увеличить) — а `App` целиком живёт
+/// только внутри аудио-потока (см. докблок модуля).
+pub type MonitorEpoch = Arc<AtomicU64>;
 
 /// Команда аудио-потоку.
 ///
@@ -490,6 +511,13 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
     if status.set_mic_deferred(app.mic_change_deferred()) {
         let _ = handle.emit("mic-deferred", app.mic_change_deferred());
     }
+
+    // Без `emit`: никто не подписан на «какая запись сейчас пишется» —
+    // список читает её через снимок в момент своего собственного вызова
+    // (`list_recordings`, `delete_recording`, автоочистка), а не заранее.
+    // Событие здесь дублировало бы то, что и так приходит на каждый тик
+    // через уже существующее событие `state`.
+    status.set_current_recording(app.current_recording());
 }
 
 /// Решение по одной команде: какое событие уходит в машину и надо ли после этого
@@ -552,10 +580,17 @@ fn ctl_to_event(c: &Ctl, s: State) -> Option<(Event, bool)> {
 /// должна различать. Но сам `drain_ctl` не знает про `AppHandle` (и не должен:
 /// на нём держатся тесты проводки без Tauri), поэтому канал ошибки приходит
 /// параметром.
+///
+/// `epoch` растёт на КАЖДУЮ применённую `Ctl::Monitor`, включая ту, что не
+/// изменила состояние (например, второй `Monitor(true)` подряд) — см.
+/// докблок [`MonitorEpoch`]. Рост именно здесь, а не в `App::set_monitor`:
+/// эпоха — свойство проводки команд, а не проверки микрофона как таковой, и
+/// `App` о ней вообще не должен знать.
 fn drain_ctl(
     app: &mut App,
     rx: &Receiver<Ctl>,
     active: Option<&MicSession>,
+    epoch: &AtomicU64,
     mut feed: impl FnMut(&mut App, Event, Option<&MicSession>),
     mut on_error: impl FnMut(String),
 ) -> bool {
@@ -566,6 +601,7 @@ fn drain_ctl(
             continue;
         }
         if let Ctl::Monitor(on) = c {
+            epoch.fetch_add(1, Ordering::SeqCst);
             if let Err(e) = app.set_monitor(on) {
                 on_error(format!("проверка микрофона: {e}"));
             }
@@ -607,6 +643,25 @@ fn drain_ctl(
 /// ли что послушать, когда тик начинался».
 fn should_emit_levels(was_monitoring: bool, is_monitoring: bool, state: State) -> bool {
     was_monitoring || is_monitoring || state != State::Idle
+}
+
+/// Что нести в поле `mic`/`system` события `levels` на этом тике.
+///
+/// В `Idle` без проверки мерить нечего: потоки закрыты (см. докблок
+/// `App::set_monitor`), а значит `l` — это не текущий уровень, а то, что
+/// намерил последний тик перед выключением, затухающее по `LEVEL_DECAY`.
+/// Показать его — соврать, что микрофон ещё слышен. Именно этот тик — тот, о
+/// котором говорит докблок `should_emit_levels`: проверка ТОЛЬКО ЧТО
+/// выключилась, и должна принести нули, а не последнее измеренное значение.
+///
+/// В любом другом случае (идёт проверка или идёт запись, `state != Idle`)
+/// уровни настоящие, и трогать их незачем.
+fn levels_to_emit(l: Levels, monitoring: bool, state: State) -> Levels {
+    if !monitoring && state == State::Idle {
+        Levels::default()
+    } else {
+        l
+    }
 }
 
 /// Порог подобран по аналогии с `peak()` в этом же файле — 0..1, где 1.0 —
@@ -850,7 +905,13 @@ fn start_system_tap() -> Result<meeting_recorder::capture::SystemTap, String> {
 
 /// Крутится в СВОЁМ потоке. Detector и App конструируются здесь и отсюда не
 /// уезжают — оба `!Send`.
-pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoice) {
+pub fn run(
+    handle: AppHandle,
+    rx: Receiver<Ctl>,
+    root: PathBuf,
+    mic: DeviceChoice,
+    monitor_epoch: MonitorEpoch,
+) {
     let status = handle.state::<Status>();
     // Решение живёт в ядре (`capture::macos`), а не здесь: требование к версии —
     // свойство Process Tap API, и отказывать по нему обязаны оба бинаря
@@ -970,6 +1031,7 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
             &mut app,
             &rx,
             active.as_ref(),
+            &monitor_epoch,
             |a, e, src| feed(a, &handle, e, src),
             |msg| {
                 let _ = handle.emit("error", msg.clone());
@@ -1007,13 +1069,14 @@ pub fn run(handle: AppHandle, rx: Receiver<Ctl>, root: PathBuf, mic: DeviceChoic
         // на котором проверка ТОЛЬКО ЧТО выключилась — иначе окно застревает
         // в «идёт проверка» навсегда. См. докблок `should_emit_levels`.
         if should_emit_levels(was_monitoring, app.is_monitoring(), app.state()) {
-            let l = app.levels();
+            let l = levels_to_emit(app.levels(), app.is_monitoring(), app.state());
             let _ = handle.emit(
                 "levels",
                 serde_json::json!({
                     "mic": l.mic,
                     "system": l.system,
                     "monitoring": app.is_monitoring(),
+                    "epoch": monitor_epoch.load(Ordering::SeqCst),
                 }),
             );
         }
@@ -1276,7 +1339,7 @@ mod tests {
         tx.send(Ctl::Shutdown).unwrap();
 
         let mut seen = Vec::new();
-        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
+        let quit = drain_ctl(&mut app(), &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
 
         assert!(quit, "Shutdown обязан закончить цикл");
         assert_eq!(
@@ -1299,6 +1362,7 @@ mod tests {
             &mut app(),
             &rx,
             None,
+            &AtomicU64::new(0),
             |_, e, _| seen.push(e),
             |_| {}
         ));
@@ -1314,6 +1378,7 @@ mod tests {
             &mut app(),
             &rx,
             None,
+            &AtomicU64::new(0),
             |_, e, _| seen.push(e),
             |_| {}
         ));
@@ -1334,6 +1399,7 @@ mod tests {
             &mut app(),
             &rx,
             Some(&s),
+            &AtomicU64::new(0),
             |_, e, src| seen.push((e, src.map(|s| s.pid))),
             |_| {},
         );
@@ -1353,7 +1419,7 @@ mod tests {
         tx.send(Ctl::Monitor(false)).unwrap();
 
         let mut seen = Vec::new();
-        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
+        let quit = drain_ctl(&mut app(), &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
 
         assert!(!quit);
         assert!(seen.is_empty(), "уехало в машину: {seen:?}");
@@ -1383,6 +1449,7 @@ mod tests {
             &mut app_с_захватом(Box::new(ЗахватЗанят)),
             &rx,
             None,
+            &AtomicU64::new(0),
             |_, e, _| seen.push(e),
             |msg| errors.push(msg),
         );
@@ -1419,7 +1486,7 @@ mod tests {
         .unwrap();
 
         let mut seen = Vec::new();
-        let quit = drain_ctl(&mut app(), &rx, None, |_, e, _| seen.push(e), |_| {});
+        let quit = drain_ctl(&mut app(), &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
 
         assert!(!quit);
         assert!(seen.is_empty(), "уехало в машину: {seen:?}");
@@ -1436,6 +1503,7 @@ mod tests {
             &mut app(),
             &rx,
             None,
+            &AtomicU64::new(0),
             |_, e, _| seen.push(e),
             |_| {}
         ));
@@ -1492,6 +1560,96 @@ mod tests {
             false,
             State::Recording(Trigger::Manual)
         ));
+    }
+
+    // ---- levels_to_emit ---------------------------------------------------
+    //
+    // Регресс на находку дизайнера: после выключения проверки полоски
+    // оставались на последней измеренной величине вместо того, чтобы упасть
+    // в ноль. См. докблок `levels_to_emit`.
+
+    /// Гвоздь находки: тик, на котором проверка только что выключилась и
+    /// состояние `Idle` — именно тот, для которого показывать `l` было бы
+    /// враньём. Уровни обязаны стать нулём, каким бы ни было последнее
+    /// измерение.
+    #[test]
+    fn выключенная_проверка_в_idle_шлёт_нули_а_не_последнее_измерение() {
+        let было = Levels {
+            mic: 0.42,
+            system: 0.9,
+        };
+        assert_eq!(
+            levels_to_emit(было, false, State::Idle),
+            Levels::default(),
+            "показать прошлое значение здесь — соврать, что микрофон ещё слышен"
+        );
+    }
+
+    /// Идёт проверка — уровни настоящие, зануления быть не должно.
+    #[test]
+    fn идущая_проверка_несёт_настоящие_уровни() {
+        let l = Levels {
+            mic: 0.3,
+            system: 0.1,
+        };
+        assert_eq!(levels_to_emit(l, true, State::Idle), l);
+    }
+
+    /// Идёт запись — уровни настоящие независимо от флага проверки: во время
+    /// записи `monitor` может быть и `false`, зануления от этого не должно
+    /// быть, иначе полоски погасли бы прямо посреди встречи.
+    #[test]
+    fn идущая_запись_несёт_настоящие_уровни_не_обнуляясь() {
+        let l = Levels {
+            mic: 0.55,
+            system: 0.2,
+        };
+        assert_eq!(levels_to_emit(l, false, State::Recording(Trigger::Auto)), l);
+        assert_eq!(levels_to_emit(l, false, State::Armed), l);
+    }
+
+    // ---- эпоха проверки микрофона ------------------------------------------
+    //
+    // Регресс на находку дизайнера: первое нажатие «Остановить проверку» не
+    // выключало её — устаревшее событие `levels`, отправленное ДО того, как
+    // аудио-поток обработал команду, приходило ПОСЛЕ ответа команды и несло
+    // `monitoring: true`, которому окно верило. См. докблок `MonitorEpoch`.
+
+    /// Счётчик растёт на КАЖДУЮ применённую команду, а не только когда она
+    /// меняет состояние: второй `Monitor(true)` подряд не должен слиться с
+    /// первым в одну эпоху — иначе устаревшее событие между ними прошло бы
+    /// как свежее.
+    #[test]
+    fn эпоха_растёт_на_каждую_применённую_команду_даже_без_смены_состояния() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::Monitor(true)).unwrap();
+        // То же значение, что уже установлено, — состояние не меняется.
+        tx.send(Ctl::Monitor(true)).unwrap();
+        tx.send(Ctl::Monitor(false)).unwrap();
+
+        let epoch = AtomicU64::new(0);
+        drain_ctl(&mut app(), &rx, None, &epoch, |_, _, _| {}, |_| {});
+
+        assert_eq!(
+            epoch.load(Ordering::SeqCst),
+            3,
+            "три применённые команды — три шага эпохи"
+        );
+    }
+
+    /// Команды, которые `drain_ctl` не перехватывает как `Monitor`
+    /// (`SetMicDevice`, обычные события машины), эпоху не трогают — это
+    /// счётчик именно проверки микрофона, а не общий счётчик команд.
+    #[test]
+    fn эпоха_не_растёт_на_командах_кроме_monitor() {
+        let (tx, rx) = channel();
+        tx.send(Ctl::SetMicDevice(meeting_recorder::capture::DeviceChoice::Default)).unwrap();
+        tx.send(Ctl::Toggle).unwrap();
+
+        let epoch = AtomicU64::new(0);
+        drain_ctl(&mut app(), &rx, None, &epoch, |_, _, _| {}, |_| {});
+
+        assert_eq!(epoch.load(Ordering::SeqCst), 0);
     }
 
     // ---- mac_should_arm -------------------------------------------------

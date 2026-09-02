@@ -74,6 +74,19 @@ pub trait Sink {
 /// подбирается на каждую запись заново (см. `free_name_pair`).
 pub trait SinkFactory {
     fn create(&self, dir: &Path, filename: &str) -> Res<Box<dyn Sink>>;
+
+    /// Пишет файл-спутник `<base>.meta.json` рядом с дорожками — длительность
+    /// записи, которая переживает автоочистку звука (см. `retention.rs`: та
+    /// трогает только `.wav`). Без него список записей (`group_recordings` в
+    /// `src-tauri/src/main.rs`) после чистки теряет длительность вместе с
+    /// файлом, по размеру которого она сейчас считается.
+    ///
+    /// Дефолт — no-op, а не часть контракта `create`, намеренно: подставные
+    /// фабрики в тестах `App` держат `root` как `PathBuf::from(".")` и на диск
+    /// не пишут вовсе — содержательный дефолт тихо начал бы класть реальные
+    /// файлы в рабочий каталог на каждом прогоне `cargo test`. Единственная
+    /// содержательная реализация — `WavSinks`.
+    fn write_meta(&self, _dir: &Path, _base: &str, _duration_sec: u32) {}
 }
 
 /// Что оркестратору нужно от захвата: взять микрофон, отпустить микрофон,
@@ -162,6 +175,22 @@ struct WavSinks;
 impl SinkFactory for WavSinks {
     fn create(&self, dir: &Path, filename: &str) -> Res<Box<dyn Sink>> {
         Ok(Box::new(WavSink::create(dir, filename)?))
+    }
+
+    /// Формат зафиксирован намеренно узко — `{"v":1,"duration_sec":N}` и ни
+    /// поля сверх: чем меньше здесь лежит, тем меньше поводов чинить формат
+    /// потом. `v` держит место для будущей несовместимой правки, хотя сегодня
+    /// не читается никем.
+    ///
+    /// Ошибка записи не поднимается наружу и не должна портить исход
+    /// `close_sinks`: файл-спутник вспомогательный, а не часть контракта
+    /// «запись состоялась». Не записался — список записей продолжит считать
+    /// длительность по размеру WAV, как до этой задачи.
+    fn write_meta(&self, dir: &Path, base: &str, duration_sec: u32) {
+        let content = format!(r#"{{"v":1,"duration_sec":{duration_sec}}}"#);
+        if let Err(e) = std::fs::write(dir.join(format!("{base}.meta.json")), content) {
+            log::warn!("не удалось записать {base}.meta.json: {e}");
+        }
     }
 }
 
@@ -666,6 +695,17 @@ pub struct App {
     /// открытых потоках. Считается только пока `audio.is_open()` — см.
     /// `check_sys_watchdog`.
     sys_silent_ticks: u32,
+    /// `Some((месячная папка, основа имени))` — прямо сейчас на диск пишется
+    /// ровно эта пара дорожек. Ставится в `open_sinks`, сразу после подбора
+    /// свободного имени, и снимается в `close_sinks` — то есть на любом уходе
+    /// из записи, включая откат `reset_to_idle` после ошибки.
+    ///
+    /// Нужно затем, чтобы GUI (через `Status`, см. `src-tauri/src/status.rs`)
+    /// мог отличить запись, которая ещё пишется, от уже готовой: список
+    /// записей строится обходом каталога и не знает сам по себе, какой из
+    /// найденных файлов ещё растёт, — а удалить растущий файл или начать его
+    /// расшифровывать значило бы испортить идущую встречу.
+    current_recording: Option<(String, String)>,
 }
 
 impl App {
@@ -710,6 +750,13 @@ impl App {
     /// `Some(имя)` — писали не тем микрофоном, о котором просили.
     pub fn device_warning(&self) -> Option<String> {
         self.audio.fell_back_from()
+    }
+
+    /// `Some((папка, основа))` — сейчас на диск пишется ровно эта запись.
+    /// `None` — не пишем ничего (Idle, Armed, или проверка микрофона: у неё
+    /// синков вовсе нет).
+    pub fn current_recording(&self) -> Option<(String, String)> {
+        self.current_recording.clone()
     }
 
     pub fn levels(&self) -> Levels {
@@ -774,6 +821,7 @@ impl App {
             level_mic: 0.0,
             level_sys: 0.0,
             sys_silent_ticks: 0,
+            current_recording: None,
         }
     }
 
@@ -963,6 +1011,18 @@ impl App {
         let src = self.current_source.clone();
         let dir = month_dir(&self.root, self.started);
         let (mic, sys) = free_name_pair(&dir, self.started, &src)?;
+        // Ставится ДО попытки создать файлы, а не после успеха: даже если
+        // вторая дорожка не откроется и `open_sinks` вернёт `Err`, `on_event`
+        // позовёт `reset_to_idle` → `close_sinks`, который снимает это поле
+        // безусловно (см. его докблок) — так что лишняя запись здесь не
+        // протекает, а более раннее выставление не оставляет окна, в котором
+        // файл mic уже существует на диске, а `current_recording` ещё `None`.
+        let folder = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let base = mic.strip_suffix(".mic.wav").unwrap_or(&mic).to_string();
+        self.current_recording = Some((folder, base));
         // Порядок важен: если вторая дорожка не открылась, первую надо закрыть,
         // иначе на диске останется осиротевший mic-файл.
         let sink_mic = self.sinks.create(&dir, &mic)?;
@@ -999,6 +1059,17 @@ impl App {
     /// Отказ здесь выглядит как успех, поэтому дорожка финализируется даже
     /// тогда, когда запись хвоста в неё провалилась.
     fn close_sinks(&mut self) -> Res {
+        // Снимается здесь безусловно, до самой попытки дописать и
+        // финализировать: этот метод — единственный выход из «сейчас
+        // пишется» что по обычному стопу (`Action::CloseFile`), что по
+        // откату после ошибки (`reset_to_idle`), и в обоих случаях запись
+        // либо уже закончена, либо вот-вот будет брошена — «идёт прямо
+        // сейчас» в любом из этих исходов уже неправда.
+        //
+        // Значение при этом не выбрасывается, а забирается в `recording`:
+        // ниже оно нужно, чтобы подписать файл-спутник с длительностью тем
+        // же именем, что и сами дорожки.
+        let recording = self.current_recording.take();
         // Хвост, натёкший между последним pump_audio и стопом.
         let (mic, sys) = self.drain_channels();
         let mut first_err: Option<Box<dyn std::error::Error>> = None;
@@ -1013,17 +1084,35 @@ impl App {
                 first_err.get_or_insert(e);
             }
         }
+        let mut any_finalized = false;
         for sink in [self.sink_mic.take(), self.sink_sys.take()]
             .into_iter()
             .flatten()
         {
             match sink.finalize() {
-                Ok(p) => println!("записано: {}", p.display()),
+                Ok(p) => {
+                    println!("записано: {}", p.display());
+                    any_finalized = true;
+                }
                 Err(e) => {
                     first_err.get_or_insert(e);
                 }
             }
         }
+
+        // Файл-спутник пишется только если на диске реально осталась хотя бы
+        // одна дорожка. Без этого гейта на откате после ошибки, где
+        // `open_sinks` уже успел удалить единственный созданный mic-файл
+        // (см. его докблок), появился бы `.meta.json`-сирота без единого WAV
+        // рядом — то есть запись, которой не существует, с длительностью.
+        if any_finalized {
+            if let Some((_, base)) = &recording {
+                let dir = month_dir(&self.root, self.started);
+                let duration = elapsed_seconds(self.started, Local::now());
+                self.sinks.write_meta(&dir, base, duration);
+            }
+        }
+
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -1171,6 +1260,25 @@ pub fn poll_to_event(
 /// Разделитель — `_`, а не `-`, именно потому, что `sanitize_source` не может
 /// его выпустить: `zoom_2` однозначно читается как «источник zoom, запись №2»,
 /// тогда как `zoom-2` конфликтовал бы с процессом, который сам зовётся «Zoom 2».
+/// Секунды между стартом записи и моментом её закрытия — длительность,
+/// которую `close_sinks` кладёт в файл-спутник (см. `SinkFactory::write_meta`).
+///
+/// Не пересчёт по размеру файла, а то, что `App` и так знает — `self.started`
+/// против «сейчас»: вторая оценка была бы избыточной и в теории могла бы
+/// разойтись с первой на округлении хвостовых миллисекунд записи в WAV.
+///
+/// `saturating` в оба конца: перевод часов назад посреди записи — редкость,
+/// но не должен ни запаниковать, ни дать отрицательную длительность, а
+/// встреча длиной в `u32::MAX` секунд (136 лет) не то, ради чего стоит
+/// возвращать `Result`.
+fn elapsed_seconds(started: DateTime<Local>, now: DateTime<Local>) -> u32 {
+    now.signed_duration_since(started)
+        .num_seconds()
+        .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 fn with_seq(base: &str, n: u32) -> String {
     match base.split_once('.') {
         Some((stem, rest)) => format!("{stem}_{n}.{rest}"),
@@ -1476,6 +1584,15 @@ mod tests {
                 падать_на_finalize: self.поломка
                     == Поломка::НеФинализируется,
             }))
+        }
+
+        /// Реального файла не пишет — только фиксирует вызов в журнале, тем же
+        /// приёмом, что и `create`/`Sink::write`, чтобы тесты `App` проверяли
+        /// факт и содержимое вызова, не трогая диск.
+        fn write_meta(&self, _dir: &Path, base: &str, duration_sec: u32) {
+            self.журнал
+                .borrow_mut()
+                .push(format!("meta:{base}:{duration_sec}"));
         }
     }
 
@@ -2045,6 +2162,58 @@ mod tests {
         );
     }
 
+    // ---- current_recording: кто сейчас пишется ------------------------------
+
+    /// В покое current_recording() честно отвечает «никто».
+    #[test]
+    fn покой_это_отсутствие_текущей_записи() {
+        let ж = журнал();
+        let app = стенд(&ж, Поломка::Нет, Vec::new());
+        assert_eq!(app.current_recording(), None);
+    }
+
+    /// Ровно во время записи — и только тогда — current_recording() отвечает
+    /// парой (папка, основа), а не пустотой и не старым значением от прошлой
+    /// встречи.
+    #[test]
+    fn во_время_записи_current_recording_известен() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+        let (folder, base) = app
+            .current_recording()
+            .expect("во время записи текущая запись обязана быть известна");
+        assert!(!folder.is_empty(), "месячная папка не может быть пустой");
+        assert!(
+            base.contains(&folder[..4]),
+            "основа имени начинается с той же даты, что и месячная папка: {base} / {folder}"
+        );
+
+        app.on_event(Event::ManualStop, None).expect("стоп");
+        assert_eq!(
+            app.current_recording(),
+            None,
+            "запись кончилась — «пишется прямо сейчас» больше не про неё"
+        );
+    }
+
+    /// Провал открытия дорожек не имеет права оставить current_recording()
+    /// висящим на файле, которого нет: `close_sinks` внутри `reset_to_idle`
+    /// обязан снять его так же безусловно, как приводит машину в `Idle`.
+    #[test]
+    fn провал_открытия_не_оставляет_текущую_запись_висеть() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::НеОткрывается, Vec::new());
+        app.on_event(Event::ManualStart, None)
+            .expect_err("открытие дорожек обязано упасть");
+        assert_eq!(
+            app.current_recording(),
+            None,
+            "файлов нет — current_recording не может указывать на призрак"
+        );
+    }
+
     // ---- Important 2 ревью: машина и мир не расходятся при ошибке ----------
 
     /// Провал открытия файлов не имеет права оставить машину в `Recording`.
@@ -2587,6 +2756,125 @@ mod tests {
             peak(&[i16::MIN]),
             1.0,
             "i16::MIN/i16::MAX без зажима даёт 1.0000305"
+        );
+    }
+
+    // ---- meta.json: длительность, которая переживает автоочистку --------
+
+    #[test]
+    fn elapsed_seconds_считает_целые_секунды_между_стартом_и_сейчас() {
+        let started = момент();
+        let now = started + chrono::Duration::seconds(90);
+        assert_eq!(elapsed_seconds(started, now), 90);
+    }
+
+    #[test]
+    fn elapsed_seconds_обрезает_вниз_а_не_округляет() {
+        let started = момент();
+        let now = started + chrono::Duration::milliseconds(1900);
+        assert_eq!(elapsed_seconds(started, now), 1, "1.9 c — это «1», а не «2»");
+    }
+
+    #[test]
+    fn elapsed_seconds_не_уходит_в_минус_при_переводе_часов_назад() {
+        let started = момент();
+        let now = started - chrono::Duration::seconds(5);
+        assert_eq!(elapsed_seconds(started, now), 0);
+    }
+
+    /// Гвоздь задачи: `close_sinks` обязан позвать `write_meta` с той же
+    /// основой имени, что досталась дорожкам, — иначе список записей
+    /// (`group_recordings`) не сможет сопоставить файл-спутник с записью.
+    #[test]
+    fn close_sinks_пишет_meta_рядом_с_дорожками() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        let записи = записано(&ж);
+        let meta = записи
+            .iter()
+            .find(|s| s.starts_with("meta:"))
+            .unwrap_or_else(|| panic!("файл-спутник не записан: {записи:?}"));
+        let (base, duration) = meta
+            .strip_prefix("meta:")
+            .and_then(|s| s.rsplit_once(':'))
+            .expect("формат «meta:основа:секунды»");
+        assert!(
+            base.ends_with("_manual"),
+            "основа meta обязана совпадать с основой дорожек: {base}"
+        );
+        assert!(
+            duration.parse::<u32>().is_ok(),
+            "длительность не число: {duration}"
+        );
+    }
+
+    /// Без единой дорожки на диске файл-спутник — сирота: `open_sinks`,
+    /// провалившийся ещё на создании mic-файла, уже почистил за собой
+    /// (см. его докблок), и `reset_to_idle` → `close_sinks` не имеет права
+    /// оставить рядом `.meta.json`, которому нечего описывать.
+    #[test]
+    fn meta_не_пишется_если_ни_одна_дорожка_не_легла_на_диск() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::НеОткрывается, Vec::new());
+        app.on_event(Event::ManualStart, None)
+            .expect_err("создание дорожки обязано упасть");
+
+        assert!(
+            !записано(&ж).iter().any(|s| s.starts_with("meta:")),
+            "файла-спутника без единой дорожки на диске быть не должно: {:?}",
+            записано(&ж)
+        );
+    }
+
+    /// Единственный тест здесь на реальном `WavSinks`, а не на фейке: он
+    /// проверяет не факт вызова (это уже покрыто тестом выше), а то, что на
+    /// диске действительно появляется читаемый `<основа>.meta.json` нужной
+    /// формы, рядом с настоящим WAV.
+    #[test]
+    fn meta_json_реально_появляется_на_диске_рядом_с_wav() {
+        let root = ScratchDir::new("meta-json");
+        let mut app = App::with_backends(
+            root.to_path_buf(),
+            Box::new(ФейкAudio {
+                журнал: журнал(),
+                открыт: false,
+                очередь: Vec::new(),
+                выбор: Rc::new(RefCell::new(None)),
+                подмена: None,
+                reopen_падает: false,
+                есть_система: true,
+            }),
+            Box::new(WavSinks),
+        );
+        app.on_event(Event::ManualStart, None)
+            .expect("ручной старт");
+        let (folder, base) = app
+            .current_recording()
+            .expect("запись обязана быть отмечена как идущая");
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        let dir = root.join(&folder);
+        assert!(
+            dir.join(format!("{base}.mic.wav")).exists(),
+            "дорожка микрофона обязана лежать на диске"
+        );
+        let meta_path = dir.join(format!("{base}.meta.json"));
+        let content = std::fs::read_to_string(&meta_path)
+            .unwrap_or_else(|e| panic!("{} не читается: {e}", meta_path.display()));
+        assert!(
+            content.starts_with(r#"{"v":1,"duration_sec":"#) && content.ends_with('}'),
+            "неожиданная форма содержимого: {content}"
+        );
+        let число = content
+            .trim_start_matches(r#"{"v":1,"duration_sec":"#)
+            .trim_end_matches('}');
+        assert!(
+            число.parse::<u32>().is_ok(),
+            "длительность не число: {content}"
         );
     }
 

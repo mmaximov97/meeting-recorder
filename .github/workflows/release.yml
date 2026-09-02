@@ -46,7 +46,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'meeting-recorder ${{ github.ref_name }}'
+          releaseName: 'MeetRec ${{ github.ref_name }}'
           releaseBody: |
             Сборки Windows (NSIS-установщик + portable .exe без установки) и macOS
             (.dmg, Apple Silicon и Intel отдельно).
@@ -54,7 +54,7 @@ jobs:
             macOS-сборка без подписи Apple Developer ID (`signingIdentity: "-"`,
             ad-hoc) — при первом запуске Gatekeeper потребует явного разрешения:
             правый клик по приложению → «Открыть», либо
-            `xattr -cr /Applications/meeting-recorder.app`.
+            `xattr -cr /Applications/MeetRec.app`.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
@@ -71,7 +71,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
-          cp target/release/meeting-recorder-gui.exe "meeting-recorder_${{ github.ref_name }}_x64-portable.exe"
-          gh release upload "${{ github.ref_name }}" "meeting-recorder_${{ github.ref_name }}_x64-portable.exe" --clobber
+          cp target/release/meeting-recorder-gui.exe "MeetRec_${{ github.ref_name }}_x64-portable.exe"
+          gh release upload "${{ github.ref_name }}" "MeetRec_${{ github.ref_name }}_x64-portable.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

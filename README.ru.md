@@ -112,14 +112,20 @@ Issues и pull request'ы приветствуются. Две вещи, кот�
 <!-- TODO: подставить ссылку на Cypher Products, когда будет сайт или страница -->
 Сделано в [Cypher Products](#).
 
-- Михаил Максимов — [github.com/mmaximov97](https://github.com/mmaximov97)
+- Михаил Максимов — разработка — [github.com/mmaximov97](https://github.com/mmaximov97)
 - Анна Дорогова — дизайн — [adorogova.com](https://adorogova.com) · [github.com/blinbirka](https://github.com/blinbirka)
 
 ## Поддержать
 
 MeetRec бесплатный и таким останется. Если он сэкономил вам час, можно купить нам двоим кофе.
 
-<!-- TODO: подставить настоящие ссылки, когда будет профиль GitHub Sponsors и крипто-адрес -->
+**USDT, сеть TRON (TRC-20)**
+
+```
+TFzpPkaSRQXLCEg9ZYf4MiwHNbzD4bYCgE
+```
+
+Отправляйте только в сети TRON. Перевод в любой другой сети вернуть нельзя.
 
 ## Лицензия
 

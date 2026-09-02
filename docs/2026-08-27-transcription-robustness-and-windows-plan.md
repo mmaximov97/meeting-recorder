@@ -1248,7 +1248,7 @@ Expected: `MIT License`.
 
 ```bash
 sed -i 's|`C:\\Users\\<username>\\Recordings`|каталог записей Windows|g; s|`C:\\Users\\<username>\\Recordings\\YYYY-MM\\`|`<каталог записей>\\YYYY-MM\\`|g' README.md
-sed -i 's|/Users/<username>/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
+sed -i 's|<личный каталог>/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
 sed -i 's|10\.0\.0\.3:8080|ai-lab.example:8080|g' docs/2026-08-10-in-app-transcription-design.md docs/2026-08-10-in-app-transcription-plan.md
 ```
 
@@ -1256,7 +1256,7 @@ sed -i 's|10\.0\.0\.3:8080|ai-lab.example:8080|g' docs/2026-08-10-in-app-transcr
 
 Run:
 ```bash
-grep -rn "C:\\\\Users\\\\<username>\|/Users/<username>\|10\.0\.0\.3" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
+grep -rn "C:\\\\Users\\\\<username>\|/Users/<username>\|<внутренний IP>" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
 ```
 Expected: пусто.
 
@@ -1433,7 +1433,7 @@ GPU, поэтому следующая в очереди не двигалась
 Под Windows он прибит гвоздём: `PathBuf::from(r"C:\Users\<username>\Recordings")`. На
 машине любого другого человека приложение пишет записи в чужой домашний каталог,
 а не имея туда прав — не пишет вовсе. Не всплывало это ровно потому, что у автора
-пользователь и назывался `Cypher`.
+пользователь назывался личным именем.
 
 Оба файла правятся вместе и обязаны остаться одинаковыми: докблок в
 `src-tauri/src/main.rs:30-34` прямо требует, чтобы корень записей у GUI и у

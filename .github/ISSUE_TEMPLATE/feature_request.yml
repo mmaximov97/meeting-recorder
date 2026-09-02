@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest something MeetRec should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write in English or Russian, whichever you prefer. / Пишите по-английски или по-русски, как удобнее.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: Describe the situation you are stuck in, not the feature you have in mind. It often turns out there is a better way to solve it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like MeetRec to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you handle it now
+      description: Optional. Another app, a manual step, or nothing at all.

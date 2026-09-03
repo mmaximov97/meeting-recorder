@@ -18,7 +18,7 @@ pub struct Config {
     /// предупреждение о подмене, чтобы пользователь видел «Headset (Boss Bose)»,
     /// а не `{0.0.1.00000000}.{guid}`. Матчинг по нему не идёт нигде.
     pub mic_device_name: Option<String>,
-    /// Базовый URL шлюза, например `http://10.0.0.3:8080` — без хвоста
+    /// Базовый URL шлюза, например `http://localhost:8080` — без хвоста
     /// `/v1/...`, его дописывает клиент транскрипции.
     pub stt_gateway_url: Option<String>,
     pub stt_api_key: Option<String>,
@@ -148,8 +148,8 @@ mod tests {
         let c = Config {
             mic_device_id: None,
             mic_device_name: None,
-            stt_gateway_url: Some("http://10.0.0.3:8080".to_string()),
-            stt_api_key: Some("ailab_xxx".to_string()),
+            stt_gateway_url: Some("http://localhost:8080".to_string()),
+            stt_api_key: Some("test_key_xxx".to_string()),
             language: None,
             theme: None,
             audio_retention_days: None,
@@ -171,7 +171,7 @@ mod tests {
         let mut cfg = Config {
             mic_device_id: None,
             mic_device_name: None,
-            stt_gateway_url: Some("http://10.0.0.3:8080".to_string()),
+            stt_gateway_url: Some("http://localhost:8080".to_string()),
             stt_api_key: Some("secret".to_string()),
             language: None,
             theme: None,
@@ -180,7 +180,7 @@ mod tests {
         };
         cfg.mic_device_id = Some("{new-id}".to_string());
         cfg.mic_device_name = Some("Новый микрофон".to_string());
-        assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://10.0.0.3:8080"));
+        assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://localhost:8080"));
         assert_eq!(cfg.stt_api_key.as_deref(), Some("secret"));
     }
 

@@ -44,12 +44,13 @@ GitHub Actions на этом аккаунте перестал выдавать 
 разворачивает пакет в любой каталог.
 
 ```bash
-export RUSTUP_HOME=/data/cypher-ai-lab/rust/rustup
-export CARGO_HOME=/data/cypher-ai-lab/rust/cargo
-export XWIN_CACHE_DIR=/data/cypher-ai-lab/rust/xwin
-export CARGO_TARGET_DIR=/data/cypher-ai-lab/rust/mr-target
-LLVM=/data/cypher-ai-lab/rust/llvm/root/usr/lib/llvm-18
-export LD_LIBRARY_PATH="$LLVM/lib:/data/cypher-ai-lab/rust/llvm/root/usr/lib/x86_64-linux-gnu"
+BUILD_ROOT=<каталог сборочной машины>
+export RUSTUP_HOME=$BUILD_ROOT/rust/rustup
+export CARGO_HOME=$BUILD_ROOT/rust/cargo
+export XWIN_CACHE_DIR=$BUILD_ROOT/rust/xwin
+export CARGO_TARGET_DIR=$BUILD_ROOT/rust/mr-target
+LLVM=$BUILD_ROOT/rust/llvm/root/usr/lib/llvm-18
+export LD_LIBRARY_PATH="$LLVM/lib:$BUILD_ROOT/rust/llvm/root/usr/lib/x86_64-linux-gnu"
 export PATH="$LLVM/bin:$CARGO_HOME/bin:$PATH"
 
 cargo xwin check -p meeting-recorder     --target x86_64-pc-windows-msvc --all-targets
@@ -119,7 +120,7 @@ cargo test --workspace
   Windows-машины (`ms-teams.exe` против `Teams.exe` зависит от того, новый
   Teams или классический). Команда для снятия — в тексте задачи.
 - **Задача 10** — отмена, гасящая задачу на шлюзе. Ждёт, пока будет выкачен
-  `DELETE /v1/jobs/:id` из плана `ai-lab/docs/2026-08-27-job-cancellation-plan.md`.
+  `DELETE /v1/jobs/:id` из плана отмены задач на стороне шлюза.
 - **Финальное ревью всей ветки** — по плану оно идёт после всех задач.
 
 ### Проверки, которые может сделать только человек
@@ -128,7 +129,7 @@ cargo test --workspace
   "SF Pro Text"` при 13px в окне высотой 96 (`ui/ask.html:13`); на Windows это
   Segoe UI с другими метриками. Автотеста нет, проверяется зрением.
 - **Живая расшифровка записи длиннее часа.** Это единственный способ увидеть,
-  что потолка в 60 минут больше нет. Нужен доступ к шлюзу ai-lab.
+  что потолка в 60 минут больше нет. Нужен доступ к STT-шлюзу.
 - **Отмена при двух записях в очереди:** отменить идущую и убедиться, что
   вторая стартовала сразу. До задачи 10 она стартовать сразу НЕ будет —
   задача на шлюзе доживает и держит GPU.

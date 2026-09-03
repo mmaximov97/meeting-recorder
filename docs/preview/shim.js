@@ -103,7 +103,7 @@
           S === "devwarn" ? "{0.0.1.00000000}.{9f1c…}" : S === "longmic" ? "id-1" : "id-2",
         mic_device_name:
           S === "devwarn" || S === "longmic" ? ДЛИННЫЙ_МИК : "MacBook Pro Microphone",
-        stt_gateway_url: "http://10.0.0.3:8080",
+        stt_gateway_url: "http://localhost:8080",
         stt_api_key: "секрет",
       }),
     set_monitor: ({ on }) => {

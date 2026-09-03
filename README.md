@@ -78,6 +78,8 @@ Recording is entirely local. Transcription is not, and this is worth being preci
 
 MeetRec does not ship with a transcription server. You put the address and the access key of your own gateway into settings, and the audio files are uploaded there, one track at a time, over HTTPS. If you leave those fields empty, nothing is ever sent anywhere and the app is a plain local recorder.
 
+If you don't have a gateway, [selfhost-ai-lab](https://github.com/mmaximov97/selfhost-ai-lab) is one you can run on your own hardware. It speaks the API MeetRec expects — `POST /v1/audio/transcriptions/async` to submit a track, `GET /v1/jobs/:id` to poll it — and setting it up is documented there. Any server exposing the same two endpoints will do.
+
 A local mode, where the audio is transcribed on your own machine and nothing leaves it, is in progress.
 
 ## Shortcuts

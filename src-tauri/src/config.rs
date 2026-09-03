@@ -149,7 +149,7 @@ mod tests {
             mic_device_id: None,
             mic_device_name: None,
             stt_gateway_url: Some("http://localhost:8080".to_string()),
-            stt_api_key: Some("ailab_xxx".to_string()),
+            stt_api_key: Some("test_key_xxx".to_string()),
             language: None,
             theme: None,
             audio_retention_days: None,

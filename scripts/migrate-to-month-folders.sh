@@ -25,7 +25,10 @@
 # сообщений — по-русски, как везде в проекте.
 set -euo pipefail
 
-ROOT="${1:-/mnt/c/Users/Cypher/Recordings}"
+# Каталог записей выводится по тому же правилу, что и в самом приложении
+# (main.rs:42,48): %USERPROFILE% на Windows, $HOME на macOS. Под WSL
+# USERPROFILE не задан, поэтому там путь нужно передавать аргументом.
+ROOT="${1:-${USERPROFILE:-$HOME}/Recordings}"
 DRY="${DRY_RUN:-0}"
 
 cd "$ROOT"

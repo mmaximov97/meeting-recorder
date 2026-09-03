@@ -2702,4 +2702,31 @@ mod tests {
              \x20   features = [\"coinit_apartmentthreaded\"]\n"
         );
     }
+
+    /// `productName` в `tauri.conf.json` задаёт имя собранного бандла, а
+    /// `scripts/check-tap-lazy-bind.sh` ищет бинарь внутри него по этому пути.
+    /// Переименование приложения ломает скрипт молча: он просто не найдёт файл
+    /// — причём только на macOS и только когда кто-то решит его запустить, а
+    /// README предлагает эту команду постороннему человеку.
+    #[test]
+    fn скрипт_проверки_бандла_знает_текущее_имя_приложения() {
+        const CONF: &str = include_str!("../tauri.conf.json");
+        const SCRIPT: &str = include_str!("../../scripts/check-tap-lazy-bind.sh");
+        let conf: serde_json::Value =
+            serde_json::from_str(CONF).expect("tauri.conf.json обязан быть валидным JSON");
+        let имя = conf["productName"]
+            .as_str()
+            .expect("productName в tauri.conf.json");
+        assert!(
+            SCRIPT.contains(&format!("{имя}.app")),
+            "\n\
+             scripts/check-tap-lazy-bind.sh ищет бандл не под тем именем.\n\
+             \n\
+             productName в tauri.conf.json: {имя}\n\
+             значит собирается:              {имя}.app\n\
+             \n\
+             Поправить DEFAULT_BIN в скрипте — иначе `npm run check-tap-lazy-bind`\n\
+             из README не найдёт файл и упадёт на постороннем человеке.\n"
+        );
+    }
 }

@@ -2670,4 +2670,36 @@ mod tests {
         assert!(msg.contains("сеть отвалилась"), "{msg}");
         assert!(msg.contains("шлюз ответил 413"), "{msg}");
     }
+
+    /// `trash` на Windows требует явно выбранную модель COM: в его
+    /// `windows.rs` стоит НАМЕРЕННАЯ ошибка компиляции, если не задана ни
+    /// `coinit_multithreaded`, ни `coinit_apartmentthreaded`. Обе входят в
+    /// `default` крейта, а у нас `default-features = false` — и вместе с
+    /// умолчаниями срезается COM.
+    ///
+    /// Тест читает манифест, а не полагается на сборку: ошибка спрятана за
+    /// `cfg(windows)`, поэтому ни `cargo test` на macOS, ни ревью диффа её не
+    /// увидят — красным станет только Windows-раннер, и через девять минут
+    /// компиляции. Здесь она падает сразу и на любой платформе.
+    #[test]
+    fn trash_объявлен_с_моделью_com_для_windows() {
+        const CARGO_TOML: &str = include_str!("../Cargo.toml");
+        let строка = CARGO_TOML
+            .lines()
+            .find(|l| l.trim_start().starts_with("trash"))
+            .expect("зависимость `trash` пропала из src-tauri/Cargo.toml");
+        assert!(
+            строка.contains("coinit_apartmentthreaded") || строка.contains("coinit_multithreaded"),
+            "\n\
+             В src-tauri/Cargo.toml у `trash` не осталось модели COM:\n\
+             \x20   {строка}\n\
+             \n\
+             На Windows это не предупреждение, а отказ сборки:\n\
+             \x20   error[E0070]: invalid left-hand side of assignment\n\
+             \x20   trash-5.2.6/src/windows.rs:278\n\
+             \n\
+             Вернуть одну из фич (крейт по умолчанию берёт первую):\n\
+             \x20   features = [\"coinit_apartmentthreaded\"]\n"
+        );
+    }
 }

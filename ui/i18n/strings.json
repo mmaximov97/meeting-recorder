@@ -1,0 +1,731 @@
+{
+  "_": [
+    "Единственный источник текстов приложения. Читается и фронтендом, и Rust:",
+    "фронтенд забирает файл как есть, Rust вшивает его через include_str!.",
+    "Подстановки в фигурных скобках: {app}, {name}, {n}, {total}, {stage}, {elapsed}.",
+    "Формы множественного числа не заводим намеренно: сокращения «мин», «ч»,",
+    "«min», «h» не меняются по числу ни в русском, ни в английском.",
+    "Даты, время, размеры файлов здесь не лежат — они собираются системным",
+    "форматированием по языку, иначе пришлось бы держать список месяцев руками."
+  ],
+  "app": {
+    "name": {
+      "ru": "MeetRec",
+      "en": "MeetRec"
+    },
+    "windowMain": {
+      "ru": "MeetRec",
+      "en": "MeetRec"
+    },
+    "windowAsk": {
+      "ru": "Записать встречу?",
+      "en": "Record this meeting?"
+    }
+  },
+  "nav": {
+    "recordings": {
+      "ru": "Записи",
+      "en": "Recordings"
+    },
+    "settings": {
+      "ru": "Настройки",
+      "en": "Settings"
+    },
+    "back": {
+      "ru": "Назад к записям",
+      "en": "Back to recordings"
+    },
+    "dismiss": {
+      "ru": "Скрыть сообщение",
+      "en": "Dismiss"
+    },
+    "open": {
+      "ru": "Открыть",
+      "en": "Open"
+    },
+    "about": {
+      "ru": "О разработчиках",
+      "en": "About the makers"
+    },
+    "support": {
+      "ru": "Поддержать",
+      "en": "Support"
+    }
+  },
+  "record": {
+    "manualName": {
+      "ru": "Запись",
+      "en": "Recording"
+    },
+    "start": {
+      "ru": "Начать запись",
+      "en": "Start recording"
+    },
+    "starting": {
+      "ru": "Начинаю…",
+      "en": "Starting…"
+    },
+    "stop": {
+      "ru": "Остановить",
+      "en": "Stop"
+    },
+    "stopping": {
+      "ru": "Останавливаю…",
+      "en": "Stopping…"
+    },
+    "decline": {
+      "ru": "Не записывать",
+      "en": "Don't record"
+    },
+    "confirm": {
+      "ru": "Записать",
+      "en": "Record"
+    }
+  },
+  "state": {
+    "armedApp": {
+      "ru": "Похоже, встреча в {app}",
+      "en": "Looks like a meeting in {app}"
+    },
+    "armed": {
+      "ru": "Похоже, встреча",
+      "en": "Looks like a meeting"
+    },
+    "recording": {
+      "ru": "Запись идёт",
+      "en": "Recording"
+    },
+    "meeting": {
+      "ru": "Встреча",
+      "en": "Meeting"
+    }
+  },
+  "levels": {
+    "mic": {
+      "ru": "Ваш микрофон",
+      "en": "Your microphone"
+    },
+    "system": {
+      "ru": "Звук системы — то, что слышно от собеседников",
+      "en": "System audio — what you hear from the others"
+    },
+    "you": {
+      "ru": "Вы",
+      "en": "You"
+    },
+    "them": {
+      "ru": "Система",
+      "en": "System"
+    },
+    "hint": {
+      "ru": "Говорите обычным голосом: полоска должна доходить примерно до конца зелёного и не залезать в красное.",
+      "en": "Speak the way you normally would. The bar should reach about the end of the green and stay out of the red."
+    }
+  },
+  "empty": {
+    "title": {
+      "ru": "Записей пока нет",
+      "en": "No recordings yet"
+    },
+    "text": {
+      "ru": "Приложение само предложит записать, когда услышит звонок. Или нажмите «Начать запись».",
+      "en": "MeetRec will offer to record when it hears a meeting start. Or press Start recording."
+    }
+  },
+  "settings": {
+    "mic": {
+      "ru": "Микрофон",
+      "en": "Microphone"
+    },
+    "micFromSystem": {
+      "ru": "Как выбрано в системе",
+      "en": "Whatever the system uses"
+    },
+    "micTest": {
+      "ru": "Проверить",
+      "en": "Test"
+    },
+    "micTestStop": {
+      "ru": "Остановить проверку",
+      "en": "Stop the test"
+    },
+    "micTestOn": {
+      "ru": "Включаю…",
+      "en": "Turning on…"
+    },
+    "micTestOff": {
+      "ru": "Останавливаю…",
+      "en": "Turning off…"
+    },
+    "micLocked": {
+      "ru": "Запись, которая идёт сейчас, пишется прежним микрофоном. Новый включится со следующей.",
+      "en": "The recording in progress keeps the old microphone. The new one starts with the next recording."
+    },
+    "transcription": {
+      "ru": "Расшифровка встреч",
+      "en": "Transcription"
+    },
+    "serverUrl": {
+      "ru": "Адрес сервера",
+      "en": "Server address"
+    },
+    "apiKey": {
+      "ru": "Ключ доступа",
+      "en": "Access key"
+    },
+    "saved": {
+      "ru": "Сохранено",
+      "en": "Saved"
+    }
+  },
+  "transcribe": {
+    "uploading": {
+      "ru": "Отправляю…",
+      "en": "Uploading…"
+    },
+    "polling": {
+      "ru": "Расшифровываю…",
+      "en": "Transcribing…"
+    },
+    "merging": {
+      "ru": "Собираю текст…",
+      "en": "Merging…"
+    },
+    "done": {
+      "ru": "Готово",
+      "en": "Done"
+    },
+    "queued": {
+      "ru": "В очереди №{n}",
+      "en": "In line, #{n}"
+    },
+    "progress": {
+      "ru": "{stage} дорожка {n} из {total}, {elapsed}",
+      "en": "{stage} track {n} of {total}, {elapsed}"
+    },
+    "ready": {
+      "ru": "расшифровка готова",
+      "en": "transcript ready"
+    },
+    "running": {
+      "ru": "Расшифровка уже идёт",
+      "en": "Transcription is already running"
+    }
+  },
+  "duration": {
+    "underMinute": {
+      "ru": "меньше минуты",
+      "en": "under a minute"
+    },
+    "minutes": {
+      "ru": "{n} мин",
+      "en": "{n} min"
+    },
+    "hours": {
+      "ru": "{n} ч",
+      "en": "{n} h"
+    },
+    "hoursMinutes": {
+      "ru": "{h} ч {m} мин",
+      "en": "{h} h {m} min"
+    }
+  },
+  "date": {
+    "today": {
+      "ru": "Сегодня",
+      "en": "Today"
+    },
+    "yesterday": {
+      "ru": "Вчера",
+      "en": "Yesterday"
+    },
+    "unknown": {
+      "ru": "Когда-то",
+      "en": "Date unknown"
+    }
+  },
+  "folder": {
+    "root": {
+      "ru": "в корне",
+      "en": "in the root folder"
+    }
+  },
+  "menu": {
+    "actions": {
+      "ru": "Действия",
+      "en": "Actions"
+    },
+    "openTranscript": {
+      "ru": "Открыть расшифровку",
+      "en": "Open transcript"
+    },
+    "rename": {
+      "ru": "Переименовать",
+      "en": "Rename"
+    },
+    "transcribe": {
+      "ru": "Расшифровать встречу",
+      "en": "Transcribe this meeting"
+    },
+    "cancel": {
+      "ru": "Отменить расшифровку",
+      "en": "Cancel transcription"
+    },
+    "again": {
+      "ru": "Расшифровать заново",
+      "en": "Transcribe again"
+    },
+    "showFiles": {
+      "ru": "Показать файлы",
+      "en": "Show files"
+    },
+    "delete": {
+      "ru": "Удалить запись",
+      "en": "Delete recording"
+    }
+  },
+  "confirm": {
+    "deleteTitle": {
+      "ru": "Удалить запись?",
+      "en": "Delete this recording?"
+    },
+    "deleteText": {
+      "ru": "Файлы уедут в корзину — оттуда их можно вернуть.",
+      "en": "The files go to the Trash. You can put them back from there."
+    },
+    "delete": {
+      "ru": "Удалить",
+      "en": "Delete"
+    },
+    "cancel": {
+      "ru": "Отмена",
+      "en": "Cancel"
+    }
+  },
+  "local": {
+    "about": {
+      "ru": "Про расшифровку на этом компьютере",
+      "en": "About transcribing on this computer"
+    },
+    "onServer": {
+      "ru": "На сервере",
+      "en": "On a server"
+    },
+    "onDevice": {
+      "ru": "На этом компьютере",
+      "en": "On this computer"
+    },
+    "hint": {
+      "ru": "Ничего не уходит в интернет. Считается дольше и заметно греет ноутбук.",
+      "en": "Nothing leaves the machine. Slower, and it warms the laptop up."
+    },
+    "serverHint": {
+      "ru": "Дорожки уходят на указанный адрес по вашему ключу. Считается быстрее и различает собеседников между собой.",
+      "en": "The tracks go to the address you set, with your key. Faster, and it tells the other speakers apart."
+    },
+    "noDiarization": {
+      "ru": "Собеседников между собой не различает. Где вы, а где они — слышно, это разные дорожки. Кто из них кто — нет.",
+      "en": "It won't tell the other speakers apart. You and them stay separate, because those are different tracks. Which of them is which, it won't know."
+    },
+    "modelMissing": {
+      "ru": "Модель не скачана",
+      "en": "Model not downloaded"
+    },
+    "modelDownload": {
+      "ru": "Скачать модель, {size}",
+      "en": "Download the model, {size}"
+    },
+    "modelLoading": {
+      "ru": "Скачиваю… {done} из {total}",
+      "en": "Downloading… {done} of {total}"
+    },
+    "modelReady": {
+      "ru": "Модель на месте, {size}",
+      "en": "Model ready, {size}"
+    },
+    "modelRemove": {
+      "ru": "Удалить модель",
+      "en": "Remove the model"
+    },
+    "noSpace": {
+      "ru": "Не хватает места: нужно {need}, свободно {free}.",
+      "en": "Not enough space: {need} needed, {free} free."
+    },
+    "downloadFailed": {
+      "ru": "Модель не скачалась. Проверьте соединение и попробуйте ещё раз.",
+      "en": "The model didn't download. Check the connection and try again."
+    },
+    "notWired": {
+      "ru": "Локальный движок ещё не подключён: расшифровка на этом компьютере пока не работает. Всё остальное готово, движок вставит разработчик.",
+      "en": "The local engine isn't wired up yet, so transcribing on this computer doesn't work. Everything around it is ready; a developer drops the engine in."
+    }
+  },
+  "retention": {
+    "label": {
+      "ru": "Удалять аудио",
+      "en": "Delete audio"
+    },
+    "never": {
+      "ru": "Никогда",
+      "en": "Never"
+    },
+    "d7": {
+      "ru": "Старше 7 дней",
+      "en": "Older than 7 days"
+    },
+    "d30": {
+      "ru": "Старше 30 дней",
+      "en": "Older than 30 days"
+    },
+    "d90": {
+      "ru": "Старше 90 дней",
+      "en": "Older than 90 days"
+    },
+    "hint": {
+      "ru": "Расшифровки остаются, удаляется только звук — место занимает он. Записи без расшифровки чистка не трогает.",
+      "en": "Transcripts stay. Only the audio goes, and that is what takes up the space. Recordings without a transcript are left alone."
+    },
+    "cleared": {
+      "ru": "аудио удалено",
+      "en": "audio removed"
+    }
+  },
+  "about": {
+    "title": {
+      "ru": "О разработчиках",
+      "en": "About the makers"
+    },
+    "tagline": {
+      "ru": "Записывает созвоны с вашего компьютера. Бот в звонок не приходит, файлы остаются на диске.",
+      "en": "Records your calls from your own machine. No bot joins the meeting, and the files stay on your disk."
+    },
+    "by": {
+      "ru": "Сделано в Cypher Products",
+      "en": "Built by Cypher Products"
+    },
+    "design": {
+      "ru": "Дизайн",
+      "en": "Design"
+    },
+    "code": {
+      "ru": "Разработка",
+      "en": "Development"
+    },
+    "contactsSoon": {
+      "ru": "Контакты скоро появятся",
+      "en": "Contacts coming soon"
+    },
+    "repo": {
+      "ru": "Исходный код на GitHub",
+      "en": "Source code on GitHub"
+    },
+    "license": {
+      "ru": "Лицензия MIT",
+      "en": "MIT license"
+    },
+    "version": {
+      "ru": "Версия {v}",
+      "en": "Version {v}"
+    }
+  },
+  "support": {
+    "title": {
+      "ru": "Поддержать",
+      "en": "Support the project"
+    },
+    "text": {
+      "ru": "Приложение бесплатное и таким останется. Если оно сэкономило вам час, можно сказать спасибо деньгами.",
+      "en": "The app is free and will stay free. If it saved you an hour, you can say thank you with money."
+    },
+    "crypto": {
+      "ru": "Криптовалютой",
+      "en": "With crypto"
+    },
+    "copy": {
+      "ru": "Скопировать адрес",
+      "en": "Copy the address"
+    },
+    "copied": {
+      "ru": "Скопировано",
+      "en": "Copied"
+    },
+    "soon": {
+      "ru": "Ссылка появится позже",
+      "en": "Link coming later"
+    },
+    "thanks": {
+      "ru": "Спасибо.",
+      "en": "Thank you."
+    },
+    "cryptoNetwork": {
+      "ru": "USDT · сеть TRON (TRC-20)",
+      "en": "USDT · TRON network (TRC-20)"
+    },
+    "qrAlt": {
+      "ru": "QR-код с адресом кошелька",
+      "en": "QR code with the wallet address"
+    },
+    "cryptoWarn": {
+      "ru": "Перевод в другой сети пропадёт без возврата.",
+      "en": "A transfer on any other network is lost for good."
+    }
+  },
+  "trouble": {
+    "noSystemTitle": {
+      "ru": "Собеседников не слышно",
+      "en": "The others aren't in the recording"
+    },
+    "noSystemText": {
+      "ru": "Записан только ваш микрофон: похоже, приложению не разрешили писать звук системы. Проверьте разрешение, иначе следующая запись выйдет такой же.",
+      "en": "Only your microphone made it in. It looks like the app wasn't allowed to record system audio. Check the permission, or the next recording will come out the same."
+    },
+    "noMicTitle": {
+      "ru": "Вас не слышно",
+      "en": "You aren't in the recording"
+    },
+    "noMicText": {
+      "ru": "Записан только звук системы, вашего микрофона в записи нет. Проверьте его в настройках.",
+      "en": "Only system audio made it in. Your microphone isn't there. Check it in settings."
+    },
+    "quietTitle": {
+      "ru": "Вас слышно заметно тише",
+      "en": "Your voice is much quieter"
+    },
+    "quietText": {
+      "ru": "Ваш микрофон записался намного тише собеседников — расшифровка может пропустить ваши реплики. Проверьте его в настройках перед следующей встречей.",
+      "en": "Your microphone came out far quieter than the others, so the transcript may miss what you said. Check it in settings before the next meeting."
+    },
+    "transcriptTitle": {
+      "ru": "Расшифровка не получилась",
+      "en": "Transcription didn't work"
+    },
+    "transcriptText": {
+      "ru": "Запись цела — можно попробовать ещё раз или проверить адрес сервера в настройках.",
+      "en": "The recording is fine. You can try again, or check the server address in settings."
+    },
+    "retry": {
+      "ru": "Попробовать снова",
+      "en": "Try again"
+    },
+    "renameTitle": {
+      "ru": "Не удалось переименовать",
+      "en": "Rename didn't work"
+    },
+    "renameText": {
+      "ru": "Имя осталось прежним — попробуйте ещё раз.",
+      "en": "The name stayed as it was. Try again."
+    }
+  },
+  "warn": {
+    "micMissing": {
+      "ru": "Микрофон «{name}» недоступен — пишется тот, что выбран в системе. Проверьте, подключён ли он, или выберите другой в настройках.",
+      "en": "The microphone \"{name}\" isn't available, so the system one is being recorded instead. Check that it's plugged in, or pick another in settings."
+    },
+    "micSwapped": {
+      "ru": "Запись, которая идёт сейчас, пишется микрофоном «{name}». Новый включится со следующей.",
+      "en": "The recording in progress is using the microphone \"{name}\". The new one starts with the next recording."
+    },
+    "micSwappedSystem": {
+      "ru": "Запись, которая идёт сейчас, пишется прежним микрофоном. Новый включится со следующей.",
+      "en": "The recording in progress keeps the old microphone. The new one starts with the next recording."
+    }
+  },
+  "error": {
+    "generic": {
+      "ru": "Что-то пошло не так. Попробуйте снова.",
+      "en": "Something went wrong. Try again."
+    },
+    "fatal": {
+      "ru": "Записывать сейчас не получится. Перезапустите приложение.",
+      "en": "Recording isn't possible right now. Restart the app."
+    },
+    "audio": {
+      "ru": "Со звуком что-то не так. Если повторится — перезапустите приложение.",
+      "en": "Something is off with the audio. If it happens again, restart the app."
+    },
+    "testOn": {
+      "ru": "Проверка не включилась. Посмотрите, не занят ли микрофон другой программой.",
+      "en": "The test didn't start. See whether another app is holding the microphone."
+    },
+    "testOff": {
+      "ru": "Проверка не выключилась. Она погаснет сама через минуту.",
+      "en": "The test didn't stop. It will switch itself off within a minute."
+    },
+    "list": {
+      "ru": "Список записей не прочитался. Закройте окно и откройте его снова из трея.",
+      "en": "The list of recordings didn't load. Close the window and open it again from the tray icon."
+    },
+    "mics": {
+      "ru": "Не вижу микрофонов. Откройте настройки заново.",
+      "en": "No microphones found. Open settings again."
+    },
+    "saveSettings": {
+      "ru": "Адрес и ключ не сохранились. Проверьте их и выйдите из поля ещё раз.",
+      "en": "The address and key weren't saved. Check them and leave the field again."
+    },
+    "privacy": {
+      "ru": "Настройки системы не открылись. Откройте их сами: Конфиденциальность и безопасность → Запись экрана и звука.",
+      "en": "System Settings didn't open. Open them yourself: Privacy & Security → Screen & System Audio Recording."
+    },
+    "repository": {
+      "ru": "Страница не открылась в браузере.",
+      "en": "The page didn't open in your browser."
+    },
+    "state": {
+      "ru": "Не удалось узнать, чем занято приложение. Закройте окно и откройте его снова из трея.",
+      "en": "Couldn't tell what the app is doing. Close the window and open it again from the tray icon."
+    },
+    "openTranscript": {
+      "ru": "Расшифровка не открылась. Найдите её через «Показать файлы».",
+      "en": "The transcript didn't open. Find it through Show files."
+    },
+    "openFolder": {
+      "ru": "Папка с записями не открылась. Попробуйте ещё раз.",
+      "en": "The recordings folder didn't open. Try again."
+    },
+    "cancel": {
+      "ru": "Отмена не сработала — расшифровка идёт дальше.",
+      "en": "Cancelling didn't work. The transcription is still running."
+    },
+    "rename": {
+      "ru": "Имя осталось прежним — попробуйте ещё раз.",
+      "en": "The name stayed as it was. Try again."
+    },
+    "delete": {
+      "ru": "Не удалось удалить — файлы остались на месте.",
+      "en": "Couldn't delete it. The files are still there."
+    },
+    "micSave": {
+      "ru": "Микрофон не сохранился — остался «{name}». Попробуйте ещё раз.",
+      "en": "The microphone wasn't saved. It is still \"{name}\". Try again."
+    }
+  },
+  "permission": {
+    "deviceGone": {
+      "ru": " (сейчас недоступен)",
+      "en": " (currently unavailable)"
+    },
+    "noSystemAudioShort": {
+      "ru": "Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут.",
+      "en": "System audio isn't being recorded, only your microphone. Meetings won't be detected on their own."
+    },
+    "noSystemAudio": {
+      "ru": "Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут: приложение узнаёт звонок именно по звуку системы. Записать можно вручную — кнопкой, горячей клавишей или из трея. Разрешить можно в Системных настройках → Конфиденциальность и безопасность → Запись экрана и звука, после чего перезапустить приложение.",
+      "en": "System audio isn't being recorded, only your microphone. Meetings won't be detected on their own, because the app recognizes one by system audio. You can still record by hand: the button, the shortcut, or the menu bar. To allow it, go to System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app."
+    },
+    "streamDead": {
+      "ru": "Аудиопоток остановился: запись не работает, перезапустите приложение.",
+      "en": "The audio stream stopped. Recording isn't working. Restart the app."
+    }
+  },
+  "notify": {
+    "fatalTitle": {
+      "ru": "Записывать сейчас не получится",
+      "en": "Recording isn't possible right now"
+    },
+    "fatalBody": {
+      "ru": "Перезапустите приложение.",
+      "en": "Restart the app."
+    },
+    "micOnlyTitle": {
+      "ru": "Пишется только ваш микрофон",
+      "en": "Only your microphone is being recorded"
+    }
+  },
+  "tray": {
+    "start": {
+      "ru": "Начать запись",
+      "en": "Start recording"
+    },
+    "stop": {
+      "ru": "Остановить запись",
+      "en": "Stop recording"
+    },
+    "recordThis": {
+      "ru": "Записать эту встречу",
+      "en": "Record this meeting"
+    },
+    "unavailable": {
+      "ru": "Запись недоступна",
+      "en": "Recording unavailable"
+    },
+    "folder": {
+      "ru": "Открыть папку записей",
+      "en": "Open recordings folder"
+    },
+    "quit": {
+      "ru": "Выход",
+      "en": "Quit"
+    },
+    "tipIdle": {
+      "ru": "Ожидание встречи",
+      "en": "Waiting for a meeting"
+    },
+    "tipArmed": {
+      "ru": "Похоже, встреча — записать?",
+      "en": "Looks like a meeting. Record it?"
+    },
+    "tipRecording": {
+      "ru": "Идёт запись",
+      "en": "Recording"
+    },
+    "tipBroken": {
+      "ru": "Запись не работает",
+      "en": "Recording isn't working"
+    }
+  },
+  "size": {
+    "b": {
+      "ru": "Б",
+      "en": "B"
+    },
+    "kb": {
+      "ru": "КБ",
+      "en": "KB"
+    },
+    "mb": {
+      "ru": "МБ",
+      "en": "MB"
+    },
+    "gb": {
+      "ru": "ГБ",
+      "en": "GB"
+    }
+  },
+  "lang": {
+    "label": {
+      "ru": "Язык",
+      "en": "Language"
+    },
+    "system": {
+      "ru": "Как в системе",
+      "en": "Match the system"
+    },
+    "ru": {
+      "ru": "🇷🇺 Русский",
+      "en": "🇷🇺 Russian"
+    },
+    "en": {
+      "ru": "🇬🇧 Английский",
+      "en": "🇬🇧 English"
+    }
+  },
+  "theme": {
+    "label": {
+      "ru": "Тема",
+      "en": "Theme"
+    },
+    "system": {
+      "ru": "Как в системе",
+      "en": "Match the system"
+    },
+    "light": {
+      "ru": "Светлая",
+      "en": "Light"
+    },
+    "dark": {
+      "ru": "Тёмная",
+      "en": "Dark"
+    }
+  }
+}

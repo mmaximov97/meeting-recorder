@@ -30,7 +30,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_BIN="$ROOT/target/release/bundle/macos/meeting-recorder.app/Contents/MacOS/meeting-recorder-gui"
+DEFAULT_BIN="$ROOT/target/release/bundle/macos/MeetRec.app/Contents/MacOS/meeting-recorder-gui"
 BIN="${1:-$DEFAULT_BIN}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then

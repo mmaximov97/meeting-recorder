@@ -41,7 +41,13 @@ tokio = { version = "1", features = ["time", "fs", "macros", "io-util"] }
 thiserror = "2"
 sysinfo = "0.32"
 sys-locale = "0.3.2"
-trash = { version = "5.2.6", default-features = false }
+# `coinit_apartmentthreaded` — не украшение, а обязательное условие сборки под
+# Windows: без одной из двух coinit-фич в `trash/src/windows.rs` срабатывает
+# намеренная ошибка компиляции. Обе входят в `default` крейта, поэтому
+# `default-features = false` (взят, чтобы не тянуть его фичу `chrono`) срезал
+# заодно и COM. Модель — та же, что крейт выбирает по умолчанию, и та, которую
+# ждут shell-API Windows. Сторожит тест `trash_объявлен_с_моделью_com_для_windows`.
+trash = { version = "5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }
 # Разбор даты из имени записи в `retention.rs` — та же версия, что тянет
 # ядро (`../Cargo.toml`), чтобы `DateTime<Local>` здесь был тем же типом, а
 # не двумя одноимёнными по недоразумению.

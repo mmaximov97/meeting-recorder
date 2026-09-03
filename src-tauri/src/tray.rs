@@ -1,11 +1,20 @@
 //! Трей: иконка-индикатор и меню.
 //!
-//! Иконки рисуются кодом, а не лежат файлами: это три залитых кружка, и держать
-//! ради них PNG-и в репозитории — лишняя связь (файл переименовали → иконка
-//! молча пропала). `Image::new_owned` принимает сырую RGBA, чего для кружка
-//! более чем достаточно.
+//! Три «активных» состояния (взвод, запись, отказ) по-прежнему рисуются
+//! кодом — это залитые кружки, и держать ради них PNG-и в репозитории лишняя
+//! связь (файл переименовали → иконка молча пропала). `Image::new_owned`
+//! принимает сырую RGBA, чего для кружка более чем достаточно.
+//!
+//! Состояние покоя (Idle) — исключение: там нет цвета состояния, только сама
+//! иконка приложения — фирменный знак. Она держится файлом, `icons/tray.png`,
+//! и идёт в шаблонном режиме (см. `set_icon_with_as_template` в `repaint`):
+//! macOS сама красит её в системный цвет строки меню — чёрным на светлом
+//! фоне, белым на тёмном, — как и остальные иконки меню-бара. Отдельного
+//! файла под тёмную/светлую тему не нужно ровно поэтому: цвет в файле не
+//! важен, важна только форма (прозрачность/непрозрачность).
 
 use crate::audio::{Ctl, UiState};
+use crate::i18n;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
@@ -87,6 +96,22 @@ fn dot(r: u8, g: u8, b: u8, a: u8) -> Image<'static> {
     mark(r, g, b, a, false)
 }
 
+/// Фирменный знак покоя — вшит в бинарь, а не читается с диска: путь
+/// относительно исполняемого файла на macOS ненадёжен (bundle можно
+/// перенести), а лишний способ не найти иконку на старте того не стоит.
+/// Файл один: цвет в нём не важен (см. докблок файла) — иконка идёт
+/// шаблонной, и систему красит его сама macOS.
+fn brand_icon() -> Image<'static> {
+    static ICON: OnceLock<Image<'static>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        Image::from_bytes(include_bytes!("../icons/tray.png"))
+            .expect("icons/tray.png обязан быть валидным PNG")
+    })
+    .clone()
+}
+
+/// Иконка под состояние. Шаблонный режим (см. `repaint`) — только у Idle:
+/// три активных состояния несут собственный цвет и идут как есть.
 fn icon_for(state: u8, blink_on: bool) -> Image<'static> {
     match state {
         // Записи не будет. Красный перечёркнутый: цветом похож на «пишем»,
@@ -97,8 +122,8 @@ fn icon_for(state: u8, blink_on: bool) -> Image<'static> {
         // Вопрос висит — жёлтый, мигает: состояние требует ответа.
         ARMED if blink_on => dot(230, 170, 30, 255),
         ARMED => dot(230, 170, 30, 70),
-        // Idle — серый: мы ничего не слушаем, микрофон отпущен.
-        _ => dot(130, 130, 130, 255),
+        // Idle — фирменный знак, цветом под тему строки меню.
+        _ => brand_icon(),
     }
 }
 
@@ -111,28 +136,49 @@ fn repaint(app: &AppHandle) {
     let Some(tray) = app.tray_by_id("main") else {
         return;
     };
-    let _ = tray.set_icon(Some(icon_for(state, BLINK_ON.load(Ordering::Relaxed))));
+    let lang = i18n::active_lang(app);
+    let icon = icon_for(state, BLINK_ON.load(Ordering::Relaxed));
+    // Шаблонный режим — только для Idle (фирменный знак, см. докблок файла);
+    // три активных состояния несут собственный цвет, и шаблон стёр бы его в
+    // сплошную заливку. Атомарный сеттер вместо `set_icon` + отдельного
+    // `set_icon_as_template`: раздельные вызовы на macOS рисуют кадр дважды
+    // и дают видимое мигание при каждой смене состояния.
+    let _ = tray.set_icon_with_as_template(Some(icon), state == IDLE);
     let _ = tray.set_tooltip(Some(match state {
+        // FATAL_MSG — ключ словаря (см. `status::DEAD`) либо, в редких
+        // случаях из `audio.rs`, произвольный технический текст. `i18n::t`
+        // безопасен для обоих: ключ переводится, текст без ключа возвращается
+        // как есть (см. докблок `i18n::t`).
         FATAL => FATAL_MSG
             .get()
-            .map_or_else(|| "Запись не работает".to_string(), |m| m.clone()),
-        RECORDING => "Идёт запись".to_string(),
-        ARMED => "Похоже, встреча — записать?".to_string(),
-        _ => "Ожидание встречи".to_string(),
+            .map_or_else(|| i18n::t("tray.tipBroken", &lang), |m| i18n::t(m, &lang)),
+        RECORDING => i18n::t("tray.tipRecording", &lang),
+        ARMED => i18n::t("tray.tipArmed", &lang),
+        _ => i18n::t("tray.tipIdle", &lang),
     }));
 
     if let Some(item) = TOGGLE_ITEM.get() {
         let _ = item.set_text(match state {
-            FATAL => "Запись недоступна",
-            RECORDING => "Остановить запись",
-            ARMED => "Записать эту встречу",
-            _ => "Начать запись",
+            FATAL => i18n::t("tray.unavailable", &lang),
+            RECORDING => i18n::t("tray.stop", &lang),
+            ARMED => i18n::t("tray.recordThis", &lang),
+            _ => i18n::t("tray.start", &lang),
         });
         // Пункт меню, который гарантированно ничего не сделает, не должен
         // выглядеть работающим: живой на вид GUI поверх мёртвой записи — это и
         // есть починенная болезнь, а не её симптом.
         let _ = item.set_enabled(state != FATAL);
     }
+}
+
+/// Перерисовать трей на текущем действующем языке, не меняя состояние.
+///
+/// Зовётся из `set_language`: смена языка не трогает `ICON_STATE`, но текст
+/// пункта меню и подсказка иконки должны обновиться немедленно, а не только
+/// на следующую смену состояния записи.
+pub fn refresh_texts(app: &AppHandle) {
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || repaint(&h));
 }
 
 /// Сообщить трею новое состояние. Можно звать откуда угодно — перерисовка сама
@@ -222,15 +268,28 @@ fn request_quit(app: &AppHandle, tx: &Sender<Ctl>) {
 /// Собрать трей. `tx` — тот же канал в аудио-поток, что и у остальных команд:
 /// трей ничего не решает сам.
 pub fn build(app: &AppHandle, tx: Sender<Ctl>) -> tauri::Result<()> {
-    let toggle = MenuItem::with_id(app, "toggle", "Начать запись", true, None::<&str>)?;
-    let folder = MenuItem::with_id(app, "folder", "Открыть папку записей", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+    // Действующий язык уже управляется (см. `setup()` в `main.rs` — он идёт
+    // ДО этого вызова ровно затем, чтобы меню собиралось сразу на нужном
+    // языке, а не на дефолтном с последующей правкой).
+    let lang = i18n::active_lang(app);
+    let toggle = MenuItem::with_id(app, "toggle", i18n::t("tray.start", &lang), true, None::<&str>)?;
+    let folder = MenuItem::with_id(
+        app,
+        "folder",
+        i18n::t("tray.folder", &lang),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, "quit", i18n::t("tray.quit", &lang), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&toggle, &folder, &quit])?;
     let _ = TOGGLE_ITEM.set(toggle.clone());
 
     TrayIconBuilder::with_id("main")
         .icon(icon_for(IDLE, true))
-        .tooltip("Ожидание встречи")
+        // Приложение всегда стартует в Idle (см. `ICON_STATE`), поэтому
+        // начальная иконка — фирменный знак, и он шаблонный (см. `repaint`).
+        .icon_as_template(true)
+        .tooltip(i18n::t("tray.tipIdle", &lang))
         .menu(&menu)
         // Меню — по правой кнопке (привычка Windows), левая открывает окно.
         .show_menu_on_left_click(false)

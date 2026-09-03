@@ -1,394 +1,134 @@
-# meeting-recorder
+<p align="center">
+  <img src="ui/assets/logo-white-red.svg#gh-dark-mode-only" width="96" alt="MeetRec">
+  <img src="ui/assets/logo-black-red.svg#gh-light-mode-only" width="96" alt="MeetRec">
+</p>
 
-Захват аудио со встреч на Windows и macOS: замечает начало звонка, предлагает записать, пишет две
-раздельные дорожки (микрофон и системный звук) — в домашний каталог `Recordings` на Windows,
-в `~/Recordings` на macOS.
+<h1 align="center">MeetRec</h1>
 
-Урезанный MVP «открытого аналога Granola». Кроме записи, в приложении есть встроенная
-транскрибация и диаризация через self-hosted шлюз ai-lab: пункт «Расшифровать встречу» в меню
-готовой записи, очередь на несколько записей сразу, метки говорящих в результате — подробнее в
-разделе «Транскрибация».
+<p align="center">
+  Records your calls from your own machine. No bot joins the meeting, and the files stay on your disk.
+</p>
 
-## Статус
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
+  <img src="https://img.shields.io/badge/macOS-14.4%2B-lightgrey" alt="macOS 14.4+">
+  <img src="https://img.shields.io/badge/Windows-10%2F11-lightgrey" alt="Windows 10/11">
+  <a href="README.ru.md">Русская версия</a>
+</p>
 
-**0.2.0 — редизайн интерфейса.** Экран переписан по дизайн-канону
-(`docs/2026-08-26-ui-design-system.md`) и утверждённому макету
-(`docs/mockups/layout-a.html`). Что изменилось для человека: строки статуса с лампочкой
-больше нет; настройки уехали на отдельный экран за шестерёнкой; вопрос «Записать встречу?»
-задаёт всплывашка поверх остальных окон, а не баннер в главном окне; список сгруппирован по
-дням и показывает длительность и признак готовой расшифровки; ошибки показываются у той
-записи, с которой случились, а не общей строкой внизу; появились состояния загрузки, пустого
-списка и очереди на расшифровку; в меню записи добавились «Открыть расшифровку» и «Отменить
-расшифровку», а «Показать файлы» открывает папку именно этой записи. Тексты переписаны с
-языка движка на человеческий. Цвета не трогались. `cargo test --workspace` — **307 зелёных**
-(175 в ядре и 132 в GUI-крейте), 0 упавших.
+---
 
-Реализован и работает: все задачи MVP-плана (Task 1–7, `docs/2026-07-17-meeting-recorder-mvp-plan.md`)
-закрыты — детектор, кольцевой буфер, стейт-машина, WAV-хранилище, захват mic+loopback,
-консольная сборка и Tauri-оболочка (трей, тост, окно со списком записей, глобальный хоткей).
+MeetRec notices when a call starts, offers to record it, and writes two separate tracks: your microphone and the system audio. Afterwards it can turn the recording into text with the speakers kept apart.
 
-Поверх этого закрыты все 13 задач плана «выбор микрофона, месячные папки и переименование»
-(`docs/2026-07-30-device-folders-rename-plan.md`) — выбор устройства микрофона с сохранением,
-месячные папки, переименование записей из окна, режим проверки микрофона с полосками уровня
-и пометка записей с перекосом громкости.
+<!-- TODO: заменить на настоящий скриншот или gif, когда будет чем снять -->
+<p align="center"><em>Screenshot goes here.</em></p>
 
-Порт на macOS (`docs/2026-08-10-macos-port-design.md`, `docs/2026-08-10-macos-port-plan.md`)
-доведён до рабочего состояния: системный звук идёт через Core Audio Process Tap, детект — по
-именам известных процессов плюс активность системного звука, записи ложатся в
-`~/Recordings/YYYY-MM/`, сборка даёт `.app` и `.dmg`. На железе проверено, что системная дорожка
-пишется корректно на трёх устройствах вывода — встроенных динамиках, AirPods и USB-гарнитуре;
-руками в GUI проверены иконка в трее, полоски уровня, жизнь приложения в трее после закрытия
-окна, диалоги разрешений и звучание готовых файлов. На упакованном `.app` проверено, что
-иконки в Dock нет, трей открывает окно и запись пишет обе дорожки. Отдельно проверен режим
-одного микрофона (отказ в разрешении на захват системного звука): баннер виден, окно
-открывается само, на диск ложится один `.mic.wav` без пары — включается переменной
-`MR_FORCE_NO_SYSTEM_AUDIO=1`, потому что `tccutil` разрешение обратно не отзывает.
-240 тестов зелёные, прогон нативно на macOS.
+## What it does
 
-Перепроверка порта на другой машине и другом мажоре системы — macOS 26.5, 18.08.2026.
-`npx tauri build` даёт `.app` и `.dmg`, `cargo test --workspace` — 240 зелёных,
-`npm run check-tap-lazy-bind` проходит. В собранном бандле CoreAudio подключён через
-`LC_LOAD_WEAK_DYLIB`: слабая линковка из фикса guard'а доехала до артефакта, а не осталась
-в исходниках. Приложение стартует, элемент строки меню регистрируется — видно через
-Accessibility API. Запись на этой машине не прогонялась: проверялись сборка, запуск и трей,
-но не звук на диске.
+- **Notices calls.** Zoom, Teams, Slack and Discord are recognised by their process. A small panel appears over the call window and asks whether to record.
+- **Keeps the first seconds.** Audio runs through a ring buffer, so recording starts a few seconds before you answer the question. Opening lines are not lost.
+- **Two separate tracks.** Your microphone and the system audio go into separate WAV files. You and the other side never overlap.
+- **Stays out of the way.** An icon in the menu bar, a global shortcut, monthly folders, renaming, per-device microphone choice.
 
-Та же проверка вскрыла три вещи, которых в документации не было:
+## What makes it different
 
-- **Второй запуск приложение не замечает.** Плагина `single-instance` в сборке нет, и `open -a`
-  на уже работающем приложении поднимает вторую копию вместо того, чтобы показать окно первой.
-  Наблюдалось живьём: процессы из `/Applications` и из `target/release/bundle/macos` работали
-  одновременно. Две копии разом держат микрофон и Process Tap и пишут в одну папку.
-- **Иконку трея может быть не видно, и тогда окно не открыть ничем.** В переполненной строке
-  меню элементы выдавливаются за левый край: на машине проверки соседние элементы стояли на
-  `x=7` и `x=-1` при ширине экрана 1512 точек, а сам элемент приложения переезжал между
-  строками меню двух мониторов, меняя координату на 150 точек. Пункта «открыть окно» в меню
-  трея нет, а синтетический клик через Accessibility API окно не поднимает — нужен настоящий
-  левый клик по иконке. Хоткей `Ctrl+Shift+R` в этом состоянии работает, записывать он
-  позволяет и без иконки.
-- **`bundle_dmg.sh` спотыкается о том от прерванного прогона.** Один раз сборка `.dmg` упала,
-  и в системе при этом висел смонтированный `/Volumes/dmg.*` с образом
-  `rw.*.meeting-recorder_0.1.0_aarch64.dmg` из `bundle/macos/`. После `hdiutil detach` сборка
-  прошла без единой правки. Причинно-следственная связь не доказана: повторно падение не
-  воспроизводилось, так что это зацепка для следующего раза, а не диагноз.
+Most meeting recorders put a bot into the call and keep the files on their servers. MeetRec takes the audio from your own machine and writes it to your own disk. Nobody in the call sees another participant, and no recording leaves the computer unless you ask for a transcript.
 
-Windows-часть портом затронута — не переписана, но и не оставлена нетронутой: семь правок
-лежат в общем коде и общем конфиге, без `cfg`. На момент порта Windows ни разу не собирался
-— тулчейна на машине, где он делался, не было; с тех пор ветка `docs/transcription-robustness`
-завела `.github/workflows/check.yml` — он гоняет `cargo test --workspace` и сборку без бандла
-на каждый push и pull request (не только на тег `v*`, как `release.yml`, — дешевле поймать
-несобираемость на PR, чем на релизе), и Windows в нём собирался и проходил тесты зелёным шесть
-раз. Список ниже по-прежнему стоит перепроверять руками при следующей Windows-сессии; тестов
-теперь около **330** (было 240 на момент порта):
+## Install
 
-- `src/app.rs`, `Action::StartFileWrite` — ручной старт больше не дописывает в начало файла
-  звук, звучавший ДО нажатия (`discard_pending_audio`). На Windows это меняет поведение:
-  ручной старт после сессии «Проверить» теперь выбрасывает накопленное в буферах захвата,
-  а не пишет его в файл.
-- `src-tauri/src/status.rs`, `status::fatal` — фатальный отказ на старте теперь ещё и
-  показывает окно и даёт ему фокус (раньше — только `emit`, трей и тост). На Windows тоже.
-- `src-tauri/src/audio.rs` — память детекта между опросами переехала из переменных цикла в
-  `Detect::step`. Гейт по звуку остался только на macOS, на Windows решение по-прежнему
-  принимает один `poll_to_event`, но код авто-детекта общий — прогнать детект начала и конца
-  звонка стоит.
-- `src-tauri/src/main.rs`, `open_folder` — текст ошибки стал общим («Finder/проводник»);
-  `src-tauri/tauri.conf.json` — конфиг общий на обе платформы, в `bundle.targets` рядом с
-  `nsis` появились `app` и `dmg`, в `bundle.icon` — `icon.icns`.
-- `src/main.rs` — консольная сборка сменила `fn main() -> Result<…>` на `-> ExitCode` с
-  `eprintln!("ошибка: {e}")`. На Windows это меняет вывод при ошибке: было `Error: {Debug}`
-  от рантайма, стало `ошибка: {Display}`. Код возврата прежний (1).
-- `src/app.rs`, `open_sinks` — появилась ветка «системной дорожки нет вовсе»
-  (`AudioIo::has_system`). На Windows она недостижима: дефолт трейта — `true`, а `CpalAudio`
-  его не переопределяет, потому что WASAPI loopback разрешения не требует и отказывать в нём
-  некому. Проверять надо обратное — что **обе** дорожки по-прежнему создаются и пишутся;
-  ошибка здесь выглядела бы как пропавший `system.wav`.
-- `ui/index.html`, `ui/main.js` — добавлен баннер `#nosysaudio` и кнопка «Настройки».
-  Разметка общая на обе платформы, но на Windows баннер не показывается никогда: его
-  зажигает только `status::no_system_audio`, а он зовётся из macOS-ветки `audio::run`.
-  Проверять надо, что в окне ничего лишнего не появилось и не разъехалась вёрстка.
-  Команда `open_privacy_settings` на Windows — заглушка, возвращает `Ok(())`: кнопки,
-  которая её зовёт, там не бывает, а `invoke` из общего `main.js` не должен падать
-  в ненайденную команду.
+Download the latest build from [Releases](../../releases).
 
-## Релизы
+**macOS** — `MeetRec_x.y.z_aarch64.dmg` for Apple Silicon, `MeetRec_x.y.z_x64.dmg` for Intel.
 
-Собирать из исходников не обязательно — на каждый тег `vX.Y.Z` GitHub Actions
-(`.github/workflows/release.yml`) сам собирает Windows и обе архитектуры macOS и выкладывает их
-в Releases репозитория: <https://github.com/mmaximov97/meeting-recorder/releases>.
+The app is not signed with an Apple developer certificate, so the first launch is blocked. Right-click the app and choose Open, or run:
 
-Репозиторий приватный, поэтому релизы видят только коллабораторы — доступ тот же, что и к коду,
-отдельно открывать ничего не нужно.
-
-Что скачивать:
-
-| Платформа | Файл | Куда идёт |
-|---|---|---|
-| Windows, с установкой | `meeting-recorder_X.Y.Z_x64-setup.exe` | обычный NSIS-инсталлятор, запустить и пройти мастер |
-| Windows, portable | `meeting-recorder_vX.Y.Z_x64-portable.exe` | без установки — положить куда угодно и запустить; ничего не пишет в реестр и Program Files |
-| Mac на Apple Silicon (M1 и новее) | `meeting-recorder_X.Y.Z_aarch64.dmg` | открыть `.dmg`, перетащить в Applications |
-| Mac на Intel | `meeting-recorder_X.Y.Z_x64.dmg` | то же самое |
-
-Portable-версии для macOS нет: неподписанный голый бинарь Gatekeeper блокирует так же, как
-`.app`, но без диалога «Открыть», которым блокировку обходят — `.dmg` реально проще.
-
-Не знаете, какой у вас Mac — `О этом Mac` (**⌘** в левом верхнем углу экрана) → строка «Чип»:
-`Apple M…` значит Apple Silicon, `Intel` значит Intel.
-
-Файлы `*.app.tar.gz` рядом с `.dmg` — не для ручной установки, задел под автообновление
-(Tauri updater), если оно когда-нибудь понадобится; сейчас не используются.
-
-**macOS спросит про Gatekeeper при первом запуске.** Сборка не подписана Apple Developer ID
-(`signingIdentity: "-"` — ad-hoc, см. раздел «Сборка (на macOS)»), поэтому вместо обычного
-двойного клика — правый клик по приложению в Applications → **Открыть** → подтвердить в
-диалоге. Через Finder-двойной-клик система откажет молча. Если и это не помогает:
-
-```bash
-xattr -cr /Applications/meeting-recorder.app
+```sh
+xattr -cr /Applications/MeetRec.app
 ```
 
-Дальше — как в разделе «Запуск» ниже: разрешения на микрофон и системный звук, трей, хоткей.
+**Windows** — `MeetRec_x.y.z_x64-setup.exe` to install, or `MeetRec_vx.y.z_x64-portable.exe` to run without installing.
 
-### Выпустить новую версию
+## Requirements
 
-Для мейнтейнера — сначала поднять `version` в ДВУХ местах (иначе имена файлов в Releases не
-совпадут с тегом — ровно так один раз и вышло: релиз назывался `v0.1.1`, а внутри лежал
-`meeting-recorder_0.1.0_x64-setup.exe`, потому что `tauri` берёт версию для имени файла из
-конфига, а не из git-тега):
+- **macOS 14.4 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.
+- **Windows 10 or 11.** System audio goes through WASAPI loopback.
 
-- `src-tauri/tauri.conf.json` → `"version"`
-- `package.json` → `"version"`
+## Permissions
 
-Затем — тег с тем же номером:
+On macOS the system asks twice: once for the microphone, once for screen and system audio recording. Both are needed — without the second one, only your own voice is recorded and calls are not detected at all, because MeetRec recognises a call by the system audio.
 
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
+The permission is tied to the exact binary. After you replace the app with a new build, macOS may ask again.
 
-Дальше всё делает workflow: три параллельные сборки (~10–15 минут), публикация в Releases
-сразу после того, как они пройдут — черновиков нет, `releaseDraft: false`.
+On Windows no separate permission is required.
 
-Если упадёт одна платформа — `workflow_dispatch` в вкладке Actions перезапускает всё без
-нового тега.
-
-## Транскрибация
-
-Настраивается один раз на экране настроек, раздел «Расшифровка встреч» — два поля, адрес сервера
-и ключ доступа; сохраняются по потере фокуса поля (Tab/клик мимо), без отдельной кнопки, под
-полями появляется «✓ Сохранено». Ключ и scope `stt` выдаются
-через ai-lab (скилл `ailab-new-project`) — свой ключ на человека, а не общий на всех, чтобы
-доступ можно было отозвать отдельно.
-
-У записи с **обеими** дорожками (mic + system) в меню «⋯» есть пункт «Расшифровать встречу».
-Клик ставит запись в очередь — если сейчас ничего не обрабатывается, начнётся сразу, иначе
-под названием встанет «В очереди №N» и запись подождёт своей очереди; параллельно
-обрабатывается всегда ровно одна запись, потому что запросов на GPU шлюза не резиновое.
-Стадии по ходу дела — «Отправляю…» → «Расшифровываю…» → «Собираю текст…», под ними ползёт полоска.
-Передумали — «Отменить расшифровку» в том же меню: запись из очереди убирается, идущая
-останавливается, строка молча возвращается к обычному виду. Красного «не получилось» на своё
-же действие не показывается.
-
-Не получилось — карточка «Расшифровка не получилась» у самой записи, с кнопкой «Попробовать
-снова». Результат — `<запись>.transcript/`, `.md` с таймкодами и метками говорящих и `.txt`
-сплошным текстом; у расшифрованной записи в меню первым пунктом встаёт «Открыть расшифровку»,
-а «Расшифровать встречу» сменяется на «Расшифровать заново». В списке появляется пометка
-«расшифровка готова» — рядом с весом файла, то есть по наведению на строку или по фокусу
-с клавиатуры.
-
-Диаризация настоящая: шлюз реально различает голоса внутри каждой дорожки (`diarize=true` в
-запросе), и если на дорожке `system` больше одного собеседника, они получают разные пометки —
-«Собеседники (1)», «Собеседники (2)» — по порядку появления в разговоре. Один голос на
-дорожке номер не получает — «Собеседники» без уточнения, как и раньше.
-
-## Запуск
-
-На Windows приложение запускается **без терминала** — двойным кликом по exe или ярлыком
-«Запись встреч» на рабочем столе:
+## Where the files go
 
 ```
-target\release\meeting-recorder-gui.exe
+~/Recordings/2026-09/
+  2026-09-02_14-30_zoom.mic.wav       your microphone
+  2026-09-02_14-30_zoom.system.wav    everyone else
+  2026-09-02_14-30_zoom.transcript/   text, if you asked for it
 ```
 
-Не запускать GUI из WSL-терминала: при закрытии терминала WSL убивает всё дерево
-Windows-процессов вместе с приложением.
+On Windows the same tree lives in `%USERPROFILE%\Recordings\`.
 
-На macOS запускается собранный бандл:
+## Transcription and privacy
 
-```
-target/release/bundle/macos/meeting-recorder.app
-```
+Recording is entirely local. Transcription is not, and this is worth being precise about.
 
-Первый запуск на macOS спросит два разных системных разрешения — на микрофон и на захват
-системного звука; это разные категории, и без обоих запись будет неполной. Подпись ad-hoc,
-стабильного Team ID у неё нет, TCC привязывает разрешение к хешу бинаря — после пересборки
-разрешения могут спроситься заново.
+MeetRec does not ship with a transcription server. You put the address and the access key of your own gateway into settings, and the audio files are uploaded there, one track at a time, over HTTPS. If you leave those fields empty, nothing is ever sent anywhere and the app is a plain local recorder.
 
-Окно — два экрана: список записей и настройки, между ними ходят шестерёнкой в правом
-верхнем углу и стрелкой «назад». Внешний вид описан в дизайн-каноне
-(`docs/2026-08-26-ui-design-system.md`), эталонный экран — `docs/mockups/layout-a.html`.
+If you don't have a gateway, [selfhost-ai-lab](https://github.com/mmaximov97/selfhost-ai-lab) is one you can run on your own hardware. It speaks the API MeetRec expects — `POST /v1/audio/transcriptions/async` to submit a track, `GET /v1/jobs/:id` to poll it — and setting it up is documented there. Any server exposing the same two endpoints will do.
 
-**Экран записей:**
+A local mode, where the audio is transcribed on your own machine and nothing leaves it, is in progress.
 
-- иконка в трее → окно со списком записей. Строки статуса с лампочкой в окне нет:
-  в покое сообщать нечего, а взвод и идущая запись видны сами по себе;
-- под шапкой закреплённая зона — она не уезжает за прокрутку. В покое там кнопка
-  **«Начать запись»**, во время записи — панель с пульсирующей точкой, таймером,
-  кнопкой **«Остановить»** и двумя узкими метрами уровня (микрофон и звук системы).
-  Прокручивается только список;
-- глобальный хоткей **Ctrl+Shift+R** делает то же, что кнопка; на macOS это тоже Ctrl,
-  а не Cmd, — сознательно, чтобы не ломать моторную память;
-- при детекте начала звонка приложение само предлагает запись — **отдельной всплывашкой
-  у верхнего правого угла экрана**, поверх остальных окон, включая полноэкранные. Главное
-  окно при этом не разворачивается и клавиатуру не забирает: вопрос приходит ровно тогда,
-  когда человек заговорил в звонке. В плашке одна кнопка «Записать»; отказ — смахивание
-  вправо (два пальца по трекпаду или перетаскивание мышью), а пока курсор на плашке, отсчёт
-  стоит. Через семь секунд плашка уезжает сама — это **не** ответ: взвод остаётся;
-- открыли окно, пока вопрос висит, — в закреплённой зоне стоит строка «Похоже, встреча
-  в Zoom» и кнопка **«Не записывать»**, а «да» говорит обычная кнопка записи под ней (во
-  взводе она подтверждает вопрос, не теряя предзапись). Самого вопроса в окне нет: он
-  задаётся в одном месте, а окно показывает состояние. Иконка в трее в это время мигает;
-- на macOS детект знает только `zoom.us`, `Microsoft Teams`, `Slack` и `Discord` по имени процесса
-  и требует, чтобы при этом звучал системный звук. Браузеры в список не входят намеренно:
-  вкладку Google Meet изнутри Chrome не отличить от любой другой — такая встреча сама
-  не задетектится, кнопка и хоткей для неё работают как обычно;
-- список сгруппирован по дням: «Сегодня», «Вчера», дальше датой. В строке — значок
-  источника (логотип Zoom, Teams или Slack, иначе микрофон), название, под ним
-  длительность, справа время встречи. По наведению **и по фокусу с клавиатуры** время
-  сменяется кнопкой **«⋯»**, а к длительности дописывается вес файла;
-- меню «⋯» — состав зависит от состояния записи, первым пунктом стоит то, зачем его обычно
-  открывают: у расшифрованной **«Открыть расшифровку»**, у обычной **«Переименовать»**
-  (меняет хвост имени — дата и время зафиксированы, — переименовывая обе дорожки и папку
-  транскрипта разом) и **«Расшифровать встречу»**. Под разделителем — то, что отменяет или
-  переделывает: **«Отменить расшифровку»**, **«Расшифровать заново»**, **«Показать файлы»**
-  (открывает папку именно этой записи). Внизу меню — настоящее имя файла, а во время
-  расшифровки вместо него строка «Расшифровка уже идёт»;
-- то, из-за чего запись получилась хуже, показывается карточкой с жёлтой обводкой прямо
-  в списке и **не прячется под наведение**: «Собеседников не слышно», «Вас не слышно»,
-  «Вас слышно заметно тише», «Расшифровка не получилась» с кнопкой «Попробовать снова»;
-- файлы: две WAV-дорожки в домашнем каталоге `Recordings\YYYY-MM\` на Windows и в
-  `~/Recordings/YYYY-MM/` на macOS, папка месяца создаётся автоматически.
+## Shortcuts
 
-**Экран настроек** (шестерёнка):
+`Ctrl+Shift+R` starts and stops recording. It works with the window closed.
 
-- выпадашка **«Микрофон»** — выбор устройства записи; первый пункт «Как выбрано
-  в системе». Выбор сохраняется между запусками, а если устройство недоступно,
-  запись идёт с того, что выбран в системе, и на экране записей висит
-  предупреждение «Микрофон «X» недоступен»;
-- кнопка **«Проверить»** — открывает микрофон и показывает уровень по обеим
-  дорожкам, чтобы убедиться, что пишется тот микрофон, в который говорят;
-  выключается сама через минуту;
-- метры уровня **«Вы»** и **«Система»** — ряд вертикальных штрихов, заливаются слева
-  направо; зелёная зона до −18 дБ, жёлтая до −6, дальше красная; тонкая светлая
-  черта — пиковый маркер, он держит недавний максимум. Числовой шкалы на экране нет: вместо
-  неё подсказка «полоска должна доходить примерно до конца зелёного и не залезать
-  в красное». Именно до конца зелёного: середина полоски — это −30 дБ, то есть шёпот;
-- **«Адрес сервера»** и **«Ключ доступа»** для расшифровки — сохраняются по потере фокуса,
-  под полями появляется «✓ Сохранено».
+## Build from source
 
-Весь экран проходится с клавиатуры, включая настройки и меню «⋯»: то, что появляется по
-наведению, появляется и по фокусу. Единственное исключение — всплывашка: её окно намеренно
-не берёт фокус, чтобы клавиатура осталась у звонилки, поэтому отвечать с клавиатуры надо
-в главном окне.
+Requires Rust and Node.
 
-Чего в интерфейсе пока нет: **таймер записи** считается в окне, а не приходит из бэкенда, —
-если окно открыли из трея посреди встречи, числа не будет: момента начала записи в снимке
-состояния нет, а выдумывать его нельзя. У **Discord** нет своего значка: во всплывашке он
-показан буквой на фирменном цвете, в списке — значком микрофона. Остальные открытые решения
-собраны в разделе 6 дизайн-канона.
-
-## Сборка (на Windows, из WSL)
-
-Только Windows-тулчейном через interop — обычный `cargo` соберёт Linux-бинарь:
-
-```bash
-cargo.exe build --workspace            # debug
-cargo.exe build --release -p meeting-recorder-gui
-cargo.exe test --workspace
-```
-
-`meeting-recorder-cli.exe` — консольная отладочная сборка ядра без GUI (Task 6),
-не мусор, не удалять.
-
-## Сборка (на macOS)
-
-Нативно, без WSL-обвязки — хватает Xcode command line tools и Rust-тулчейна:
-
-```bash
-cargo build --workspace            # debug
+```sh
+git clone https://github.com/mmaximov97/meeting-recorder
+cd meeting-recorder
 cargo test --workspace
-
-npm install                        # @tauri-apps/cli из package.json
-npx tauri build                    # релизные .app и .dmg
+npm install
+npx tauri build
 ```
 
-Именно `npx tauri`, а не `cargo tauri`: CLI живёт в `package.json`, отдельной подкомандой
-`cargo` здесь не установлен. Артефакты — в `target/release/bundle/` (`macos/*.app`,
-`dmg/*.dmg`); `target/` у воркспейса один, в корне репозитория, а не внутри `src-tauri/`.
-Подпись ad-hoc: `.dmg` не подписан Developer ID и не нотаризован, на чужой машине его встретит
-Gatekeeper.
+Use `npx tauri build`, not `cargo tauri build`.
 
-Минимальная версия — macOS 14.4: без Core Audio Process Tap API системную дорожку писать
-нечем. На более старой приложение откажется запускаться с понятным сообщением, а не тихо
-потеряет дорожку собеседников. Отказ проверен на живой macOS 14.3 (2026-08-17): приложение
-доходит до `main` и говорит «нужна macOS 14.4 или новее — используется Core Audio Process Tap
-API (система сообщает 14.3)». На 13 и ниже путь по-прежнему проверен только тестами — машины
-нет.
+Every push runs the test suite and a build on both macOS and Windows. Tagging `vX.Y.Z` builds and publishes the installers.
 
-Держится этот отказ на слабой линковке CoreAudio: `-Wl,-weak_framework,CoreAudio` в обоих
-`build.rs` (корневом и `src-tauri/`). Без флага отсутствующий символ тапа убивает процесс в
-dyld до `main`, и объяснения никто не видит. Флаг стерегут два юнит-теста —
-`корневой_крейт_линкует_coreaudio_слабо` (`src/lib.rs`) и `gui_крейт_линкует_coreaudio_слабо`
-(`src-tauri/src/main.rs`); проверка на собранном бинаре — `npm run check-tap-lazy-bind`.
-Рассуждение и замеры целиком — в докблоке `MIN_MACOS` (`src/capture/macos.rs`).
+## Contributing
 
-Прежняя опора — ленивое связывание при deployment target 11.x — оказалась зависящей от версии
-линкера: на `ld-1053.12` (CLT 15.3) связывание жадное уже при 11.0. Правкой
-`minimumSystemVersion` её не вернуть, не пытайтесь.
+Issues and pull requests are welcome. Two things worth knowing before you open one:
 
-Два места в `src-tauri/tauri.conf.json`, которые выглядят как недосмотр, но правиться не должны:
+- The code and its comments are written in Russian. Function and variable names too. Pull requests in either language are fine.
+- The audio path is covered by tests, and they are expected to stay green. Run `cargo test --workspace` before you push.
 
-- `bundle.macOS.minimumSystemVersion` — `11.0`, хотя приложению нужна 14.4. Это
-  `LSMinimumSystemVersion`, то есть гейт Finder'а: при 14.4 система откажет своими словами
-  вместо наших, и пользователь не узнает, чего именно не хватает. Значение стережёт юнит-тест
-  `минимальная_версия_macos_в_бандле_осталась_11_0` (`src-tauri/src/main.rs`).
-- `bundle.macOS.hardenedRuntime` — `false` намеренно. С включённым hardened runtime и без файла
-  entitlements macOS закрывает доступ к микрофону молча: ни диалога, ни ошибки. Цена решения —
-  нотаризация в таком виде невозможна; она в объём работ и не входила.
+## Authors
 
-## Документация
+<!-- TODO: подставить ссылку на Cypher Products, когда будет сайт или страница -->
+Built by [Cypher Products](#).
 
-Дизайн и обоснование решений живут в Obsidian-vault, не здесь:
+- Mikhail Maksimov — development — [github.com/mmaximov97](https://github.com/mmaximov97)
+- Anna Dorogova — design — [adorogova.com](https://adorogova.com) · [github.com/blinbirka](https://github.com/blinbirka)
 
-- Спека MVP — в приватном Obsidian-vault автора, вне этого репозитория
-- Ресёрч, на который она опирается, — там же (MOC + 5 заметок)
-- План реализации MVP: `docs/2026-07-17-meeting-recorder-mvp-plan.md`
-- Спека «выбор микрофона, месячные папки, переименование»: `docs/2026-07-30-device-folders-rename-design.md`
-- План реализации этой доработки: `docs/2026-07-30-device-folders-rename-plan.md`
-- Спека порта на macOS: `docs/2026-08-10-macos-port-design.md`
-- План порта на macOS: `docs/2026-08-10-macos-port-plan.md`
-- Дизайн-канон интерфейса: `docs/2026-08-26-ui-design-system.md` — токены, компоненты,
-  правила и словарь. Эталонный экран рядом: `docs/mockups/layout-a.html`, открывается
-  в браузере
-- План редизайна: `docs/2026-08-26-ui-redesign-plan.md`, задачи бэкенду под него:
-  `docs/2026-08-26-ui-redesign-backend-tasks.md`
+## Support
 
-## Стек
+MeetRec is free and always will be. If it saved you an hour, you can buy the two of us a coffee.
 
-Rust + Tauri, две платформы — Windows и macOS. Платформенный код живёт за трейтами
-`MeetingDetector` и `AudioSource`, всё остальное общее.
+**USDT, TRON network (TRC-20)**
 
-- захват микрофона: `cpal` на обеих платформах
-- захват системного звука: WASAPI loopback (`cpal`) на Windows, Core Audio Process Tap
-  (`src/capture/macos.rs`) на macOS — отсюда требование macOS 14.4
-- детект встречи: WASAPI audio sessions через `windows-rs` на Windows; на macOS — `sysinfo`
-  по именам известных звонилок (`zoom.us`, `Microsoft Teams`, `Slack`, `Discord`) в связке
-  с проверкой, что системный звук действительно звучит дольше пяти секунд
-- UI: Tauri, два окна — главное 460×640 (`ui/index.html`, `ui/main.js`) и всплывашка
-  «Записать встречу?» (`ui/ask.html`, `ui/ask.js`), плюс трей и плагин `global-shortcut`.
-  Ванильные HTML/CSS/JS без сборки и npm-пакетов, иконки инлайновым SVG
+```
+TFzpPkaSRQXLCEg9ZYf4MiwHNbzD4bYCgE
+```
 
-## Важно
+Send only on the TRON network. A transfer on any other network cannot be recovered.
 
-Аудио пишется **вне** этого репозитория и вне vault — vault синкается git'ом с автокоммитами,
-~150 МБ на встречу туда попасть не должны. По той же причине на macOS корень записей —
-`~/Recordings`, а не `~/Documents`: «Документы» по умолчанию уезжают в iCloud Drive.
+## License
+
+MIT. See [LICENSE](LICENSE).

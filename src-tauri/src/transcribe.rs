@@ -1,12 +1,33 @@
 //! HTTP-клиент шлюза транскрипции: submit одной дорожки, поллинг задачи,
-//! слияние двух дорожек по времени. Контракт API — тот же, что уже проверен
-//! скиллом `ailab-transcribe` (`POST /v1/audio/transcriptions/async` +
+//! слияние двух дорожек по времени. Контракт API — асинхронное расширение
+//! OpenAI-совместимого распознавания (`POST /v1/audio/transcriptions/async` +
 //! `GET /v1/jobs/:id`), здесь не изобретается заново.
 
+use crate::local;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+
+/// Где расшифровывать — действующее значение `Config::transcribe_mode`
+/// (`config.rs`). Разбор строки в это значение живёт здесь, а не в
+/// `config.rs`, тем же способом, каким разбор языка живёт в
+/// `i18n::effective_lang`, а не в `config.rs` (см. докблок поля `language`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Server,
+    Local,
+}
+
+/// `Some("local")` — на этом компьютере. Всё остальное, включая `None`
+/// (поля ещё не было в конфиге, когда он появился на диске) — сервер, как
+/// было всегда.
+pub fn effective_mode(cfg_mode: Option<&str>) -> Mode {
+    match cfg_mode {
+        Some("local") => Mode::Local,
+        _ => Mode::Server,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Label {
@@ -63,6 +84,12 @@ pub enum TranscribeError {
     /// задачи на шлюзе не имеет отношения к вводу ключа.
     #[error("шлюз отклонил отмену задачи ({0})")]
     CancelRejected(String),
+    /// Локальный режим: дорожку обслуживает честная заглушка из `local.rs`.
+    /// `{0}` — её `Display`, буквально ключ словаря (`local.notWired`), а не
+    /// готовый текст: интерфейс переводит его сам, тем же способом, что и
+    /// `status::DEAD` (см. докблок `local::LocalError`).
+    #[error("{0}")]
+    Local(#[from] local::LocalError),
 }
 
 /// Шаг опроса задачи. Прежний, десять секунд: на минутных масштабах работы
@@ -89,7 +116,7 @@ pub const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Абсолютный предел ожидания одной дорожки, по настенным часам.
 ///
 /// Три часа, а не два: у шлюза лимит 2 часа НА ЗАПРОС
-/// (`ai-lab/src/clients/whisper-client.ts:23`), а дорожка с диаризацией — это
+/// (лимит запроса на шлюзе), а дорожка с диаризацией — это
 /// два прохода по файлу плюс возможная загрузка модели. Принцип: клиент не
 /// сдаётся раньше сервера. Если задача действительно зависла, её похоронит
 /// таймаут шлюза, и мы увидим `failed` с внятной причиной вместо своего
@@ -391,6 +418,37 @@ pub async fn poll_until_done(
     }
 
     result
+}
+
+/// Одна дорожка целиком, с разводкой по режиму — единственное место в
+/// приложении, которое решает «локально или на сервере» на уровне вызова.
+///
+/// `Server` — ровно то, что раньше было зашито прямо в `main.rs::дорожка_целиком`:
+/// `submit`, затем `on_job(job_id)` (кладёт задачу в очередь отмены и шлёт
+/// прогресс «Опрашиваю…»), затем `poll_until_done`. Ни порядок вызовов, ни
+/// сами функции здесь не поменялись — они переехали на одну функцию выше, но
+/// делают буквально то же самое.
+///
+/// `Local` игнорирует `client`/`url`/`key`/`on_job` целиком (замыкание не
+/// вызывается вовсе — заводить задачу в очереди отмены здесь нечего) и идёт
+/// прямиком в честную заглушку `local::transcribe_local`.
+pub async fn transcribe_track(
+    mode: Mode,
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    path: &Path,
+    label: Label,
+    on_job: impl FnOnce(String),
+) -> Result<TrackResult, TranscribeError> {
+    match mode {
+        Mode::Local => local::transcribe_local(path, label).await.map_err(TranscribeError::from),
+        Mode::Server => {
+            let job_id = submit(client, url, key, path).await?;
+            on_job(job_id.clone());
+            poll_until_done(client, url, key, &job_id, label).await
+        }
+    }
 }
 
 /// Погасить задачу на шлюзе.
@@ -1059,5 +1117,41 @@ mod tests {
             Ok(r) => assert_eq!(r.text, "готово"),
             Err(e) => panic!("ожидали Ok(\"готово\"), получили ошибку: {e}"),
         }
+    }
+
+    #[test]
+    fn отсутствие_поля_и_незнакомое_значение_дают_сервер() {
+        assert_eq!(effective_mode(None), Mode::Server);
+        assert_eq!(effective_mode(Some("что-то незнакомое")), Mode::Server);
+        assert_eq!(effective_mode(Some("server")), Mode::Server);
+    }
+
+    #[test]
+    fn local_разбирается_явно() {
+        assert_eq!(effective_mode(Some("local")), Mode::Local);
+    }
+
+    /// Гвоздь задачи «развилка выбирает правильную ветку»: в режиме `Local`
+    /// `transcribe_track` не трогает сеть вовсе (замыкание `on_job` не
+    /// вызывается — если бы дошло до `submit`, оно бы сработало) и отдаёт
+    /// ровно ключ заглушки, а не какую-то сетевую ошибку от фиктивных
+    /// `url`/`key`.
+    #[tokio::test]
+    async fn развилка_в_local_идёт_в_заглушку_а_не_в_сеть() {
+        let client = reqwest::Client::new();
+        let err = transcribe_track(
+            Mode::Local,
+            &client,
+            "http://127.0.0.1:1", // заведомо нерабочий адрес — если бы развилка
+            // промахнулась мимо Local, тест упал бы с сетевой ошибкой, а не с
+            // "local.notWired"
+            "key",
+            Path::new("/dev/null"),
+            Label::Owner,
+            |_| panic!("в Local-режиме job на шлюзе не заводится"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "local.notWired");
     }
 }

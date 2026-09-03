@@ -22,6 +22,30 @@ pub struct Config {
     /// `/v1/...`, его дописывает клиент транскрипции.
     pub stt_gateway_url: Option<String>,
     pub stt_api_key: Option<String>,
+    /// `"system" | "ru" | "en"`. Отсутствие поля (старый конфиг) и `None` —
+    /// то же самое, что `"system"`: язык берётся из ОС. Разбор значения в
+    /// действующий язык живёт в `i18n::effective_lang`, а не здесь — этот
+    /// файл ничего не знает про словарь и локаль системы.
+    pub language: Option<String>,
+    /// `"system" | "light" | "dark"`. Отсутствие поля (старый конфиг) и
+    /// `None` — то же самое, что `"system"`: тема берётся из ОС через
+    /// `prefers-color-scheme`. Сам файл ничего не знает про CSS и `data-theme` —
+    /// это решает фронтенд при чтении конфига.
+    pub theme: Option<String>,
+    /// Через сколько дней автоочистка отправляет звук записи в корзину,
+    /// оставляя расшифровку на месте. Отсутствие поля (старый конфиг) и
+    /// `None` — «никогда»: приложение, которое само стирает чужие записи по
+    /// умолчанию, — плохой сюрприз, включать чистку должен человек, а не
+    /// обновление. Разбор числа в решение «пора/не пора» живёт в
+    /// `retention.rs`, а не здесь — этот файл ничего не знает про даты
+    /// записей и файлы на диске.
+    pub audio_retention_days: Option<u32>,
+    /// `"server" | "local"`. Отсутствие поля (старый конфиг) и `None` — то
+    /// же самое, что `"server"`: расшифровка идёт на шлюзе, как и раньше.
+    /// Разбор значения в действующий режим живёт в `transcribe::effective_mode`,
+    /// а не здесь — этот файл ничего не знает про сеть, очередь расшифровки
+    /// и локальный движок.
+    pub transcribe_mode: Option<String>,
 }
 
 impl Config {
@@ -81,6 +105,10 @@ mod tests {
             mic_device_name: Some("Headset (Boss Bose)".into()),
             stt_gateway_url: None,
             stt_api_key: None,
+            language: None,
+            theme: None,
+            audio_retention_days: None,
+            transcribe_mode: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
     }
@@ -94,6 +122,10 @@ mod tests {
             mic_device_name: Some("Headset (Boss Bose)".into()),
             stt_gateway_url: None,
             stt_api_key: None,
+            language: None,
+            theme: None,
+            audio_retention_days: None,
+            transcribe_mode: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Default);
     }
@@ -117,7 +149,11 @@ mod tests {
             mic_device_id: None,
             mic_device_name: None,
             stt_gateway_url: Some("http://localhost:8080".to_string()),
-            stt_api_key: Some("ailab_xxx".to_string()),
+            stt_api_key: Some("test_key_xxx".to_string()),
+            language: None,
+            theme: None,
+            audio_retention_days: None,
+            transcribe_mode: None,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(Config::from_str(&json), c);
@@ -137,10 +173,97 @@ mod tests {
             mic_device_name: None,
             stt_gateway_url: Some("http://localhost:8080".to_string()),
             stt_api_key: Some("secret".to_string()),
+            language: None,
+            theme: None,
+            audio_retention_days: None,
+            transcribe_mode: None,
         };
         cfg.mic_device_id = Some("{new-id}".to_string());
         cfg.mic_device_name = Some("Новый микрофон".to_string());
         assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://localhost:8080"));
         assert_eq!(cfg.stt_api_key.as_deref(), Some("secret"));
+    }
+
+    /// Конфиг, записанный до появления языка, обязан читаться как есть —
+    /// это и есть «системный дефолт», а не ошибка разбора.
+    #[test]
+    fn старый_конфиг_без_языка_даёт_none() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.language, None);
+    }
+
+    /// Форма — как у настоящего `config.json`, записанного до появления
+    /// поля `language`; значения выдуманы намеренно. Регрессия здесь
+    /// означала бы, что обновление стирает настройки у всех, кто уже
+    /// пользуется приложением.
+    ///
+    /// Настоящие адрес шлюза и ключ в тесты не попадают: репозиторий
+    /// открытый, и любой пример отсюда виден всем.
+    #[test]
+    fn старый_конфиг_без_языка_читается() {
+        let raw = r#"{
+  "mic_device_id": "coreaudio:BuiltInMicrophoneDevice",
+  "mic_device_name": "MacBook Pro Microphone",
+  "stt_gateway_url": "https://stt.example.com",
+  "stt_api_key": "test_key_not_a_real_one"
+}"#;
+        let c = Config::from_str(raw);
+        assert_eq!(c.mic_device_id.as_deref(), Some("coreaudio:BuiltInMicrophoneDevice"));
+        assert_eq!(c.language, None);
+    }
+
+    #[test]
+    fn язык_переживает_сериализацию() {
+        let c = Config { language: Some("en".to_string()), ..Config::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    /// Конфиг, записанный до появления темы, обязан читаться как есть — то
+    /// же требование, что и для языка выше.
+    #[test]
+    fn старый_конфиг_без_темы_даёт_none() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.theme, None);
+    }
+
+    #[test]
+    fn тема_переживает_сериализацию() {
+        let c = Config { theme: Some("dark".to_string()), ..Config::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    /// Конфиг, записанный до появления автоочистки, обязан читаться как
+    /// «никогда» — то же требование, что и для языка и темы выше. Значение
+    /// по умолчанию здесь особенно важно: приложение, которое само стирает
+    /// звук по умолчанию, — плохой сюрприз, включать чистку должен человек.
+    #[test]
+    fn старый_конфиг_без_автоочистки_даёт_никогда() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.audio_retention_days, None);
+    }
+
+    #[test]
+    fn срок_автоочистки_переживает_сериализацию() {
+        let c = Config { audio_retention_days: Some(30), ..Config::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    /// Конфиг, записанный до появления выбора «сервер/локально», обязан
+    /// читаться как сервер — то же требование, что и для языка, темы и
+    /// автоочистки выше: старую настройку read не ломает и не подменяет.
+    #[test]
+    fn старый_конфиг_без_режима_расшифровки_даёт_none() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.transcribe_mode, None);
+    }
+
+    #[test]
+    fn режим_расшифровки_переживает_сериализацию() {
+        let c = Config { transcribe_mode: Some("local".to_string()), ..Config::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
     }
 }

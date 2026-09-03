@@ -18,7 +18,7 @@ GitHub Actions.
 **Спека:** `docs/2026-08-27-transcription-robustness-and-windows-design.md`
 
 **Второй репозиторий:** задача 10 требует, чтобы был выкачен
-`DELETE /v1/jobs/:id` из плана `ai-lab/docs/2026-08-27-job-cancellation-plan.md`.
+`DELETE /v1/jobs/:id` из плана отмены задач на стороне шлюза.
 Задачи 1-9 от него не зависят.
 
 ## Global Constraints
@@ -28,7 +28,7 @@ GitHub Actions.
   (настенные часы), а не по числу итераций.
 - Допуск на подряд идущие неудачи опроса — **6**, счётчик обнуляется на любом
   удачном опросе.
-- **Клиент не имеет права сдаваться раньше сервера.** У ai-lab лимит 2 часа на
+- **Клиент не имеет права сдаваться раньше сервера.** У шлюза лимит 2 часа на
   запрос; наш предел заведомо больше, чтобы причину отказа называл шлюз.
 - Дорожки отправляются **последовательно**: `mic`, затем `system`.
 - На macOS `always_on_top` для всплывашки **включать нельзя** — причина в
@@ -283,7 +283,7 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Абсолютный предел ожидания одной дорожки, по настенным часам.
 ///
 /// Три часа, а не два: у шлюза лимит 2 часа НА ЗАПРОС
-/// (`ai-lab/src/clients/whisper-client.ts:23`), а дорожка с диаризацией — это
+/// (лимит запроса на шлюзе), а дорожка с диаризацией — это
 /// два прохода по файлу плюс возможная загрузка модели. Принцип: клиент не
 /// сдаётся раньше сервера. Если задача действительно зависла, её похоронит
 /// таймаут шлюза, и мы увидим `failed` с внятной причиной вместо своего
@@ -701,7 +701,7 @@ concurrency: 1 и обслуживал их по одной. Клиентски�
 
 ```rust
     /// Стрим без явной длины уехал бы chunked-передачей. Принимающая сторона —
-    /// multipart fastify (`ai-lab/src/routes/audio-routes.ts:113`), и известный
+    /// multipart fastify на стороне шлюза, и известный
     /// заранее размер ей полезнее. Тест держит длину видимой, а не проверяет
     /// сам факт стрима: проверить его без сети нечем.
     #[tokio::test]
@@ -1248,15 +1248,15 @@ Expected: `MIT License`.
 
 ```bash
 sed -i 's|`C:\\Users\\<username>\\Recordings`|каталог записей Windows|g; s|`C:\\Users\\<username>\\Recordings\\YYYY-MM\\`|`<каталог записей>\\YYYY-MM\\`|g' README.md
-sed -i 's|/Users/<username>/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
-sed -i 's|10\.0\.0\.3:8080|ai-lab.example:8080|g' docs/2026-08-10-in-app-transcription-design.md docs/2026-08-10-in-app-transcription-plan.md
+sed -i 's|<личный каталог>/Projects/|<каталог проектов>/|g' docs/2026-08-26-ui-redesign-plan.md
+sed -i 's|<внутренний адрес>:8080|localhost:8080|g' docs/2026-08-10-in-app-transcription-design.md docs/2026-08-10-in-app-transcription-plan.md
 ```
 
 - [ ] **Step 4: Проверить, что не осталось**
 
 Run:
 ```bash
-grep -rn "C:\\\\Users\\\\<username>\|/Users/<username>\|10\.0\.0\.3" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
+grep -rn "C:\\\\Users\\\\<username>\|/Users/<username>\|<внутренний IP>" --include="*.md" --include="*.rs" --include="*.js" --include="*.json" . | grep -v node_modules
 ```
 Expected: пусто.
 
@@ -1280,12 +1280,12 @@ git commit -m "chore: лицензия, .env в gitignore и вычистка л
 ### Task 10: Отмена гасит задачу на шлюзе
 
 **ЗАВИСИМОСТЬ:** требует выкаченного `DELETE /v1/jobs/:id` — план
-`ai-lab/docs/2026-08-27-job-cancellation-plan.md`, задачи 1-5. Проверить
+плана отмены задач на стороне шлюза, задачи 1-5. Проверить
 до начала:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -X DELETE \
-  -H "Authorization: Bearer $AILAB_KEY" "$AILAB_URL/v1/jobs/несуществующая"
+  -H "Authorization: Bearer $GATEWAY_KEY" "$GATEWAY_URL/v1/jobs/несуществующая"
 ```
 Expected: `404`, а не `404` от «route not found». Если возвращается 405 —
 маршрута нет, задачу не начинать.
@@ -1433,7 +1433,7 @@ GPU, поэтому следующая в очереди не двигалась
 Под Windows он прибит гвоздём: `PathBuf::from(r"C:\Users\<username>\Recordings")`. На
 машине любого другого человека приложение пишет записи в чужой домашний каталог,
 а не имея туда прав — не пишет вовсе. Не всплывало это ровно потому, что у автора
-пользователь и назывался `Cypher`.
+пользователь назывался личным именем.
 
 Оба файла правятся вместе и обязаны остаться одинаковыми: докблок в
 `src-tauri/src/main.rs:30-34` прямо требует, чтобы корень записей у GUI и у

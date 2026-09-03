@@ -2,7 +2,7 @@
 
 > **Для агентов-исполнителей:** ОБЯЗАТЕЛЬНЫЙ САБ-СКИЛЛ: используйте `superpowers:subagent-driven-development` (рекомендуется) или `superpowers:executing-plans` для выполнения плана по задачам. Шаги отмечены чекбоксами (`- [ ]`).
 
-**Цель:** приложение само транскрибирует запись (обе дорожки, слитые в один диалог по времени) через настраиваемый шлюз — URL и ключ пользователь задаёт в UI, а не в зашитом пути к конкретному ai-lab.
+**Цель:** приложение само транскрибирует запись (обе дорожки, слитые в один диалог по времени) через настраиваемый шлюз — URL и ключ пользователь задаёт в UI, а не в зашитом пути к конкретному серверу.
 
 **Архитектура:** новый модуль `src-tauri/src/transcribe.rs` — HTTP-клиент шлюза (submit+poll на дорожку) и чистая функция слияния сегментов по времени. Оркестрация двух параллельных задач и запись результата — в `src-tauri/src/main.rs`, тем же событийным паттерном, что уже несёт `state`/`levels`/`error` из аудио-потока. Настройки — два новых поля в уже существующем `Config`.
 
@@ -44,8 +44,8 @@ fn настройки_транскрипции_переживают_сериал
     let c = Config {
         mic_device_id: None,
         mic_device_name: None,
-        stt_gateway_url: Some("http://ai-lab.example:8080".to_string()),
-        stt_api_key: Some("ailab_xxx".to_string()),
+        stt_gateway_url: Some("http://localhost:8080".to_string()),
+        stt_api_key: Some("test_key_xxx".to_string()),
     };
     let json = serde_json::to_string(&c).unwrap();
     assert_eq!(Config::from_str(&json), c);
@@ -75,7 +75,7 @@ cargo.exe test --workspace
 pub struct Config {
     pub mic_device_id: Option<String>,
     pub mic_device_name: Option<String>,
-    /// Базовый URL шлюза, например `http://ai-lab.example:8080` — без хвоста
+    /// Базовый URL шлюза, например `http://localhost:8080` — без хвоста
     /// `/v1/...`, его дописывает клиент транскрипции.
     pub stt_gateway_url: Option<String>,
     pub stt_api_key: Option<String>,
@@ -139,12 +139,12 @@ fn смена_только_микрофонных_полей_не_трогает
     let mut cfg = Config {
         mic_device_id: None,
         mic_device_name: None,
-        stt_gateway_url: Some("http://ai-lab.example:8080".to_string()),
+        stt_gateway_url: Some("http://localhost:8080".to_string()),
         stt_api_key: Some("secret".to_string()),
     };
     cfg.mic_device_id = Some("{new-id}".to_string());
     cfg.mic_device_name = Some("Новый микрофон".to_string());
-    assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://ai-lab.example:8080"));
+    assert_eq!(cfg.stt_gateway_url.as_deref(), Some("http://localhost:8080"));
     assert_eq!(cfg.stt_api_key.as_deref(), Some("secret"));
 }
 ```
@@ -184,7 +184,7 @@ input[type="password"] {
 ```html
 <h2>Транскрипция</h2>
 <div class="row">
-  <input type="text" id="stt-url" placeholder="URL шлюза, например http://ai-lab.example:8080" />
+  <input type="text" id="stt-url" placeholder="URL шлюза, например http://localhost:8080" />
 </div>
 <div class="row">
   <input type="password" id="stt-key" placeholder="Ключ" />
@@ -287,7 +287,7 @@ thiserror = "2"
 ```rust
 //! HTTP-клиент шлюза транскрипции: submit одной дорожки, поллинг задачи,
 //! слияние двух дорожек по времени. Контракт API — тот же, что уже проверен
-//! скиллом `ailab-transcribe` (`POST /v1/audio/transcriptions/async` +
+//! внешним скриптом расшифровки (`POST /v1/audio/transcriptions/async` +
 //! `GET /v1/jobs/:id`), здесь не изобретается заново.
 
 use serde::Deserialize;
@@ -522,7 +522,7 @@ pub async fn submit_and_poll(
 
     let job_url = format!("{gateway}/v1/jobs/{}", submit.id);
     // 360 попыток по 10с — тот же лимит (~60 минут), что уже проверен в
-    // ailab-transcribe/scripts/transcribe.sh, не изобретается заново.
+    // внешнем скрипте расшифровки, не изобретается заново.
     for _ in 0..360 {
         tokio::time::sleep(Duration::from_secs(10)).await;
         let body = client.get(&job_url).bearer_auth(key).send().await?.text().await?;
@@ -552,7 +552,7 @@ cargo.exe test --workspace
 
 Ожидается: 178 (после Task 1) + 7 новых = 185, 0 упавших (семь `#[test]`-функций из шага 2 — два из них перебирают по два статуса циклом внутри одного теста, это не восемь отдельных тестов). `submit_and_poll` компилируется, но не покрыт юнит-тестом — как и `WindowsDetector`/`build_loopback_capture` в этом же проекте, реальный HTTP-клиент проверяется вручную, не в CI.
 
-- [ ] **Шаг 9: ручная проверка на реальном ai-lab**
+- [ ] **Шаг 9: ручная проверка на реальном шлюзе**
 
 С настроенными в UI (Task 1) URL и ключом, временно вызвать `submit_and_poll` на реальном `.wav`-файле (например, через `#[cfg(test)]`-независимый маленький `main`-скретч или интерактивно) — убедиться, что задача уходит, поллинг доходит до `succeeded`, `segments` заполнены при `diarize=true`. Не обязательно автоматизировать — цель шага ровно та же, что у ручной проверки Process Tap в соседнем macOS-плане: подтвердить контракт на реальном сервере до того, как он обрастёт оркестрацией (Task 4).
 

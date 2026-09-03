@@ -1354,40 +1354,19 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
         }
     };
 
-    // Локальный режим — честная заглушка, а не начало настоящей
-    // расшифровки: движок ещё не подключён (см. `local.rs`), и вторая
-    // дорожка не спасла бы первую — обе гарантированно упали бы одной и той
-    // же причиной. Поэтому сюда не доходит ни требование адреса и ключа
-    // шлюза ниже (в этом режиме они не нужны), ни очередь задач, ни слияние
-    // двух дорожек — один короткий вызов через ту же развилку
-    // `transcribe::transcribe_track`, что обслуживает обычную дорожку;
-    // просто в режиме `Local` она сразу возвращает `local.notWired`. Ключ, а
-    // не готовый текст, долетает до интерфейса как есть — см. докблок
-    // `local::LocalError`.
-    if mode == transcribe::Mode::Local {
-        let err = transcribe::transcribe_track(
-            mode,
-            &client,
-            "",
-            "",
-            &mic_path,
-            transcribe::Label::Owner,
-            |_| unreachable!("в Local-режиме job на шлюзе не заводится"),
-        )
-        .await
-        .expect_err("в Local-режиме `transcribe_track` всегда возвращает ошибку");
-        let msg = err.to_string();
-        emit_transcribe_error(app, folder, base, &msg);
-        return Err(msg);
-    }
-
-    let (url, key) = match (cfg.stt_gateway_url, cfg.stt_api_key) {
-        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => (
-            u.trim().trim_end_matches('/').to_string(),
-            k.trim().to_string(),
-        ),
-        _ => {
-            let msg = "настройте URL и ключ шлюза";
+    // Локальный режим идёт тем же путём, что и серверный: обе дорожки, слияние,
+    // запись файлов. Разница ровно одна — где считается расшифровка, — и она
+    // спрятана в развилке `transcribe::transcribe_track`.
+    //
+    // Раньше здесь стоял ранний выход: он звал `transcribe_track` один раз и
+    // делал `.expect_err`, опираясь на то, что движок не подключён и функция
+    // всегда возвращает `local.notWired`. Это ломало обещание из докблока
+    // `local::transcribe_local` — «менять код в `main.rs` не придётся, только
+    // тело этой функции»: первая же удачная локальная расшифровка роняла бы
+    // процесс паникой вместо того, чтобы отдать текст.
+    let (url, key) = match ключи_шлюза(mode, cfg.stt_gateway_url, cfg.stt_api_key) {
+        Ok(pair) => pair,
+        Err(msg) => {
             emit_transcribe_error(app, folder, base, msg);
             return Err(msg.to_string());
         }
@@ -1403,11 +1382,11 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
 
     emit_transcribe_track(app, folder, base, "mic");
     let mic_res =
-        дорожка_целиком(&client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue, app, folder, base)
+        дорожка_целиком(mode, &client, &url, &key, &mic_path, transcribe::Label::Owner, &*queue, app, folder, base)
             .await;
     emit_transcribe_track(app, folder, base, "system");
     let sys_res =
-        дорожка_целиком(&client, &url, &key, &sys_path, transcribe::Label::Others, &*queue, app, folder, base)
+        дорожка_целиком(mode, &client, &url, &key, &sys_path, transcribe::Label::Others, &*queue, app, folder, base)
             .await;
 
     let (mic, mic_err) = match mic_res {
@@ -1420,10 +1399,9 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     };
 
     if mic.is_none() && sys.is_none() {
-        let msg = format!(
-            "обе дорожки не удались — мик: {}; система: {}",
-            mic_err.unwrap_or_else(|| "?".to_string()),
-            sys_err.unwrap_or_else(|| "?".to_string())
+        let msg = сообщение_обеих_неудач(
+            mic_err.as_deref().unwrap_or("?"),
+            sys_err.as_deref().unwrap_or("?"),
         );
         emit_transcribe_error(app, folder, base, &msg);
         return Err(msg);
@@ -1484,7 +1462,47 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
 ///
 /// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
 /// минуту, не нашла бы что гасить на шлюзе.
+/// Адрес и ключ шлюза — но только там, где они нужны.
+///
+/// В режиме `Local` расшифровка считается на этой же машине, шлюз не
+/// участвует, и требовать его настройки было бы ложным препятствием: человек
+/// с пустым конфигом получал бы «настройте URL и ключ шлюза» на работу,
+/// которая никуда не отправляется. Пустые строки, которые уходят дальше по
+/// коду, в этом режиме никто не читает — до HTTP дело не доходит.
+fn ключи_шлюза(
+    mode: transcribe::Mode,
+    url: Option<String>,
+    key: Option<String>,
+) -> Result<(String, String), &'static str> {
+    if mode == transcribe::Mode::Local {
+        return Ok((String::new(), String::new()));
+    }
+    match (url, key) {
+        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => Ok((
+            u.trim().trim_end_matches('/').to_string(),
+            k.trim().to_string(),
+        )),
+        _ => Err("настройте URL и ключ шлюза"),
+    }
+}
+
+/// Что показать, когда не удалась ни одна дорожка.
+///
+/// Одинаковые половины склеивать нельзя: в локальном режиме без подключённого
+/// движка обе дорожки возвращают один и тот же ключ словаря
+/// (`local.notWired`), и интерфейс переводит его как есть — см. докблок
+/// `local::LocalError`. Склейка «обе дорожки не удались — мик: …; система: …»
+/// ключом уже не является и до перевода не доживёт: на экране оказалась бы
+/// сырая строка вместо фразы.
+fn сообщение_обеих_неудач(mic_err: &str, sys_err: &str) -> String {
+    if mic_err == sys_err {
+        return mic_err.to_string();
+    }
+    format!("обе дорожки не удались — мик: {mic_err}; система: {sys_err}")
+}
+
 async fn дорожка_целиком(
+    mode: transcribe::Mode,
     client: &reqwest::Client,
     url: &str,
     key: &str,
@@ -1495,11 +1513,20 @@ async fn дорожка_целиком(
     folder: &Option<String>,
     base: &str,
 ) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
-    emit_transcribe_progress(app, folder, base, "uploading");
-    let job_id = transcribe::submit(client, url, key, path).await?;
-    queue.note_job(job_id.clone());
-    emit_transcribe_progress(app, folder, base, "polling");
-    transcribe::poll_until_done(client, url, key, &job_id, label).await
+    // «Отправляю…» в локальном режиме было бы враньём: никуда ничего не уходит,
+    // работа сразу считается на этой машине. Поэтому там первая же стадия —
+    // «Расшифровываю…». В серверном стадии две, и вторая наступает не по
+    // таймеру, а по факту заведённой задачи — то есть из `on_job`, между
+    // отправкой и первым опросом.
+    match mode {
+        transcribe::Mode::Local => emit_transcribe_progress(app, folder, base, "polling"),
+        transcribe::Mode::Server => emit_transcribe_progress(app, folder, base, "uploading"),
+    }
+    transcribe::transcribe_track(mode, client, url, key, path, label, |job_id| {
+        queue.note_job(job_id);
+        emit_transcribe_progress(app, folder, base, "polling");
+    })
+    .await
 }
 
 fn main() {
@@ -2580,5 +2607,67 @@ mod tests {
              Докблок MIN_MACOS в src/capture/macos.rs, проверка на бандле:\n\
              \x20   npm run check-tap-lazy-bind\n"
         );
+    }
+
+    // ---- локальный режим и отказ обеих дорожек -------------------------------
+
+    /// Локальный режим считает на этой же машине и на шлюз не ходит, поэтому
+    /// требовать его адрес и ключ нельзя: человек с пустым конфигом получал бы
+    /// «настройте URL и ключ шлюза» на работу, которая никуда не отправляется.
+    #[test]
+    fn локальный_режим_не_требует_ключей_шлюза() {
+        assert_eq!(
+            ключи_шлюза(transcribe::Mode::Local, None, None),
+            Ok((String::new(), String::new()))
+        );
+    }
+
+    /// Серверный режим без настроек — по-прежнему отказ, а не пустые строки:
+    /// иначе запрос уйдёт в никуда и человек увидит сетевую ошибку вместо
+    /// понятного «настройте шлюз».
+    #[test]
+    fn серверный_режим_без_настроек_отказывает() {
+        assert!(ключи_шлюза(transcribe::Mode::Server, None, None).is_err());
+        assert!(ключи_шлюза(
+            transcribe::Mode::Server,
+            Some("   ".to_string()),
+            Some("k".to_string())
+        )
+        .is_err());
+    }
+
+    /// Хвостовой слеш и пробелы срезаются здесь, а не у места вызова: путь
+    /// `/v1/...` дописывает клиент транскрипции, и `.../` дал бы двойной слеш.
+    #[test]
+    fn серверный_режим_чистит_пробелы_и_хвостовой_слеш() {
+        assert_eq!(
+            ключи_шлюза(
+                transcribe::Mode::Server,
+                Some("  http://localhost:8080/  ".to_string()),
+                Some("  секрет  ".to_string())
+            ),
+            Ok(("http://localhost:8080".to_string(), "секрет".to_string()))
+        );
+    }
+
+    /// Когда обе дорожки упали одинаково, человеку уходит один ключ, а не
+    /// склейка из двух одинаковых половин: в локальном режиме без движка обе
+    /// возвращают ровно `local.notWired`, и интерфейс переводит его как есть
+    /// (докблок `local::LocalError`). Склейка ключом уже не является и до
+    /// перевода не доживёт — на экране оказалась бы сырая строка.
+    #[test]
+    fn одинаковый_отказ_обеих_дорожек_доезжает_одним_ключом() {
+        assert_eq!(
+            сообщение_обеих_неудач("local.notWired", "local.notWired"),
+            "local.notWired"
+        );
+    }
+
+    /// Разные причины не схлопываются: видны обе, иначе непонятно, что чинить.
+    #[test]
+    fn разные_отказы_дорожек_показываются_обе() {
+        let msg = сообщение_обеих_неудач("сеть отвалилась", "шлюз ответил 413");
+        assert!(msg.contains("сеть отвалилась"), "{msg}");
+        assert!(msg.contains("шлюз ответил 413"), "{msg}");
     }
 }

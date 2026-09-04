@@ -33,6 +33,14 @@ UI = ЗДЕСЬ.parent.parent / "ui"
 
 # Порядок тот же, в каком состояния проходят перед показом: сначала жизнь
 # приложения, потом список, потом беды, потом настройки, потом крайние случаи.
+ТИПЫ = {
+    ".js": "application/javascript",
+    ".css": "text/css",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".html": "text/html",
+}
+
 СЦЕНЫ = [
     ("idle", "Покой"),
     ("armed", "Взвод — окно открыли, пока вопрос висит"),
@@ -184,8 +192,19 @@ class Стенд(http.server.SimpleHTTPRequestHandler):
             return self.отдать(self.со_стендом(путь.lstrip("/")), "text/html; charset=utf-8")
 
         файл = UI / путь.lstrip("/")
-        if файл.is_file() and файл.parent == UI:
-            тип = "application/javascript" if файл.suffix == ".js" else "text/html"
+        # Подкаталоги ui/ отдаются тоже: редизайн разложил тексты по
+        # `ui/i18n/strings.json`, а иконки по `ui/assets/`. Прежняя проверка
+        # `файл.parent == UI` защищала от обхода путей, но заодно роняла их в
+        # 404 — стенд показывал интерфейс без стилей и с ключами вместо фраз.
+        # Обход путей закрыт честнее: сравниваем разрешённый путь с корнем.
+        try:
+            внутри = файл.resolve().is_relative_to(UI.resolve())
+        except (OSError, ValueError):
+            внутри = False
+        if файл.is_file() and внутри:
+            # Тип обязателен верный: CSS, отданный как text/html, браузер
+            # молча игнорирует — именно так стенд и «терял» вёрстку.
+            тип = ТИПЫ.get(файл.suffix, "application/octet-stream")
             return self.отдать(файл.read_text(encoding="utf-8"), f"{тип}; charset=utf-8")
         self.send_error(404)
 

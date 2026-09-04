@@ -2051,10 +2051,12 @@ const КОНТАКТЫ_ДИЗАЙН = [
   { label: "github.com/blinbirka", url: "https://github.com/blinbirka" },
 ];
 
-// Контактов Миши пока нет — пустой список того же вида. Чтобы вписать их:
-// замените массив ниже списком { label, url } по образцу КОНТАКТЫ_ДИЗАЙН
-// выше. Список отрисуется сам, а строка about.contactsSoon спрячется.
-const КОНТАКТЫ_РАЗРАБОТКА = [];
+// Контакты Миши — тот же вид, что и у Ани выше. Взяты из CV; почты там нет,
+// поэтому её здесь тоже нет: публиковать личный адрес — отдельное решение.
+const КОНТАКТЫ_РАЗРАБОТКА = [
+  { label: "github.com/mmaximov97", url: "https://github.com/mmaximov97" },
+  { label: "linkedin.com/in/mmaximov97", url: "https://www.linkedin.com/in/mmaximov97/" },
+];
 
 function отрисовать_контакты(id_списка, id_заглушки, контакты) {
   const ul = $(id_списка);

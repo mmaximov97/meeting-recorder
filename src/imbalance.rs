@@ -25,65 +25,101 @@ pub const FLOOR_DBFS: f32 = -120.0;
 /// не поймал бы.
 pub const THRESHOLD_DB: f32 = 20.0;
 
-/// Сколько сэмплов в одном окне выборки.
+/// Сколько сэмплов в одном окне выборки — четверть секунды при 16 кГц.
+///
+/// Окно короче слова не нужно, окно длиннее фразы смазало бы паузу с речью и
+/// вернуло бы ту самую ошибку, ради которой всё это переписано.
 const WINDOW: usize = 4096;
 
-/// Дочитать до `take` сэмплов из текущей позиции `reader`, накопив их в
-/// `sum_sq`/`counted`.
+/// Какая доля окон должна быть тише «уровня речи».
 ///
-/// Свободная функция, а не замыкание внутри [`sampled_rms_dbfs`]: она не
-/// захватывает ничего снаружи (всё приходит параметрами), поэтому
-/// `let mut accumulate = |...| { ... }` компилятор справедливо помечал
-/// `unused_mut` — мутируемым должно быть то, что меняется через `&mut`
-/// параметры, а не сам биндинг. Вынос убирает предупреждение и заодно делает
-/// вызывающий код короче на сигнатуру замыкания.
-fn accumulate(
-    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
-    take: usize,
-    sum_sq: &mut f64,
-    counted: &mut usize,
-) -> Result<(), hound::Error> {
-    for s in reader.samples::<i16>().take(take) {
-        let v = s? as f64;
-        *sum_sq += v * v;
-        *counted += 1;
+/// 0.9 — берём громкие 10% окон. У владельца речь занимает 20–30% встречи, у
+/// собеседников 70–80%; в верхние 10% на обеих дорожках попадает только речь,
+/// и паузы перестают участвовать в сравнении. Меньше (0.5) снова затянуло бы
+/// в оценку тишину молчаливого владельца; больше (0.99) — единичные щелчки
+/// и пики вместо голоса.
+pub const SPEECH_PERCENTILE: f64 = 0.9;
+
+/// RMS одного окна в dBFS. Пустое окно и цифровой ноль дают [`FLOOR_DBFS`].
+fn window_dbfs(sum_sq: f64, counted: usize) -> f32 {
+    if counted == 0 {
+        return FLOOR_DBFS;
     }
-    Ok(())
+    let rms = (sum_sq / counted as f64).sqrt() / i16::MAX as f64;
+    if rms <= 0.0 {
+        return FLOOR_DBFS;
+    }
+    (20.0 * rms.log10()).max(FLOOR_DBFS as f64) as f32
 }
 
-/// RMS файла в dBFS по разреженной выборке.
+/// Дочитать до `take` сэмплов из текущей позиции `reader` и вернуть их
+/// уровень одним окном.
+fn read_window(
+    reader: &mut hound::WavReader<std::io::BufReader<std::fs::File>>,
+    take: usize,
+) -> Result<f32, hound::Error> {
+    let mut sum_sq = 0f64;
+    let mut counted = 0usize;
+    for s in reader.samples::<i16>().take(take) {
+        let v = s? as f64;
+        sum_sq += v * v;
+        counted += 1;
+    }
+    Ok(window_dbfs(sum_sq, counted))
+}
+
+/// Уровни окон файла в dBFS по разреженной выборке.
 ///
 /// Читается `windows` окон по [`WINDOW`] сэмплов, равномерно по файлу: для
 /// 38-минутной записи это ~1.6 МБ вместо 73 МБ. Файл короче суммарной выборки
-/// читается целиком — выборка вырождается в полный проход, а не в ошибку.
-pub fn sampled_rms_dbfs(path: &Path, windows: usize) -> Result<f32, hound::Error> {
+/// читается целиком подряд идущими окнами — выборка вырождается в полный
+/// проход, а не в ошибку. Пустой файл даёт пустой список.
+pub fn window_levels_dbfs(path: &Path, windows: usize) -> Result<Vec<f32>, hound::Error> {
     let mut reader = hound::WavReader::open(path)?;
     let total = reader.len() as usize;
     if total == 0 {
-        return Ok(FLOOR_DBFS);
+        return Ok(Vec::new());
     }
 
-    let mut sum_sq = 0f64;
-    let mut counted = 0usize;
-
+    let mut levels = Vec::with_capacity(windows.max(1));
     if windows == 0 || total <= windows * WINDOW {
-        accumulate(&mut reader, total, &mut sum_sq, &mut counted)?;
+        let mut left = total;
+        while left > 0 {
+            let take = left.min(WINDOW);
+            levels.push(read_window(&mut reader, take)?);
+            left -= take;
+        }
     } else {
         let stride = total / windows;
         for i in 0..windows {
             reader.seek((i * stride) as u32)?;
-            accumulate(&mut reader, WINDOW, &mut sum_sq, &mut counted)?;
+            levels.push(read_window(&mut reader, WINDOW)?);
         }
     }
+    Ok(levels)
+}
 
-    if counted == 0 {
-        return Ok(FLOOR_DBFS);
+/// Перцентиль [`SPEECH_PERCENTILE`] списка уровней — «так звучит речь на этой
+/// дорожке». Пустой список — [`FLOOR_DBFS`]: сравнивать нечего, значит тишина.
+pub fn speech_level(levels: &[f32]) -> f32 {
+    if levels.is_empty() {
+        return FLOOR_DBFS;
     }
-    let rms = (sum_sq / counted as f64).sqrt() / i16::MAX as f64;
-    if rms <= 0.0 {
-        return Ok(FLOOR_DBFS);
-    }
-    Ok((20.0 * rms.log10()).max(FLOOR_DBFS as f64) as f32)
+    let mut sorted = levels.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() - 1) as f64 * SPEECH_PERCENTILE).round() as usize;
+    sorted[idx]
+}
+
+/// Уровень речи файла в dBFS — не RMS всего файла.
+///
+/// RMS всего файла взвешен долей пауз: владелец молчит большую часть встречи,
+/// собеседники говорят почти всегда, и его дорожка выходит на 15–25 дБ «тише»
+/// ещё до всякого сравнения громкости голосов. Ровно так 08.09 на нормальной
+/// записи повисла пометка «вас слышно заметно тише». Здесь сравнивается то,
+/// как звучит голос, когда он звучит: перцентиль уровней окон.
+pub fn speech_level_dbfs(path: &Path, windows: usize) -> Result<f32, hound::Error> {
+    Ok(speech_level(&window_levels_dbfs(path, windows)?))
 }
 
 /// Насколько mic тише system, если это тянет на проблему.
@@ -96,7 +132,7 @@ pub fn imbalance(mic_dbfs: f32, sys_dbfs: f32) -> Option<f32> {
     (diff > THRESHOLD_DB).then_some(diff)
 }
 
-/// Кеш посчитанных уровней.
+/// Кеш посчитанных уровней речи.
 ///
 /// Ключ включает размер и время модификации, поэтому заменённый или дописанный
 /// файл пересчитывается сам. Без кеша список, обновляющийся на каждый фокус
@@ -107,7 +143,7 @@ pub struct Cache(Mutex<HashMap<(PathBuf, u64, SystemTime), f32>>);
 impl Cache {
     /// `None` — файла нет или он не читается как WAV. Это не ошибка: пометки
     /// просто не будет.
-    pub fn rms(&self, path: &Path) -> Option<f32> {
+    pub fn speech_level(&self, path: &Path) -> Option<f32> {
         let meta = std::fs::metadata(path).ok()?;
         let key = (path.to_path_buf(), meta.len(), meta.modified().ok()?);
         if let Ok(g) = self.0.lock() {
@@ -115,7 +151,7 @@ impl Cache {
                 return Some(*v);
             }
         }
-        let v = sampled_rms_dbfs(path, 200).ok()?;
+        let v = speech_level_dbfs(path, 200).ok()?;
         if let Ok(mut g) = self.0.lock() {
             g.insert(key, v);
         }
@@ -187,7 +223,7 @@ mod tests {
         w.finalize().unwrap();
 
         // RMS синуса = амплитуда / sqrt(2) = 0.3536 → 20*log10(0.3536) ≈ -9.03 дБ
-        let db = sampled_rms_dbfs(&path, 200).unwrap();
+        let db = speech_level_dbfs(&path, 200).unwrap();
         assert!((db + 9.03).abs() < 0.5, "получили {db} дБ");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -209,7 +245,7 @@ mod tests {
         }
         w.finalize().unwrap();
 
-        let db = sampled_rms_dbfs(&path, 200).unwrap();
+        let db = speech_level_dbfs(&path, 200).unwrap();
         assert!((db + 6.02).abs() < 0.5, "получили {db} дБ");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -227,7 +263,7 @@ mod tests {
         };
         hound::WavWriter::create(&path, spec).unwrap().finalize().unwrap();
 
-        assert_eq!(sampled_rms_dbfs(&path, 200).unwrap(), FLOOR_DBFS);
+        assert_eq!(speech_level_dbfs(&path, 200).unwrap(), FLOOR_DBFS);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -242,7 +278,8 @@ mod tests {
     /// подобран так, что каждое из 200 окон целиком попадает либо в тишину,
     /// либо в синус, и пропорция окон (20 тишина / 180 синус) в точности
     /// повторяет пропорцию файла (10% / 90%) — поэтому у разреженной выборки
-    /// и у полного чтения должен получиться практически один и тот же RMS.
+    /// и у полного чтения должен получиться один и тот же уровень речи: 90-й
+    /// перцентиль окон, то есть чистый синус, тишина в него не попадает.
     /// Если бы `seek` не двигался (или считал не туда), выборка выродилась бы
     /// в 200 перечтений первого окна — чистую тишину — и результат провалился
     /// бы к `FLOOR_DBFS`, что и ловит вторая проверка ниже.
@@ -261,7 +298,7 @@ mod tests {
         const TOTAL: usize = 850_000;
         const SILENT: usize = 85_000; // ровно 10% — тишина в начале файла
         const WINDOWS: usize = 200;
-        // 200 * 4096 = 819 200 — порог полного чтения в sampled_rms_dbfs.
+        // 200 * 4096 = 819 200 — порог полного чтения в window_levels_dbfs.
         // TOTAL заведомо больше, значит функция обязана пойти в ветку seek.
         assert!(
             TOTAL > WINDOWS * WINDOW,
@@ -279,19 +316,18 @@ mod tests {
         }
         w.finalize().unwrap();
 
-        // Ожидаемый RMS: 90% сигнала — синус амплитудой 0.5 (RMS = 0.5/√2),
-        // 10% — тишина (RMS-вклад 0). Считаем формулой, а не константой руками.
-        let sine_frac = (TOTAL - SILENT) as f64 / TOTAL as f64;
-        let expected_rms = (sine_frac * (0.5 / std::f64::consts::SQRT_2).powi(2)).sqrt();
-        let expected_db = (20.0 * expected_rms.log10()) as f32;
+        // Ожидаемый уровень речи — синус амплитудой 0.5 (RMS = 0.5/√2), как
+        // если бы тишины в файле не было вовсе: она занимает 10% окон, а
+        // перцентиль 0.9 отсекает ровно их. Считаем формулой, а не константой.
+        let expected_db = (20.0 * (0.5 / std::f64::consts::SQRT_2).log10()) as f32;
 
-        let full = sampled_rms_dbfs(&path, 0).unwrap();
+        let full = speech_level_dbfs(&path, 0).unwrap();
         assert!(
             (full - expected_db).abs() < 0.5,
             "полное чтение: получили {full} дБ, ожидали {expected_db} дБ"
         );
 
-        let sparse = sampled_rms_dbfs(&path, WINDOWS).unwrap();
+        let sparse = speech_level_dbfs(&path, WINDOWS).unwrap();
         assert!(
             (sparse - expected_db).abs() < 0.5,
             "разреженная выборка: получили {sparse} дБ, ожидали {expected_db} дБ"
@@ -305,6 +341,79 @@ mod tests {
             "выборка подозрительно близка к полу — похоже, seek не сдвинулся: {sparse} дБ"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Файл заданной длины, где речь (синус амплитуды `amp`) занимает долю
+    /// `duty` каждого «предложения» из `period` сэмплов, а остальное — цифровая
+    /// тишина. Так выглядит любая встреча: у владельца речь занимает 20% времени,
+    /// у собеседников — 80%, а громкость голосов при этом одна и та же.
+    fn wav_с_речью(path: &Path, total: usize, period: usize, duty: f64, amp: f32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..total {
+            let в_речи = (i % period) as f64 / period as f64 <= duty;
+            let v = if в_речи {
+                (i as f32 / 16_000.0 * 440.0 * std::f32::consts::TAU).sin() * amp
+            } else {
+                0.0
+            };
+            w.write_sample((v * i16::MAX as f32) as i16).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    /// Аня, 08.09: 50-минутная запись, её слышно нормально, а пометка «вас
+    /// слышно заметно тише» висит. Причина — RMS всего файла взвешен долей
+    /// пауз: владелец молчит большую часть встречи, собеседники говорят почти
+    /// всегда. Уровень РЕЧИ обязан быть один и тот же независимо от того, какую
+    /// долю файла она занимает.
+    #[test]
+    fn уровень_речи_не_зависит_от_доли_пауз() {
+        let dir = std::env::temp_dir().join(format!("mr-imb-duty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mic = dir.join("mic.wav");
+        let sys = dir.join("system.wav");
+        // 20 минут по 16 кГц: заведомо длиннее порога полного чтения, то есть
+        // выборка идёт по окнам с seek. Период «предложения» 8 с.
+        const TOTAL: usize = 20 * 60 * 16_000;
+        const PERIOD: usize = 8 * 16_000;
+        wav_с_речью(&mic, TOTAL, PERIOD, 0.2, 0.3);
+        wav_с_речью(&sys, TOTAL, PERIOD, 0.8, 0.3);
+
+        let m = speech_level_dbfs(&mic, 200).unwrap();
+        let s = speech_level_dbfs(&sys, 200).unwrap();
+        assert!(
+            (m - s).abs() < 1.0,
+            "одна и та же громкость голоса должна давать один уровень: mic {m} дБ, system {s} дБ"
+        );
+        assert_eq!(imbalance(m, s), None, "владелец говорит реже, но не тише");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Обратная сторона той же метрики: по-настоящему тихий микрофон при
+    /// той же доле пауз обязан ловиться по-прежнему.
+    #[test]
+    fn тихий_микрофон_при_речи_ловится_по_уровню_речи() {
+        let dir = std::env::temp_dir().join(format!("mr-imb-weak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mic = dir.join("mic.wav");
+        let sys = dir.join("system.wav");
+        const TOTAL: usize = 20 * 60 * 16_000;
+        const PERIOD: usize = 8 * 16_000;
+        // −36 дБ относительно собеседников: 0.3 против 0.3 / 63.
+        wav_с_речью(&mic, TOTAL, PERIOD, 0.2, 0.3 / 63.0);
+        wav_с_речью(&sys, TOTAL, PERIOD, 0.8, 0.3);
+
+        let m = speech_level_dbfs(&mic, 200).unwrap();
+        let s = speech_level_dbfs(&sys, 200).unwrap();
+        let diff = imbalance(m, s).expect("36 дБ разницы по речи — это пометка");
+        assert!((diff - 36.0).abs() < 1.5, "разница: {diff}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

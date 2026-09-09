@@ -46,6 +46,10 @@ pub struct Config {
     /// а не здесь — этот файл ничего не знает про сеть, очередь расшифровки
     /// и локальный движок.
     pub transcribe_mode: Option<String>,
+    /// Версия релиза, на которой человек нажал «Позже» в баннере обновления
+    /// (`update.rs`). Отсутствие поля и `None` — ничего не пропускали. Гасит
+    /// ровно одну версию: следующий релиз баннер покажет снова.
+    pub update_skipped_version: Option<String>,
 }
 
 impl Config {
@@ -109,6 +113,7 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            update_skipped_version: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
     }
@@ -126,6 +131,7 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            update_skipped_version: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Default);
     }
@@ -154,6 +160,7 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            update_skipped_version: None,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(Config::from_str(&json), c);
@@ -177,6 +184,7 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            update_skipped_version: None,
         };
         cfg.mic_device_id = Some("{new-id}".to_string());
         cfg.mic_device_name = Some("Новый микрофон".to_string());

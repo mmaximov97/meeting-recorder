@@ -48,6 +48,8 @@ xattr -cr /Applications/MeetRec.app
 
 **Windows** — `MeetRec_x.y.z_x64-setup.exe` to install, or `MeetRec_vx.y.z_x64-portable.exe` to run without installing.
 
+The app notices new releases on its own: once a day it asks GitHub and, if a newer version is out, shows a "Download / Later" banner in the window. Download opens the release page in your browser; installing is manual, same as the first time. Nothing but the version number is exchanged.
+
 ## Requirements
 
 - **macOS 14.4 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.

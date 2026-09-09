@@ -9,12 +9,13 @@ mod audio;
 mod config;
 mod delete;
 mod i18n;
-mod imbalance;
+use meeting_recorder::imbalance;
 mod local;
 mod rename;
 mod retention;
 mod status;
 mod transcribe;
+mod update;
 mod tray;
 
 use audio::Ctl;
@@ -361,6 +362,60 @@ fn spawn_retention_worker(app: AppHandle) {
             tokio::time::sleep(RETENTION_INTERVAL).await;
         }
     });
+}
+
+/// Проверка обновлений: сразу после старта и дальше раз в сутки, пока
+/// приложение живёт в трее. Результат кладётся в `UpdateState` — для окна,
+/// которое поднимется позже, — и уходит событием `update-available` — для
+/// окна, которое уже открыто. Любой отказ — в лог и молчание, см. докблок
+/// `update.rs`: обновление не повод мешать записывать встречу.
+fn spawn_update_worker(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let client = match reqwest::Client::builder().build() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("проверка обновлений: HTTP-клиент не создан: {e}");
+                return;
+            }
+        };
+        let current = app.package_info().version.to_string();
+        loop {
+            match update::fetch_latest(&client).await {
+                Ok(latest) => {
+                    let skipped = Config::load(&app).update_skipped_version;
+                    let found = update::decide(&current, latest, skipped.as_deref());
+                    app.state::<update::UpdateState>().set(found.clone());
+                    if let Some(r) = found {
+                        let _ = app.emit("update-available", &r);
+                    }
+                }
+                Err(e) => log::warn!("проверка обновлений не удалась: {e}"),
+            }
+            tokio::time::sleep(update::CHECK_INTERVAL).await;
+        }
+    });
+}
+
+/// Что нашла последняя проверка — читается окном при загрузке, тем же
+/// приёмом, что `get_state`: событие могло уйти до того, как webview поднялся.
+#[tauri::command]
+fn update_status(state: tauri::State<update::UpdateState>) -> Option<update::Release> {
+    state.get()
+}
+
+/// «Позже»: запомнить пропущенную версию и погасить баннер. Гасится ровно
+/// эта версия — следующий релиз баннер покажет снова (`update::decide`).
+#[tauri::command]
+fn update_skip(
+    version: String,
+    app: AppHandle,
+    state: tauri::State<update::UpdateState>,
+) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.update_skipped_version = Some(version);
+    cfg.save(&app)?;
+    state.set(None);
+    Ok(())
 }
 
 /// Один проход чистки: какие записи набежали за срок — у тех звук уезжает в
@@ -782,7 +837,7 @@ fn collect_files(root: &Path) -> Result<Found, String> {
 /// единственная логика здесь, которую можно сломать незаметно, и она чистая,
 /// без файлового ввода-вывода, значит проверяется без диска. Разметка
 /// дисбаланса, наоборот, СОБРАНА прямо тут, а не вынесена рядом: она читает
-/// содержимое файлов через `Cache::rms`, и утаскивать чтение файлов в чистую
+/// содержимое файлов через `Cache::speech_level`, и утаскивать чтение файлов в чистую
 /// функцию значило бы отнять у неё главное свойство — тестируемость без диска.
 ///
 /// Пометка считается только для полных пар (`r.mic && r.system`): одинокая
@@ -811,8 +866,8 @@ fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> 
             Some(f) => root.join(f),
             None => root.clone(),
         };
-        let mic = cache.rms(&dir.join(format!("{}.mic.wav", r.name)));
-        let sys = cache.rms(&dir.join(format!("{}.system.wav", r.name)));
+        let mic = cache.speech_level(&dir.join(format!("{}.mic.wav", r.name)));
+        let sys = cache.speech_level(&dir.join(format!("{}.system.wav", r.name)));
         if let (Some(m), Some(s)) = (mic, sys) {
             r.imbalance_db = imbalance::imbalance(m, s);
         }
@@ -1563,6 +1618,7 @@ fn main() {
         .manage(Status::default())
         .manage(Cache::default())
         .manage(transcribe_queue)
+        .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             send_event,
             get_state,
@@ -1587,7 +1643,9 @@ fn main() {
             set_audio_retention,
             transcribe_recording,
             cancel_transcription,
-            open_recording_folder
+            open_recording_folder,
+            update_status,
+            update_skip
         ])
         .setup(move |app| {
             // Приложение живёт в Dock как обычное (`ActivationPolicy::Regular`),
@@ -1647,6 +1705,7 @@ fn main() {
 
             spawn_transcribe_worker(app.handle().clone(), transcribe_rx);
             spawn_retention_worker(app.handle().clone());
+            spawn_update_worker(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

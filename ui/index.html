@@ -1691,6 +1691,20 @@
             </div>
           </div>
 
+          <!-- Вышел релиз новее запущенного (update.rs). «Скачать» открывает
+               страницу релиза в браузере, «Позже» гасит баннер до следующего
+               релиза. Ниже поломок и выше взвода: это не беда, но и не то,
+               что должно перекрывать «слышу встречу, жду». -->
+          <div class="slot" id="s-update">
+            <div class="slot-in">
+              <div class="banner" id="update" role="status">
+                <span id="update-text"></span>
+                <button class="sec" id="update-later" data-i18n="update.later">Later</button>
+                <button class="sec" id="update-open" data-i18n="update.download">Download</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Вопрос задаёт всплывашка (ui/ask.html) — здесь только состояние:
                приложение слышит встречу и ждёт ответа. Строку ставит main.js в
                момент перехода во взвод, а не разметка: живая область озвучивает

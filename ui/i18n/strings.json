@@ -302,6 +302,32 @@
       "en": "Cancel"
     }
   },
+  "server": {
+    "gateway": {
+      "ru": "Шлюз selfhost-ai-lab",
+      "en": "selfhost-ai-lab gateway"
+    },
+    "whisperCpp": {
+      "ru": "whisper.cpp server",
+      "en": "whisper.cpp server"
+    },
+    "gatewayHint": {
+      "ru": "Дорожки уходят на указанный адрес по вашему ключу. Различает собеседников между собой.",
+      "en": "The tracks go to the address you set, with your key. Tells the other speakers apart."
+    },
+    "whisperCppHint": {
+      "ru": "Сервер на этом компьютере или в локальной сети, без ключа. Собеседников между собой не различает. Отмена в приложении не останавливает расчёт на сервере.",
+      "en": "A server on this machine or on the local network, no key. Won't tell the other speakers apart. Cancelling in the app does not stop the server's computation."
+    },
+    "whisperCppUrl": {
+      "ru": "http://127.0.0.1:8178",
+      "en": "http://127.0.0.1:8178"
+    },
+    "howTo": {
+      "ru": "Как поднять whisper-сервер",
+      "en": "How to run a whisper server"
+    }
+  },
   "local": {
     "about": {
       "ru": "Про расшифровку на этом компьютере",

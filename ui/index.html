@@ -1851,7 +1851,7 @@
                  подсказке по наведению/фокусу на значок-вопросик рядом с
                  выпадашкой: тот же приём `.ic`, что у подписей уровней
                  записи выше. -->
-            <div class="row mode">
+            <div class="row mode" id="transcribe-mode-row">
               <span class="field">
                 <select id="transcribe-mode">
                   <option value="server" data-i18n="local.onServer">On a server</option>
@@ -1868,6 +1868,30 @@
               <span class="ic" id="local-about" tabindex="0" aria-describedby="tip-bubble" data-i18n-attr="aria-label:local.about" aria-label="About transcribing on this computer">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /></svg>
               </span>
+            </div>
+            <!-- Тип сервера: шлюз selfhost-ai-lab или whisper-server из
+                 whisper.cpp (`docs/2026-09-09-whisper-server-design.md`).
+                 Пока встроенный движок спрятан, это единственная видимая
+                 выпадашка раздела — строка режима выше скрыта из main.js
+                 (`ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН`). Подсказка под ней меняется по
+                 типу, а не живёт в тултипе: у whisper-сервера есть свойство,
+                 которое надо видеть до первой расшифровки, — отмена не
+                 останавливает расчёт. -->
+            <div class="row mode" id="transcribe-server-row">
+              <span class="field">
+                <select id="transcribe-server">
+                  <option value="gateway" data-i18n="server.gateway">selfhost-ai-lab gateway</option>
+                  <option value="whisper_cpp" data-i18n="server.whisperCpp">whisper.cpp server</option>
+                </select>
+                <svg class="chev" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+              </span>
+            </div>
+            <div class="hint" id="server-hint"></div>
+            <!-- Кнопка, а не <a href>: обычная ссылка в вебвью Tauri открылась
+                 бы внутри окна (см. .contacts). Ведёт на раздел README, ссылка
+                 по языку — в main.js. -->
+            <div class="row" id="server-howto-row" hidden>
+              <button class="sec" id="server-howto" data-i18n="server.howTo">How to run a whisper server</button>
             </div>
             <!-- Адрес и ключ шлюза видны только в серверном режиме — в
                  локальном скрываются совсем (`hidden`), тем же приёмом, что и

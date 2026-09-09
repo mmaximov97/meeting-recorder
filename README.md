@@ -91,10 +91,10 @@ Two models, put them in one folder:
 - speech: [`ggml-large-v3-turbo-q5_0.bin`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin), 574 MB — close to large-v3 in quality, several times faster;
 - voice activity detector: [`ggml-silero-v5.1.2.bin`](https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin), 0.9 MB — without it whisper makes up text in the pauses, and a microphone track of a meeting is mostly pauses.
 
-**Windows.** Download `whisper-bin-x64.zip` from the [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases/latest), unpack it, put the models next to `whisper-server.exe` and run:
+**Windows.** Download `whisper-bin-x64.zip` from the [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases/latest) and unpack it: the archive unpacks into a `Release\` folder; put both models there and run from inside it:
 
 ```
-whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
+.\whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
 ```
 
 `-t` is the thread count; match it to your cores. Without a GPU an hour-long meeting takes about an hour.
@@ -106,6 +106,11 @@ brew install cmake git
 git clone https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
 cmake -B build && cmake --build build -j
+```
+
+Put both models into the `whisper.cpp` folder and run from there:
+
+```sh
 ./build/bin/whisper-server -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178
 ```
 
@@ -113,7 +118,7 @@ Metal is picked up automatically: on Apple Silicon an hour-long meeting takes a 
 
 **In the app.** Settings → Transcription → server type "whisper.cpp server", address `http://127.0.0.1:8178`. No key.
 
-One caveat: "Cancel transcription" in the app releases the recording immediately, but the server finishes the track it has already accepted — it has no cancel command. The next transcription queues behind it.
+One caveat: "Cancel transcription" in the app drops the connection immediately, but the server only notices it between compute steps and aborts with a delay — the next transcription may have to wait tens of seconds behind it.
 
 ## Shortcuts
 

@@ -61,10 +61,10 @@ const ERROR_BODY_CHARS: usize = 200;
 /// клиент не сдаётся раньше, чем сдался бы там.
 ///
 /// Отмена (`select!` в `spawn_transcribe_worker`) бросает эту future, reqwest
-/// закрывает соединение — для приложения дорожка отменена сразу. Сервер при
-/// этом ДОСЧИТЫВАЕТ запрос до конца и только потом замечает обрыв (он
-/// однопоточный, API отмены у него нет); следующая дорожка встанет за ним.
-/// Это записано в README, обойти нельзя.
+/// закрывает соединение — для приложения дорожка отменена сразу. Сервер
+/// замечает обрыв между шагами расчёта и прерывает работу, но не мгновенно:
+/// следующая дорожка может подождать десятки секунд. Это записано в README,
+/// обойти нельзя.
 pub async fn transcribe(
     client: &reqwest::Client,
     url: &str,
@@ -121,13 +121,25 @@ pub(crate) mod test_support {
     /// `Content-Length` (иначе reqwest увидит обрыв посреди отправки файла)
     /// и отвечает заданным статусом и телом. Возвращает адрес.
     pub(crate) async fn стаб(status: &'static str, body: &'static str) -> String {
+        стаб_с_заголовками(status, body).await.0
+    }
+
+    /// То же самое, но вдобавок отдаёт голову запроса (в нижнем регистре)
+    /// через `oneshot` — тестам, которым нужно проверить заголовки (напр.
+    /// отсутствие `Authorization`), а не только тело ответа.
+    pub(crate) async fn стаб_с_заголовками(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
             let (mut header_end, mut content_length) = (None, 0usize);
+            let mut head = String::new();
             loop {
                 let n = sock.read(&mut tmp).await.unwrap();
                 if n == 0 {
@@ -137,7 +149,7 @@ pub(crate) mod test_support {
                 if header_end.is_none() {
                     if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                         header_end = Some(pos + 4);
-                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
                         content_length = head
                             .lines()
                             .find_map(|l| l.strip_prefix("content-length:"))
@@ -151,6 +163,7 @@ pub(crate) mod test_support {
                     }
                 }
             }
+            let _ = tx.send(head);
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -158,7 +171,7 @@ pub(crate) mod test_support {
             sock.write_all(resp.as_bytes()).await.unwrap();
             sock.shutdown().await.ok();
         });
-        addr
+        (addr, rx)
     }
 
     /// Каталог уникален на каждый вызов (счётчик + pid, тот же приём, что
@@ -192,7 +205,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::test_support::{стаб, wav_файл};
+    use super::test_support::{стаб, стаб_с_заголовками, wav_файл};
 
     const ОТВЕТ: &str = r#"{
         "task": "transcribe",
@@ -289,5 +302,17 @@ mod tests {
         let client = reqwest::Client::new();
         let err = transcribe(&client, "http://127.0.0.1:1", &wav_файл(), Label::Owner).await.unwrap_err();
         assert!(matches!(err, TranscribeError::Network(_)), "{err}");
+    }
+
+    /// Ключа у whisper-server нет, и в запрос он не попадает даже если введён:
+    /// это свойство приватности, которое интерфейс обещает словами «без ключа».
+    #[tokio::test]
+    async fn запрос_к_whisper_серверу_идёт_без_authorization() {
+        let (url, head) = стаб_с_заголовками("200 OK", ОТВЕТ).await;
+        let client = reqwest::Client::new();
+        transcribe(&client, &url, &wav_файл(), Label::Owner).await.unwrap();
+        let head = head.await.unwrap();
+        assert!(!head.contains("authorization:"), "{head}");
+        assert!(head.starts_with("post /inference "), "{head}");
     }
 }

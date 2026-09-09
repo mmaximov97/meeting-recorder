@@ -19,6 +19,7 @@
 pub mod app;
 pub mod capture;
 pub mod detector;
+pub mod imbalance;
 pub mod ringbuf;
 pub mod session;
 pub mod storage;

@@ -487,14 +487,14 @@ struct Recording {
     /// Не по `size`: там сумма обеих дорожек, и оборвавшаяся дорожка сделала бы
     /// из 25 минут «40». См. `duration_sec`.
     duration_sec: u32,
-    /// Насколько mic-дорожка тише system, в дБ. Заполняется в `list_recordings`
-    /// после группировки — считать это здесь значило бы тащить в чистую
-    /// функцию чтение файлов.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    imbalance_db: Option<f32>,
+    /// Микрофон владельца записал его слишком тихо: `Some(недобор в дБ)` по
+    /// правилу `imbalance::quiet_mic`, считается по одной дорожке владельца.
+    /// Заполняется в `list_recordings`, отдельно от группировки — та чистая и
+    /// файлов не читает.
+    quiet_mic_db: Option<f32>,
     /// `true` — на эту запись прямо сейчас пишутся дорожки. Заполняется в
     /// `list_recordings` после группировки, сверкой со `Status::current_recording`
-    /// — та же причина, что у `imbalance_db`: группировка чистая и файлов не
+    /// — та же причина, что у `quiet_mic_db`: группировка чистая и файлов не
     /// читает, а это сверка не с диском, а с состоянием аудио-потока.
     recording_now: bool,
 }
@@ -679,7 +679,7 @@ fn group_recordings(
             size: 0,
             transcript,
             duration_sec: 0,
-            imbalance_db: None,
+            quiet_mic_db: None,
             recording_now: false,
         });
         if is_mic {
@@ -705,7 +705,7 @@ fn group_recordings(
             size: 0,
             transcript: true,
             duration_sec: 0,
-            imbalance_db: None,
+            quiet_mic_db: None,
             recording_now: false,
         });
     }
@@ -829,22 +829,22 @@ fn collect_files(root: &Path) -> Result<Found, String> {
 }
 
 /// Список записей для окна: обход каталога, склейка дорожек в пары и разметка
-/// дисбаланса громкости.
+/// тихого микрофона.
 ///
 /// Три шага одной команды, а не три отдельных, и это не одно и то же с точки
 /// зрения того, где что тестируется. Обход (`collect_files`) и склейка
 /// (`group_recordings`) разделены сознательно — см. их докблоки: это
 /// единственная логика здесь, которую можно сломать незаметно, и она чистая,
 /// без файлового ввода-вывода, значит проверяется без диска. Разметка
-/// дисбаланса, наоборот, СОБРАНА прямо тут, а не вынесена рядом: она читает
-/// содержимое файлов через `Cache::speech_level`, и утаскивать чтение файлов в чистую
+/// тихого микрофона, наоборот, СОБРАНА прямо тут, а не вынесена рядом: она читает
+/// содержимое файлов через `Cache::levels`, и утаскивать чтение файлов в чистую
 /// функцию значило бы отнять у неё главное свойство — тестируемость без диска.
 ///
 /// Пометка считается только для полных пар (`r.mic && r.system`): одинокая
 /// дорожка уже помечена как неполная в UI, второе предупреждение поверх неё
 /// ничего не добавит, а чтение файла стоит времени зря.
 ///
-/// `recording_now` заполняется той же сверкой, что и дисбаланс, но без
+/// `recording_now` заполняется той же сверкой, что и тихий микрофон, но без
 /// условия на полную пару: запись без системного звука тоже может идти
 /// прямо сейчас, и её тоже нельзя ни удалить, ни расшифровать заново.
 #[tauri::command]
@@ -866,10 +866,11 @@ fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> 
             Some(f) => root.join(f),
             None => root.clone(),
         };
-        let mic = cache.speech_level(&dir.join(format!("{}.mic.wav", r.name)));
-        let sys = cache.speech_level(&dir.join(format!("{}.system.wav", r.name)));
-        if let (Some(m), Some(s)) = (mic, sys) {
-            r.imbalance_db = imbalance::imbalance(m, s);
+        // Только дорожка владельца: системная в решении не участвует — её
+        // громкость зависит от колонок собеседника, а не от микрофона
+        // (см. докблок `imbalance`).
+        if let Some(m) = cache.levels(&dir.join(format!("{}.mic.wav", r.name))) {
+            r.quiet_mic_db = imbalance::quiet_mic(m);
         }
     }
     Ok(list)
@@ -1776,7 +1777,7 @@ mod tests {
             size,
             transcript: false,
             duration_sec: 0,
-            imbalance_db: None,
+            quiet_mic_db: None,
             recording_now: false,
         }
     }

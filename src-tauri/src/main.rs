@@ -16,6 +16,7 @@ mod retention;
 mod status;
 mod transcribe;
 mod update;
+mod whisper_cpp;
 mod tray;
 
 use audio::Ctl;
@@ -1204,6 +1205,16 @@ fn set_transcribe_mode(mode: Option<String>, app: AppHandle) -> Result<(), Strin
     cfg.save(&app)
 }
 
+/// Тип сервера расшифровки: `"gateway"` — шлюз selfhost-ai-lab, `"whisper_cpp"`
+/// — whisper-server. Только сохраняет выбор: развилка читает конфиг при
+/// каждой расшифровке (`run_transcription`), второй источник правды не нужен.
+#[tauri::command]
+fn set_transcribe_server(kind: Option<String>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.transcribe_server = kind;
+    cfg.save(&app)
+}
+
 /// Состояние модели локальной расшифровки — по факту на диске и на диске
 /// свободного места, не по памяти между вызовами: окно настроек могли
 /// закрыть и открыть заново, скачивание могли прервать снаружи.
@@ -1295,7 +1306,7 @@ fn emit_transcribe_cancelled(app: &AppHandle, folder: &Option<String>, base: &st
     let _ = app.emit("transcribe-cancelled", serde_json::json!({ "folder": folder, "base": base }));
 }
 
-/// Какая из двух дорожек сейчас на шлюзе.
+/// Какая из двух дорожек сейчас в работе — на шлюзе или на whisper-сервере.
 ///
 /// Отдельным событием, а не полем в `stage`: строка стадии уже перегружена
 /// форматом `queued:N`, и второй раз этого делать не стоит — разбор в
@@ -1391,7 +1402,7 @@ fn cancel_transcription(
 async fn run_transcription(folder: Option<String>, base: String, app: AppHandle) -> Result<(), String> {
     let (folder, base, app) = (&folder, base.as_str(), &app);
     let cfg = Config::load(app);
-    let mode = transcribe::effective_mode(cfg.transcribe_mode.as_deref());
+    let mode = transcribe::effective_mode(cfg.transcribe_mode.as_deref(), cfg.transcribe_server.as_deref());
 
     let dir = match folder {
         Some(f) => recordings_root().join(f),
@@ -1419,7 +1430,7 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     // `local::transcribe_local` — «менять код в `main.rs` не придётся, только
     // тело этой функции»: первая же удачная локальная расшифровка роняла бы
     // процесс паникой вместо того, чтобы отдать текст.
-    let (url, key) = match ключи_шлюза(mode, cfg.stt_gateway_url, cfg.stt_api_key) {
+    let (url, key) = match параметры_сервера(mode, cfg.stt_gateway_url, cfg.stt_api_key) {
         Ok(pair) => pair,
         Err(msg) => {
             emit_transcribe_error(app, folder, base, msg);
@@ -1503,41 +1514,32 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     Ok(())
 }
 
-/// Одна дорожка целиком: сообщить об отправке, отправить, запомнить id для
-/// отмены, сообщить об ожидании, дождаться.
+/// Адрес и ключ для выбранного режима, уже вычищенные.
 ///
-/// Обе стадии эмитятся ЗДЕСЬ, за дорожку, а не разом в `run_transcription` до
-/// начала всей работы. Раньше `uploading` ставился ДО построения клиента и ДО
-/// `submit()` у первой дорожки, а `polling` — сразу следом, тоже до реальной
-/// отправки: разница между ними жила на экране доли секунды (время собрать
-/// `reqwest::Client`), а всё время настоящей заливки — до 115 МБ дорожки —
-/// шло уже под меткой «Расшифровываю…», и «Отправляю…» не было видно вовсе.
-/// Здесь `uploading` стоит перед `submit()`, `polling` — после `note_job()`,
-/// и оба раза за дорожку (mic, потом system), а не один раз за всю запись.
-///
-/// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
-/// минуту, не нашла бы что гасить на шлюзе.
-/// Адрес и ключ шлюза — но только там, где они нужны.
-///
-/// В режиме `Local` расшифровка считается на этой же машине, шлюз не
-/// участвует, и требовать его настройки было бы ложным препятствием: человек
-/// с пустым конфигом получал бы «настройте URL и ключ шлюза» на работу,
-/// которая никуда не отправляется. Пустые строки, которые уходят дальше по
-/// коду, в этом режиме никто не читает — до HTTP дело не доходит.
-fn ключи_шлюза(
+/// `Gateway` требует и адрес, и ключ. `WhisperCpp` — только адрес: ключа у
+/// whisper-server нет, введённый по привычке игнорируется, а не уезжает в
+/// запрос. `Local` не ходит никуда — пустые строки, которые дальше по коду
+/// никто не читает. Хвостовой `/` срезается здесь, потому что путь
+/// (`/v1/...` у шлюза, `/inference` у whisper-server) дописывает клиент.
+fn параметры_сервера(
     mode: transcribe::Mode,
     url: Option<String>,
     key: Option<String>,
 ) -> Result<(String, String), &'static str> {
-    if mode == transcribe::Mode::Local {
-        return Ok((String::new(), String::new()));
-    }
-    match (url, key) {
-        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => Ok((
-            u.trim().trim_end_matches('/').to_string(),
-            k.trim().to_string(),
-        )),
-        _ => Err("настройте URL и ключ шлюза"),
+    let чистый_адрес = url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty());
+    let чистый_ключ = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    match mode {
+        transcribe::Mode::Local => Ok((String::new(), String::new())),
+        transcribe::Mode::WhisperCpp => match чистый_адрес {
+            Some(u) => Ok((u, String::new())),
+            None => Err("настройте адрес whisper-сервера"),
+        },
+        transcribe::Mode::Gateway => match (чистый_адрес, чистый_ключ) {
+            (Some(u), Some(k)) => Ok((u, k)),
+            _ => Err("настройте URL и ключ шлюза"),
+        },
     }
 }
 
@@ -1556,6 +1558,20 @@ fn сообщение_обеих_неудач(mic_err: &str, sys_err: &str) -> S
     format!("обе дорожки не удались — мик: {mic_err}; система: {sys_err}")
 }
 
+/// Одна дорожка целиком: сообщить об отправке, отправить, запомнить id для
+/// отмены, сообщить об ожидании, дождаться.
+///
+/// Обе стадии эмитятся ЗДЕСЬ, за дорожку, а не разом в `run_transcription` до
+/// начала всей работы. Раньше `uploading` ставился ДО построения клиента и ДО
+/// `submit()` у первой дорожки, а `polling` — сразу следом, тоже до реальной
+/// отправки: разница между ними жила на экране доли секунды (время собрать
+/// `reqwest::Client`), а всё время настоящей заливки — до 115 МБ дорожки —
+/// шло уже под меткой «Расшифровываю…», и «Отправляю…» не было видно вовсе.
+/// Здесь `uploading` стоит перед `submit()`, `polling` — после `note_job()`,
+/// и оба раза за дорожку (mic, потом system), а не один раз за всю запись.
+///
+/// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
+/// минуту, не нашла бы что гасить на шлюзе.
 async fn дорожка_целиком(
     mode: transcribe::Mode,
     client: &reqwest::Client,
@@ -1568,14 +1584,14 @@ async fn дорожка_целиком(
     folder: &Option<String>,
     base: &str,
 ) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
-    // «Отправляю…» в локальном режиме было бы враньём: никуда ничего не уходит,
-    // работа сразу считается на этой машине. Поэтому там первая же стадия —
-    // «Расшифровываю…». В серверном стадии две, и вторая наступает не по
-    // таймеру, а по факту заведённой задачи — то есть из `on_job`, между
-    // отправкой и первым опросом.
     match mode {
-        transcribe::Mode::Local => emit_transcribe_progress(app, folder, base, "polling"),
-        transcribe::Mode::Server => emit_transcribe_progress(app, folder, base, "uploading"),
+        // «Отправляю…» здесь было бы враньём: локальный движок никуда не
+        // шлёт, а whisper-server на localhost принимает файл за секунду и
+        // дальше считает — суть происходящего «Расшифровываю…».
+        transcribe::Mode::Local | transcribe::Mode::WhisperCpp => {
+            emit_transcribe_progress(app, folder, base, "polling")
+        }
+        transcribe::Mode::Gateway => emit_transcribe_progress(app, folder, base, "uploading"),
     }
     transcribe::transcribe_track(mode, client, url, key, path, label, |job_id| {
         queue.note_job(job_id);
@@ -1634,6 +1650,7 @@ fn main() {
             set_theme,
             set_transcribe_config,
             set_transcribe_mode,
+            set_transcribe_server,
             local_model_status,
             local_model_download,
             local_model_remove,
@@ -2671,37 +2688,66 @@ mod tests {
     // ---- локальный режим и отказ обеих дорожек -------------------------------
 
     /// Локальный режим считает на этой же машине и на шлюз не ходит, поэтому
-    /// требовать его адрес и ключ нельзя: человек с пустым конфигом получал бы
-    /// «настройте URL и ключ шлюза» на работу, которая никуда не отправляется.
+    /// требовать его адрес и ключ нельзя.
     #[test]
-    fn локальный_режим_не_требует_ключей_шлюза() {
+    fn локальный_режим_не_требует_параметров_сервера() {
         assert_eq!(
-            ключи_шлюза(transcribe::Mode::Local, None, None),
+            параметры_сервера(transcribe::Mode::Local, None, None),
             Ok((String::new(), String::new()))
         );
     }
 
-    /// Серверный режим без настроек — по-прежнему отказ, а не пустые строки:
-    /// иначе запрос уйдёт в никуда и человек увидит сетевую ошибку вместо
-    /// понятного «настройте шлюз».
+    /// Шлюз без настроек — по-прежнему отказ, а не пустые строки: иначе
+    /// запрос уйдёт в никуда и человек увидит сетевую ошибку вместо понятного
+    /// «настройте шлюз».
     #[test]
-    fn серверный_режим_без_настроек_отказывает() {
-        assert!(ключи_шлюза(transcribe::Mode::Server, None, None).is_err());
-        assert!(ключи_шлюза(
-            transcribe::Mode::Server,
+    fn шлюз_без_настроек_отказывает() {
+        assert!(параметры_сервера(transcribe::Mode::Gateway, None, None).is_err());
+        assert!(параметры_сервера(
+            transcribe::Mode::Gateway,
             Some("   ".to_string()),
             Some("k".to_string())
         )
         .is_err());
+        assert!(параметры_сервера(
+            transcribe::Mode::Gateway,
+            Some("http://localhost:8080".to_string()),
+            None
+        )
+        .is_err());
+    }
+
+    /// whisper-server ключа не имеет: нужен только адрес, введённый ключ
+    /// игнорируется, а не уходит в запрос.
+    #[test]
+    fn whisper_cpp_требует_только_адрес() {
+        assert_eq!(
+            параметры_сервера(
+                transcribe::Mode::WhisperCpp,
+                Some("http://127.0.0.1:8178/".to_string()),
+                None
+            ),
+            Ok(("http://127.0.0.1:8178".to_string(), String::new()))
+        );
+        assert_eq!(
+            параметры_сервера(
+                transcribe::Mode::WhisperCpp,
+                Some("http://127.0.0.1:8178".to_string()),
+                Some("лишний".to_string())
+            ),
+            Ok(("http://127.0.0.1:8178".to_string(), String::new()))
+        );
+        let err = параметры_сервера(transcribe::Mode::WhisperCpp, None, None).unwrap_err();
+        assert!(err.contains("whisper"), "{err}");
     }
 
     /// Хвостовой слеш и пробелы срезаются здесь, а не у места вызова: путь
-    /// `/v1/...` дописывает клиент транскрипции, и `.../` дал бы двойной слеш.
+    /// (`/v1/...` или `/inference`) дописывает клиент, и `.../` дал бы двойной слеш.
     #[test]
-    fn серверный_режим_чистит_пробелы_и_хвостовой_слеш() {
+    fn шлюз_чистит_пробелы_и_хвостовой_слеш() {
         assert_eq!(
-            ключи_шлюза(
-                transcribe::Mode::Server,
+            параметры_сервера(
+                transcribe::Mode::Gateway,
                 Some("  http://localhost:8080/  ".to_string()),
                 Some("  секрет  ".to_string())
             ),

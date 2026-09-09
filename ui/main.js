@@ -1689,6 +1689,9 @@ async function обновить_устройства() {
     const режим = ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН ? (конфиг.transcribe_mode ?? "server") : "server";
     $("transcribe-mode").value = режим;
     применить_режим_расшифровки(режим);
+    const тип_сервера = конфиг.transcribe_server === "whisper_cpp" ? "whisper_cpp" : "gateway";
+    $("transcribe-server").value = тип_сервера;
+    применить_тип_сервера(тип_сервера);
   } catch (e) {
     показать_ошибку(i18n.t("error.mics"), e);
   }
@@ -1708,15 +1711,54 @@ const ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН = false;
 if (!ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН) {
   $("transcribe-mode").querySelector('option[value="local"]')?.remove();
   $("local-about").hidden = true;
+  $("transcribe-mode-row").hidden = true;
 }
 
 function применить_режим_расшифровки(режим) {
   const локально = режим === "local";
   $("stt-url-row").hidden = локально;
-  $("stt-key-row").hidden = локально;
+  // Строка ключа занята ещё и типом сервера (см. применить_тип_сервера) —
+  // whisper-серверу ключ тоже не нужен, даже вне локального режима.
+  $("stt-key-row").hidden = локально || $("transcribe-server").value === "whisper_cpp";
   $("local-model").hidden = !локально;
   if (локально) обновить_статус_модели();
 }
+
+// Ссылка на инструкцию по whisper-серверу — раздел README на языке
+// интерфейса. Якорь GitHub строит из заголовка: строчные буквы, пробелы в
+// дефисы; кириллица сохраняется.
+const ИНСТРУКЦИЯ_WHISPER = {
+  ru: "https://github.com/mmaximov97/meeting-recorder/blob/master/README.ru.md#свой-whisper-сервер-на-этом-компьютере",
+  en: "https://github.com/mmaximov97/meeting-recorder/blob/master/README.md#your-own-whisper-server-on-this-machine",
+};
+
+// Тип сервера меняет три вещи: ключ не нужен whisper-серверу (строка ключа
+// прячется, а не гаснет — тем же приёмом, что в локальном режиме), подсказка
+// под выпадашкой говорит, чем типы отличаются, и появляется кнопка на
+// инструкцию. Плейсхолдер адреса подсказывает типичный localhost-адрес.
+function применить_тип_сервера(тип) {
+  const whisper = тип === "whisper_cpp";
+  const локально = $("transcribe-mode").value === "local";
+  $("stt-key-row").hidden = локально || whisper;
+  $("stt-url").placeholder = whisper ? i18n.t("server.whisperCppUrl") : i18n.t("settings.serverUrl");
+  $("server-hint").textContent = i18n.t(whisper ? "server.whisperCppHint" : "server.gatewayHint");
+  $("server-howto-row").hidden = !whisper;
+}
+
+$("transcribe-server").addEventListener("change", async (e) => {
+  const значение = e.target.value;
+  try {
+    await invoke("set_transcribe_server", { kind: значение });
+    применить_тип_сервера(значение);
+    показать_ошибку("");
+  } catch (err) {
+    показать_ошибку(i18n.t("error.generic"), err);
+  }
+});
+
+$("server-howto").addEventListener("click", () => {
+  открыть_ссылку(ИНСТРУКЦИЯ_WHISPER[i18n.lang === "ru" ? "ru" : "en"]);
+});
 
 // Статус — по факту на диске и по свободному месту (см. `local_model_status`
 // в Rust), не то, что помнит фронтенд между запусками: модель могли удалить

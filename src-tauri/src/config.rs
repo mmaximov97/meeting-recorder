@@ -50,6 +50,11 @@ pub struct Config {
     /// (`update.rs`). Отсутствие поля и `None` — ничего не пропускали. Гасит
     /// ровно одну версию: следующий релиз баннер покажет снова.
     pub update_skipped_version: Option<String>,
+    /// `"gateway" | "whisper_cpp"`. Отсутствие поля (старый конфиг) и `None` —
+    /// то же самое, что `"gateway"`: шлюз selfhost-ai-lab, как было всегда.
+    /// Разбор значения в действующий режим живёт в `transcribe::effective_mode`,
+    /// а не здесь — этот файл ничего не знает про протоколы серверов.
+    pub transcribe_server: Option<String>,
 }
 
 impl Config {
@@ -114,6 +119,7 @@ mod tests {
             audio_retention_days: None,
             transcribe_mode: None,
             update_skipped_version: None,
+            transcribe_server: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
     }
@@ -132,6 +138,7 @@ mod tests {
             audio_retention_days: None,
             transcribe_mode: None,
             update_skipped_version: None,
+            transcribe_server: None,
         };
         assert_eq!(c.choice(), DeviceChoice::Default);
     }
@@ -161,6 +168,7 @@ mod tests {
             audio_retention_days: None,
             transcribe_mode: None,
             update_skipped_version: None,
+            transcribe_server: None,
         };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(Config::from_str(&json), c);
@@ -185,6 +193,7 @@ mod tests {
             audio_retention_days: None,
             transcribe_mode: None,
             update_skipped_version: None,
+            transcribe_server: None,
         };
         cfg.mic_device_id = Some("{new-id}".to_string());
         cfg.mic_device_name = Some("Новый микрофон".to_string());
@@ -271,6 +280,21 @@ mod tests {
     #[test]
     fn режим_расшифровки_переживает_сериализацию() {
         let c = Config { transcribe_mode: Some("local".to_string()), ..Config::default() };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    /// Конфиг, записанный до появления типа сервера, обязан читаться как
+    /// шлюз — то же требование, что и для режима расшифровки выше.
+    #[test]
+    fn старый_конфиг_без_типа_сервера_даёт_none() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.transcribe_server, None);
+    }
+
+    #[test]
+    fn тип_сервера_переживает_сериализацию() {
+        let c = Config { transcribe_server: Some("whisper_cpp".to_string()), ..Config::default() };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(Config::from_str(&json), c);
     }

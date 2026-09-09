@@ -4,18 +4,23 @@
 //! `GET /v1/jobs/:id`), здесь не изобретается заново.
 
 use crate::local;
+use crate::whisper_cpp;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-/// Где расшифровывать — действующее значение `Config::transcribe_mode`
-/// (`config.rs`). Разбор строки в это значение живёт здесь, а не в
-/// `config.rs`, тем же способом, каким разбор языка живёт в
-/// `i18n::effective_lang`, а не в `config.rs` (см. докблок поля `language`).
+/// Где считается расшифровка. Разбор из конфига — `effective_mode`; сам
+/// конфиг про сеть, очередь и движок ничего не знает (см. докблоки полей
+/// `transcribe_mode` и `transcribe_server` в `config.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Server,
+    /// Шлюз selfhost-ai-lab: async-задача, опрос, диаризация, ключ.
+    Gateway,
+    /// `whisper-server` из whisper.cpp: один синхронный POST, без ключа,
+    /// без диаризации. Обычно на этом же компьютере.
+    WhisperCpp,
+    /// Встроенный движок — честная заглушка, спрятана (`LOCAL_MODE_AVAILABLE`).
     Local,
 }
 
@@ -23,18 +28,22 @@ pub enum Mode {
 /// честная заглушка (`docs/2026-09-02-local-transcription-spec.md`). Пока так,
 /// режим спрятан целиком: из настроек его не выбрать (`ui/main.js`,
 /// `ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН`), а `"local"`, оставшийся в конфиге с тех пор,
-/// как выпадашка его предлагала, ведёт на сервер, а не в заглушку с «движок не
-/// подключён». Когда движок появится — поставить `true` здесь и в `main.js`,
-/// больше ничего возвращать не надо: каркас вокруг режима на месте.
+/// как выпадашка его предлагала, ведёт на выбранный сервер, а не в заглушку с
+/// «движок не подключён». Когда движок появится — поставить `true` здесь и в
+/// `main.js`, больше ничего возвращать не надо: каркас вокруг режима на месте.
 pub const LOCAL_MODE_AVAILABLE: bool = false;
 
-/// `Some("local")` — на этом компьютере, но только когда движок есть
-/// (`LOCAL_MODE_AVAILABLE`). Всё остальное, включая `None` (поля ещё не было
-/// в конфиге, когда он появился на диске) — сервер, как было всегда.
-pub fn effective_mode(cfg_mode: Option<&str>) -> Mode {
-    match cfg_mode {
-        Some("local") if LOCAL_MODE_AVAILABLE => Mode::Local,
-        _ => Mode::Server,
+/// Из двух полей конфига — один режим.
+///
+/// `transcribe_mode == "local"` побеждает, но только при поднятом
+/// `LOCAL_MODE_AVAILABLE`. Иначе решает тип сервера: `"whisper_cpp"` —
+/// whisper-server, всё остальное, включая `None` (поля ещё не было в конфиге,
+/// когда он появился на диске) и незнакомые строки — шлюз, как было всегда.
+pub fn effective_mode(cfg_mode: Option<&str>, cfg_server: Option<&str>) -> Mode {
+    match (cfg_mode, cfg_server) {
+        (Some("local"), _) if LOCAL_MODE_AVAILABLE => Mode::Local,
+        (_, Some("whisper_cpp")) => Mode::WhisperCpp,
+        _ => Mode::Gateway,
     }
 }
 
@@ -76,7 +85,7 @@ pub enum TranscribeError {
     Network(#[from] reqwest::Error),
     #[error("файл не читается: {0}")]
     Io(#[from] std::io::Error),
-    #[error("не удалось разобрать ответ шлюза: {0}")]
+    #[error("не удалось разобрать ответ сервера расшифровки: {0}")]
     Parse(#[from] serde_json::Error),
     #[error("шлюз отклонил запрос ({0}) — проверьте ключ")]
     SubmitRejected(String),
@@ -93,6 +102,11 @@ pub enum TranscribeError {
     /// задачи на шлюзе не имеет отношения к вводу ключа.
     #[error("шлюз отклонил отмену задачи ({0})")]
     CancelRejected(String),
+    /// whisper-server (`whisper_cpp.rs`) отдал сегменты без `start`: его
+    /// запустили с `-nt`. Без таймкодов `merge_markdown` не сведёт дорожки,
+    /// поэтому это отказ, а не расшифровка с нулями.
+    #[error("whisper-server отдал текст без таймкодов — запустите его без -nt/--no-timestamps")]
+    NoTimestamps,
     /// Локальный режим: дорожку обслуживает честная заглушка из `local.rs`.
     /// `{0}` — её `Display`, буквально ключ словаря (`local.notWired`), а не
     /// готовый текст: интерфейс переводит его сам, тем же способом, что и
@@ -130,6 +144,10 @@ pub const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// сдаётся раньше сервера. Если задача действительно зависла, её похоронит
 /// таймаут шлюза, и мы увидим `failed` с внятной причиной вместо своего
 /// немого «не завершилась за отведённое время».
+///
+/// Тот же бюджет ограничивает и запрос к whisper-server целиком
+/// (`whisper_cpp::transcribe`) — там нет отдельного поллинга, весь расчёт
+/// идёт под одним `tokio::time::timeout(POLL_DEADLINE, ...)`.
 pub const POLL_DEADLINE: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// Сколько неудачных опросов ПОДРЯД терпим, прежде чем признать поражение.
@@ -432,7 +450,7 @@ pub async fn poll_until_done(
 /// Одна дорожка целиком, с разводкой по режиму — единственное место в
 /// приложении, которое решает «локально или на сервере» на уровне вызова.
 ///
-/// `Server` — ровно то, что раньше было зашито прямо в `main.rs::дорожка_целиком`:
+/// `Gateway` — ровно то, что раньше было зашито прямо в `main.rs::дорожка_целиком`:
 /// `submit`, затем `on_job(job_id)` (кладёт задачу в очередь отмены и шлёт
 /// прогресс «Опрашиваю…»), затем `poll_until_done`. Ни порядок вызовов, ни
 /// сами функции здесь не поменялись — они переехали на одну функцию выше, но
@@ -441,6 +459,10 @@ pub async fn poll_until_done(
 /// `Local` игнорирует `client`/`url`/`key`/`on_job` целиком (замыкание не
 /// вызывается вовсе — заводить задачу в очереди отмены здесь нечего) и идёт
 /// прямиком в честную заглушку `local::transcribe_local`.
+///
+/// `WhisperCpp` — один синхронный вызов `whisper_cpp::transcribe`; `key` и
+/// `on_job` в этой ветке не нужны: у whisper-server нет ни ключа, ни id
+/// задачи, класть в очередь отмены нечего.
 pub async fn transcribe_track(
     mode: Mode,
     client: &reqwest::Client,
@@ -452,7 +474,8 @@ pub async fn transcribe_track(
 ) -> Result<TrackResult, TranscribeError> {
     match mode {
         Mode::Local => local::transcribe_local(path, label).await.map_err(TranscribeError::from),
-        Mode::Server => {
+        Mode::WhisperCpp => whisper_cpp::transcribe(client, url, path, label).await,
+        Mode::Gateway => {
             let job_id = submit(client, url, key, path).await?;
             on_job(job_id.clone());
             poll_until_done(client, url, key, &job_id, label).await
@@ -1129,19 +1152,29 @@ mod tests {
     }
 
     #[test]
-    fn отсутствие_поля_и_незнакомое_значение_дают_сервер() {
-        assert_eq!(effective_mode(None), Mode::Server);
-        assert_eq!(effective_mode(Some("что-то незнакомое")), Mode::Server);
-        assert_eq!(effective_mode(Some("server")), Mode::Server);
+    fn отсутствие_полей_и_незнакомые_значения_дают_шлюз() {
+        assert_eq!(effective_mode(None, None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("что-то незнакомое"), None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("server"), None), Mode::Gateway);
+        assert_eq!(effective_mode(None, Some("gateway")), Mode::Gateway);
+        assert_eq!(effective_mode(None, Some("что-то незнакомое")), Mode::Gateway);
     }
 
-    /// Пока движка нет, «local» в конфиге — это сервер: человек, у которого
-    /// значение осталось от прежней выпадашки, должен получить расшифровку, а
-    /// не «движок не подключён». Тест обязан развернуться, когда флаг поднимут.
     #[test]
-    fn local_в_конфиге_ведёт_на_сервер_пока_движка_нет() {
+    fn тип_сервера_whisper_cpp_разбирается_явно() {
+        assert_eq!(effective_mode(None, Some("whisper_cpp")), Mode::WhisperCpp);
+        assert_eq!(effective_mode(Some("server"), Some("whisper_cpp")), Mode::WhisperCpp);
+    }
+
+    /// Пока движка нет, «local» в конфиге — это сервер того типа, что выбран:
+    /// человек, у которого значение осталось от прежней выпадашки, должен
+    /// получить расшифровку, а не «движок не подключён». Тест обязан
+    /// развернуться, когда флаг поднимут.
+    #[test]
+    fn local_в_конфиге_ведёт_на_выбранный_сервер_пока_движка_нет() {
         assert!(!LOCAL_MODE_AVAILABLE, "движок подключили — верни режим и переверни тест");
-        assert_eq!(effective_mode(Some("local")), Mode::Server);
+        assert_eq!(effective_mode(Some("local"), None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("local"), Some("whisper_cpp")), Mode::WhisperCpp);
     }
 
     /// Гвоздь задачи «развилка выбирает правильную ветку»: в режиме `Local`
@@ -1166,5 +1199,34 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.to_string(), "local.notWired");
+    }
+
+    /// В режиме `WhisperCpp` развилка идёт в `whisper_cpp::transcribe`, а не в
+    /// `submit` шлюза. Различитель — сам ответ стаба: whisper-server отдаёт
+    /// `verbose_json`, и ветка whisper его разбирает в дорожку; ветка шлюза на
+    /// том же теле упала бы на разборе `id` задачи. Заодно: `on_job` не зовётся
+    /// (у whisper-server нет id задачи), иначе замыкание паникует.
+    #[tokio::test]
+    async fn развилка_в_whisper_cpp_идёт_к_whisper_серверу_и_не_заводит_задачу_на_шлюзе() {
+        let url = crate::whisper_cpp::test_support::стаб(
+            "200 OK",
+            r#"{"text": " ок", "segments": [{"id": 0, "start": 0.0, "end": 1.0, "text": " ок"}]}"#,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let r = transcribe_track(
+            Mode::WhisperCpp,
+            &client,
+            &url,
+            "",
+            &crate::whisper_cpp::test_support::wav_файл(),
+            Label::Owner,
+            |_| panic!("у whisper-server нет id задачи — on_job звать нечем"),
+        )
+        .await
+        .expect("ветка whisper обязана разобрать ответ стаба");
+        assert_eq!(r.text, "ок");
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.segments[0].label, Label::Owner);
     }
 }

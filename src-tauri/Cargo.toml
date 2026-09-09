@@ -37,7 +37,11 @@ reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 # `io-util` — ради `AsyncWriteExt` в `local.rs`: скачивание модели пишет
 # приходящие по сети чанки в файл, не блокируя рантайм синхронным
 # `std::fs::write` на каждый чанк.
-tokio = { version = "1", features = ["time", "fs", "macros", "io-util"] }
+# `net` — только ради тестов `whisper_cpp.rs`: стаб-сервер на `TcpListener`
+# отвечает заранее заготовленным телом, чтобы проверить сетевой путь без
+# настоящего whisper-server.
+# `sync` — тоже только тесты: `oneshot` передаёт голову запроса из стаба наружу.
+tokio = { version = "1", features = ["time", "fs", "macros", "io-util", "net", "sync"] }
 thiserror = "2"
 sysinfo = "0.32"
 sys-locale = "0.3.2"

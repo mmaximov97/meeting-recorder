@@ -16,6 +16,7 @@ mod retention;
 mod status;
 mod transcribe;
 mod update;
+mod whisper_cpp;
 mod tray;
 
 use audio::Ctl;

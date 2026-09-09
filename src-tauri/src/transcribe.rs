@@ -1198,25 +1198,31 @@ mod tests {
     }
 
     /// В режиме `WhisperCpp` развилка идёт в `whisper_cpp::transcribe`, а не в
-    /// `submit` шлюза: `on_job` не зовётся (задачи с id у whisper-server
-    /// нет), а недоступный адрес даёт сетевую ошибку, не `SubmitRejected`.
+    /// `submit` шлюза. Различитель — сам ответ стаба: whisper-server отдаёт
+    /// `verbose_json`, и ветка whisper его разбирает в дорожку; ветка шлюза на
+    /// том же теле упала бы на разборе `id` задачи. Заодно: `on_job` не зовётся
+    /// (у whisper-server нет id задачи), иначе замыкание паникует.
     #[tokio::test]
-    async fn развилка_в_whisper_cpp_не_заводит_задачу_на_шлюзе() {
+    async fn развилка_в_whisper_cpp_идёт_к_whisper_серверу_и_не_заводит_задачу_на_шлюзе() {
+        let url = crate::whisper_cpp::test_support::стаб(
+            "200 OK",
+            r#"{"text": " ок", "segments": [{"id": 0, "start": 0.0, "end": 1.0, "text": " ок"}]}"#,
+        )
+        .await;
         let client = reqwest::Client::new();
-        let err = transcribe_track(
+        let r = transcribe_track(
             Mode::WhisperCpp,
             &client,
-            "http://127.0.0.1:1",
+            &url,
             "",
-            Path::new("/dev/null"),
+            &crate::whisper_cpp::test_support::wav_файл(),
             Label::Owner,
             |_| panic!("у whisper-server нет id задачи — on_job звать нечем"),
         )
         .await
-        .unwrap_err();
-        assert!(
-            matches!(err, TranscribeError::Network(_) | TranscribeError::Io(_)),
-            "ожидали сеть или файл, получили: {err}"
-        );
+        .expect("ветка whisper обязана разобрать ответ стаба");
+        assert_eq!(r.text, "ок");
+        assert_eq!(r.segments.len(), 1);
+        assert_eq!(r.segments[0].label, Label::Owner);
     }
 }

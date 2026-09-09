@@ -106,10 +106,93 @@ pub async fn transcribe(
     parse_response(&body, label)
 }
 
+/// Стаб whisper-server и тестовый WAV-файл — вынесены из `mod tests` в
+/// отдельный `pub(crate)` модуль, потому что нужны не только сетевым тестам
+/// этого файла, но и тесту развилки в `transcribe.rs`: там нужен настоящий
+/// ответ whisper-server (`verbose_json`), чтобы отличить свою ветку от
+/// ветки шлюза, а не просто получить сетевую ошибку — её дала бы и ветка
+/// шлюза на том же адресе.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Стаб whisper-server: принимает ОДИН запрос, дочитывает его тело по
+    /// `Content-Length` (иначе reqwest увидит обрыв посреди отправки файла)
+    /// и отвечает заданным статусом и телом. Возвращает адрес.
+    pub(crate) async fn стаб(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let (mut header_end, mut content_length) = (None, 0usize);
+            loop {
+                let n = sock.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        content_length = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(he) = header_end {
+                    if buf.len() - he >= content_length {
+                        break;
+                    }
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.shutdown().await.ok();
+        });
+        addr
+    }
+
+    /// Каталог уникален на каждый вызов (счётчик + pid, тот же приём, что
+    /// `ScratchDir` в `local.rs`): три теста — это `#[tokio::test]`,
+    /// выполняются в одном процессе конкурентно, и один путь на всех дал бы
+    /// гонку — `WavWriter::create` в одном тесте обрезает файл, который
+    /// `Part::file` в другом уже открыл и с которого снял длину, а стаб потом
+    /// вечно ждёт байты по уже нечестному `Content-Length`.
+    pub(crate) fn wav_файл() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("mr-wcpp-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mic.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..1600 {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+        path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use super::test_support::{стаб, wav_файл};
 
     const ОТВЕТ: &str = r#"{
         "task": "transcribe",
@@ -160,77 +243,6 @@ mod tests {
     fn мусор_вместо_json_это_ошибка_разбора() {
         let err = parse_response("<html>404</html>", Label::Owner).unwrap_err();
         assert!(matches!(err, TranscribeError::Parse(_)), "получили {err}");
-    }
-
-    /// Стаб whisper-server: принимает ОДИН запрос, дочитывает его тело по
-    /// `Content-Length` (иначе reqwest увидит обрыв посреди отправки файла)
-    /// и отвечает заданным статусом и телом. Возвращает адрес.
-    async fn стаб(status: &'static str, body: &'static str) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            let (mut header_end, mut content_length) = (None, 0usize);
-            loop {
-                let n = sock.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                if header_end.is_none() {
-                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        header_end = Some(pos + 4);
-                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
-                        content_length = head
-                            .lines()
-                            .find_map(|l| l.strip_prefix("content-length:"))
-                            .and_then(|v| v.trim().parse().ok())
-                            .unwrap_or(0);
-                    }
-                }
-                if let Some(he) = header_end {
-                    if buf.len() - he >= content_length {
-                        break;
-                    }
-                }
-            }
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            sock.write_all(resp.as_bytes()).await.unwrap();
-            sock.shutdown().await.ok();
-        });
-        addr
-    }
-
-    /// Каталог уникален на каждый вызов (счётчик + pid, тот же приём, что
-    /// `ScratchDir` в `local.rs`): три теста — это `#[tokio::test]`,
-    /// выполняются в одном процессе конкурентно, и один путь на всех дал бы
-    /// гонку — `WavWriter::create` в одном тесте обрезает файл, который
-    /// `Part::file` в другом уже открыл и с которого снял длину, а стаб потом
-    /// вечно ждёт байты по уже нечестному `Content-Length`.
-    fn wav_файл() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("mr-wcpp-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("mic.wav");
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 16_000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut w = hound::WavWriter::create(&path, spec).unwrap();
-        for _ in 0..1600 {
-            w.write_sample(0i16).unwrap();
-        }
-        w.finalize().unwrap();
-        path
     }
 
     #[tokio::test]

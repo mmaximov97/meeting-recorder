@@ -91,10 +91,10 @@ xattr -cr /Applications/MeetRec.app
 - речь: [`ggml-large-v3-turbo-q5_0.bin`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin), 574 МБ — русский почти как у large-v3, в несколько раз быстрее;
 - детектор речи: [`ggml-silero-v5.1.2.bin`](https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin), 0,9 МБ — без него whisper придумывает текст в паузах, а дорожка микрофона на встрече — это в основном паузы.
 
-**Windows.** Скачать `whisper-bin-x64.zip` из [релизов whisper.cpp](https://github.com/ggml-org/whisper.cpp/releases/latest), распаковать, положить модели рядом с `whisper-server.exe` и запустить:
+**Windows.** Скачать `whisper-bin-x64.zip` из [релизов whisper.cpp](https://github.com/ggml-org/whisper.cpp/releases/latest) и распаковать: архив распаковывается в папку `Release\`; положите обе модели туда же и запустите из неё:
 
 ```
-whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
+.\whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
 ```
 
 `-t` — число потоков, ставьте по числу ядер. Без видеокарты часовая встреча считается около часа.
@@ -106,6 +106,11 @@ brew install cmake git
 git clone https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
 cmake -B build && cmake --build build -j
+```
+
+Обе модели положите в папку `whisper.cpp`, из неё и запускайте:
+
+```sh
 ./build/bin/whisper-server -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178
 ```
 
@@ -113,7 +118,7 @@ Metal подхватывается сам: на Apple Silicon часовая в�
 
 **В приложении.** Настройки → «Расшифровка встреч» → тип сервера «whisper.cpp server», адрес `http://127.0.0.1:8178`. Ключ не нужен.
 
-Одна оговорка: «Отменить расшифровку» в приложении отпускает запись сразу, но сервер досчитывает уже принятую дорожку до конца — у него нет команды отмены. Следующая расшифровка встанет за ней.
+Одна оговорка: «Отменить расшифровку» в приложении рвёт соединение сразу, но сервер замечает это только между шагами расчёта и прерывает работу не мгновенно — следующая расшифровка может подождать за ней десятки секунд.
 
 ## Горячие клавиши
 

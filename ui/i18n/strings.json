@@ -316,8 +316,8 @@
       "en": "The tracks go to the address you set, with your key. Tells the other speakers apart."
     },
     "whisperCppHint": {
-      "ru": "Сервер на этом компьютере или в локальной сети, без ключа. Собеседников между собой не различает. Отмена в приложении не останавливает расчёт на сервере.",
-      "en": "A server on this machine or on the local network, no key. Won't tell the other speakers apart. Cancelling in the app does not stop the server's computation."
+      "ru": "Сервер на этом компьютере или в локальной сети, без ключа. Собеседников между собой не различает. Отмена в приложении прерывает расчёт на сервере не сразу: следующая дорожка может подождать.",
+      "en": "A server on this machine or on the local network, no key. Won't tell the other speakers apart. Cancelling in the app stops the server's work with a delay: the next track may have to wait."
     },
     "whisperCppUrl": {
       "ru": "http://127.0.0.1:8178",

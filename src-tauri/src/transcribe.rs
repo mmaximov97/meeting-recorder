@@ -85,7 +85,7 @@ pub enum TranscribeError {
     Network(#[from] reqwest::Error),
     #[error("файл не читается: {0}")]
     Io(#[from] std::io::Error),
-    #[error("не удалось разобрать ответ шлюза: {0}")]
+    #[error("не удалось разобрать ответ сервера расшифровки: {0}")]
     Parse(#[from] serde_json::Error),
     #[error("шлюз отклонил запрос ({0}) — проверьте ключ")]
     SubmitRejected(String),
@@ -144,6 +144,10 @@ pub const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// сдаётся раньше сервера. Если задача действительно зависла, её похоронит
 /// таймаут шлюза, и мы увидим `failed` с внятной причиной вместо своего
 /// немого «не завершилась за отведённое время».
+///
+/// Тот же бюджет ограничивает и запрос к whisper-server целиком
+/// (`whisper_cpp::transcribe`) — там нет отдельного поллинга, весь расчёт
+/// идёт под одним `tokio::time::timeout(POLL_DEADLINE, ...)`.
 pub const POLL_DEADLINE: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// Сколько неудачных опросов ПОДРЯД терпим, прежде чем признать поражение.

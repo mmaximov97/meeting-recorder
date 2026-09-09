@@ -82,7 +82,38 @@ xattr -cr /Applications/MeetRec.app
 
 Если шлюза нет, можно поднять свой: [selfhost-ai-lab](https://github.com/mmaximov97/selfhost-ai-lab) — он ставится на ваше железо и говорит на том API, которое ждёт MeetRec: `POST /v1/audio/transcriptions/async` для отправки дорожки и `GET /v1/jobs/:id` для опроса. Установка описана там же. Подойдёт любой сервер с этими двумя ручками.
 
-Режим, в котором расшифровка считается прямо на вашей машине и в интернет не уходит ничего, сейчас в работе.
+### Свой whisper-сервер на этом компьютере
+
+Второй вариант — `whisper-server` из [whisper.cpp](https://github.com/ggml-org/whisper.cpp), запущенный на вашей же машине. Звук не покидает компьютер, ключ не нужен. Чего он не умеет: различать собеседников между собой — в расшифровке будут «Владелец» и «Собеседники», без номеров.
+
+Модели, две, положить в одну папку:
+
+- речь: [`ggml-large-v3-turbo-q5_0.bin`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin), 574 МБ — русский почти как у large-v3, в несколько раз быстрее;
+- детектор речи: [`ggml-silero-v5.1.2.bin`](https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin), 0,9 МБ — без него whisper придумывает текст в паузах, а дорожка микрофона на встрече — это в основном паузы.
+
+**Windows.** Скачать `whisper-bin-x64.zip` из [релизов whisper.cpp](https://github.com/ggml-org/whisper.cpp/releases/latest), распаковать, положить модели рядом с `whisper-server.exe` и запустить:
+
+```
+whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
+```
+
+`-t` — число потоков, ставьте по числу ядер. Без видеокарты часовая встреча считается около часа.
+
+**macOS.** Пакет `brew install whisper-cpp` сервера не содержит, нужна сборка из исходников — три минуты:
+
+```sh
+brew install cmake git
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp
+cmake -B build && cmake --build build -j
+./build/bin/whisper-server -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178
+```
+
+Metal подхватывается сам: на Apple Silicon часовая встреча считается за несколько минут.
+
+**В приложении.** Настройки → «Расшифровка встреч» → тип сервера «whisper.cpp server», адрес `http://127.0.0.1:8178`. Ключ не нужен.
+
+Одна оговорка: «Отменить расшифровку» в приложении отпускает запись сразу, но сервер досчитывает уже принятую дорожку до конца — у него нет команды отмены. Следующая расшифровка встанет за ней.
 
 ## Горячие клавиши
 

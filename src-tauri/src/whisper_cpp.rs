@@ -109,6 +109,7 @@ pub async fn transcribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const ОТВЕТ: &str = r#"{
         "task": "transcribe",
@@ -161,8 +162,6 @@ mod tests {
         assert!(matches!(err, TranscribeError::Parse(_)), "получили {err}");
     }
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     /// Стаб whisper-server: принимает ОДИН запрос, дочитывает его тело по
     /// `Content-Length` (иначе reqwest увидит обрыв посреди отправки файла)
     /// и отвечает заданным статусом и телом. Возвращает адрес.
@@ -207,8 +206,17 @@ mod tests {
         addr
     }
 
+    /// Каталог уникален на каждый вызов (счётчик + pid, тот же приём, что
+    /// `ScratchDir` в `local.rs`): три теста — это `#[tokio::test]`,
+    /// выполняются в одном процессе конкурентно, и один путь на всех дал бы
+    /// гонку — `WavWriter::create` в одном тесте обрезает файл, который
+    /// `Part::file` в другом уже открыл и с которого снял длину, а стаб потом
+    /// вечно ждёт байты по уже нечестному `Content-Length`.
     fn wav_файл() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("mr-wcpp-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("mr-wcpp-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("mic.wav");
         let spec = hound::WavSpec {

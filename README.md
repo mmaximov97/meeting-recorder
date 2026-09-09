@@ -82,7 +82,38 @@ MeetRec does not ship with a transcription server. You put the address and the a
 
 If you don't have a gateway, [selfhost-ai-lab](https://github.com/mmaximov97/selfhost-ai-lab) is one you can run on your own hardware. It speaks the API MeetRec expects — `POST /v1/audio/transcriptions/async` to submit a track, `GET /v1/jobs/:id` to poll it — and setting it up is documented there. Any server exposing the same two endpoints will do.
 
-A local mode, where the audio is transcribed on your own machine and nothing leaves it, is in progress.
+### Your own whisper server on this machine
+
+The second option is `whisper-server` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp), running on the same machine. Audio never leaves the computer and no key is needed. What it can't do: tell the other speakers apart — the transcript will say "Owner" and "Others", without numbers.
+
+Two models, put them in one folder:
+
+- speech: [`ggml-large-v3-turbo-q5_0.bin`](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin), 574 MB — close to large-v3 in quality, several times faster;
+- voice activity detector: [`ggml-silero-v5.1.2.bin`](https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin), 0.9 MB — without it whisper makes up text in the pauses, and a microphone track of a meeting is mostly pauses.
+
+**Windows.** Download `whisper-bin-x64.zip` from the [whisper.cpp releases](https://github.com/ggml-org/whisper.cpp/releases/latest), unpack it, put the models next to `whisper-server.exe` and run:
+
+```
+whisper-server.exe -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178 -t 8
+```
+
+`-t` is the thread count; match it to your cores. Without a GPU an hour-long meeting takes about an hour.
+
+**macOS.** The `brew install whisper-cpp` package does not include the server, so build from source — about three minutes:
+
+```sh
+brew install cmake git
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp
+cmake -B build && cmake --build build -j
+./build/bin/whisper-server -m ggml-large-v3-turbo-q5_0.bin -l auto --vad -vm ggml-silero-v5.1.2.bin --port 8178
+```
+
+Metal is picked up automatically: on Apple Silicon an hour-long meeting takes a few minutes.
+
+**In the app.** Settings → Transcription → server type "whisper.cpp server", address `http://127.0.0.1:8178`. No key.
+
+One caveat: "Cancel transcription" in the app releases the recording immediately, but the server finishes the track it has already accepted — it has no cancel command. The next transcription queues behind it.
 
 ## Shortcuts
 

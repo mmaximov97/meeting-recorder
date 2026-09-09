@@ -1430,7 +1430,7 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
     // `local::transcribe_local` — «менять код в `main.rs` не придётся, только
     // тело этой функции»: первая же удачная локальная расшифровка роняла бы
     // процесс паникой вместо того, чтобы отдать текст.
-    let (url, key) = match ключи_шлюза(mode, cfg.stt_gateway_url, cfg.stt_api_key) {
+    let (url, key) = match параметры_сервера(mode, cfg.stt_gateway_url, cfg.stt_api_key) {
         Ok(pair) => pair,
         Err(msg) => {
             emit_transcribe_error(app, folder, base, msg);
@@ -1528,27 +1528,33 @@ async fn run_transcription(folder: Option<String>, base: String, app: AppHandle)
 ///
 /// id кладётся в очередь ДО ожидания — иначе отмена, нажатая в первую же
 /// минуту, не нашла бы что гасить на шлюзе.
-/// Адрес и ключ шлюза — но только там, где они нужны.
 ///
-/// В режиме `Local` расшифровка считается на этой же машине, шлюз не
-/// участвует, и требовать его настройки было бы ложным препятствием: человек
-/// с пустым конфигом получал бы «настройте URL и ключ шлюза» на работу,
-/// которая никуда не отправляется. Пустые строки, которые уходят дальше по
-/// коду, в этом режиме никто не читает — до HTTP дело не доходит.
-fn ключи_шлюза(
+/// Адрес и ключ для выбранного режима, уже вычищенные.
+///
+/// `Gateway` требует и адрес, и ключ. `WhisperCpp` — только адрес: ключа у
+/// whisper-server нет, введённый по привычке игнорируется, а не уезжает в
+/// запрос. `Local` не ходит никуда — пустые строки, которые дальше по коду
+/// никто не читает. Хвостовой `/` срезается здесь, потому что путь
+/// (`/v1/...` у шлюза, `/inference` у whisper-server) дописывает клиент.
+fn параметры_сервера(
     mode: transcribe::Mode,
     url: Option<String>,
     key: Option<String>,
 ) -> Result<(String, String), &'static str> {
-    if mode == transcribe::Mode::Local {
-        return Ok((String::new(), String::new()));
-    }
-    match (url, key) {
-        (Some(u), Some(k)) if !u.trim().is_empty() && !k.trim().is_empty() => Ok((
-            u.trim().trim_end_matches('/').to_string(),
-            k.trim().to_string(),
-        )),
-        _ => Err("настройте URL и ключ шлюза"),
+    let чистый_адрес = url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty());
+    let чистый_ключ = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    match mode {
+        transcribe::Mode::Local => Ok((String::new(), String::new())),
+        transcribe::Mode::WhisperCpp => match чистый_адрес {
+            Some(u) => Ok((u, String::new())),
+            None => Err("настройте адрес whisper-сервера"),
+        },
+        transcribe::Mode::Gateway => match (чистый_адрес, чистый_ключ) {
+            (Some(u), Some(k)) => Ok((u, k)),
+            _ => Err("настройте URL и ключ шлюза"),
+        },
     }
 }
 
@@ -2683,36 +2689,65 @@ mod tests {
     // ---- локальный режим и отказ обеих дорожек -------------------------------
 
     /// Локальный режим считает на этой же машине и на шлюз не ходит, поэтому
-    /// требовать его адрес и ключ нельзя: человек с пустым конфигом получал бы
-    /// «настройте URL и ключ шлюза» на работу, которая никуда не отправляется.
+    /// требовать его адрес и ключ нельзя.
     #[test]
-    fn локальный_режим_не_требует_ключей_шлюза() {
+    fn локальный_режим_не_требует_параметров_сервера() {
         assert_eq!(
-            ключи_шлюза(transcribe::Mode::Local, None, None),
+            параметры_сервера(transcribe::Mode::Local, None, None),
             Ok((String::new(), String::new()))
         );
     }
 
-    /// Серверный режим без настроек — по-прежнему отказ, а не пустые строки:
-    /// иначе запрос уйдёт в никуда и человек увидит сетевую ошибку вместо
-    /// понятного «настройте шлюз».
+    /// Шлюз без настроек — по-прежнему отказ, а не пустые строки: иначе
+    /// запрос уйдёт в никуда и человек увидит сетевую ошибку вместо понятного
+    /// «настройте шлюз».
     #[test]
-    fn серверный_режим_без_настроек_отказывает() {
-        assert!(ключи_шлюза(transcribe::Mode::Gateway, None, None).is_err());
-        assert!(ключи_шлюза(
+    fn шлюз_без_настроек_отказывает() {
+        assert!(параметры_сервера(transcribe::Mode::Gateway, None, None).is_err());
+        assert!(параметры_сервера(
             transcribe::Mode::Gateway,
             Some("   ".to_string()),
             Some("k".to_string())
         )
         .is_err());
+        assert!(параметры_сервера(
+            transcribe::Mode::Gateway,
+            Some("http://localhost:8080".to_string()),
+            None
+        )
+        .is_err());
+    }
+
+    /// whisper-server ключа не имеет: нужен только адрес, введённый ключ
+    /// игнорируется, а не уходит в запрос.
+    #[test]
+    fn whisper_cpp_требует_только_адрес() {
+        assert_eq!(
+            параметры_сервера(
+                transcribe::Mode::WhisperCpp,
+                Some("http://127.0.0.1:8178/".to_string()),
+                None
+            ),
+            Ok(("http://127.0.0.1:8178".to_string(), String::new()))
+        );
+        assert_eq!(
+            параметры_сервера(
+                transcribe::Mode::WhisperCpp,
+                Some("http://127.0.0.1:8178".to_string()),
+                Some("лишний".to_string())
+            ),
+            Ok(("http://127.0.0.1:8178".to_string(), String::new()))
+        );
+        let err = параметры_сервера(transcribe::Mode::WhisperCpp, None, None).unwrap_err();
+        assert!(err.contains("whisper"), "{err}");
     }
 
     /// Хвостовой слеш и пробелы срезаются здесь, а не у места вызова: путь
-    /// `/v1/...` дописывает клиент транскрипции, и `.../` дал бы двойной слеш.
+    /// (`/v1/...` или `/inference`) дописывает клиент, и `.../` дал бы двойной слеш.
     #[test]
-    fn серверный_режим_чистит_пробелы_и_хвостовой_слеш() {
+    fn шлюз_чистит_пробелы_и_хвостовой_слеш() {
         assert_eq!(
-            ключи_шлюза(
+            параметры_сервера(
                 transcribe::Mode::Gateway,
                 Some("  http://localhost:8080/  ".to_string()),
                 Some("  секрет  ".to_string())

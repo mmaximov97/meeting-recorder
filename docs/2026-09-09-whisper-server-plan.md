@@ -16,15 +16,16 @@
 - Каждая правка — сначала падающий тест, потом код (TDD).
 - **GUI-крейт (`src-tauri`) под Linux не собирается и тесты его здесь не запускаются.** Проверка на этой машине — компиляция вместе с тестами:
   ```bash
+  BUILD_ROOT=<каталог сборочной машины>   # тот же, что в docs/2026-08-27-transcription-robustness-handoff.md
   export RUSTUP_HOME=$BUILD_ROOT/rust/rustup CARGO_HOME=$BUILD_ROOT/rust/cargo \
          XWIN_CACHE_DIR=$BUILD_ROOT/rust/xwin CARGO_TARGET_DIR=$BUILD_ROOT/rust/mr-target
   LLVM=$BUILD_ROOT/rust/llvm/root/usr/lib/llvm-18
   export LD_LIBRARY_PATH="$LLVM/lib:$BUILD_ROOT/rust/llvm/root/usr/lib/x86_64-linux-gnu"
   export PATH="$LLVM/bin:$CARGO_HOME/bin:$PATH"
-  flock -w 3600 <lock-файл> cargo xwin check -p meeting-recorder-gui --target x86_64-pc-windows-msvc --all-targets -j 4
+  cargo xwin check -p meeting-recorder-gui --target x86_64-pc-windows-msvc --all-targets -j 4
   ```
   «Тест падает» на этой машине означает: не компилируется из-за отсутствующего символа. Запуск тестов — `cargo test --workspace` на macOS/Windows или GitHub Actions `check.yml` после пуша ветки. На Mac/Windows шаги «Run» ниже выполняются буквально.
-- Тяжёлое (`cargo`, сборка whisper.cpp) — только под `flock -w 3600 <lock-файл>`, перед запуском `cat /proc/loadavg`, при 1-минутной нагрузке выше 12 — ждать.
+- Тяжёлое (`cargo`, сборка whisper.cpp) — на общей сборочной машине через её очередь, перед запуском `cat /proc/loadavg`, при 1-минутной нагрузке выше 12 — ждать.
 - Коммиты без `Co-Authored-By`. Сообщения по-русски, префиксы `feat:`/`fix:`/`docs:`/`test:`.
 - Ветка: `feat/whisper-server` (уже есть, от `origin/master`, в ней лежит спека).
 - Ничего в `local.rs` и в скрытом режиме «На этом компьютере» не менять.
@@ -1060,7 +1061,7 @@ git commit -m "docs: как поднять whisper-server на Windows и macOS;
 ```bash
 cat /proc/loadavg
 cd $BUILD_ROOT && git clone --depth 1 https://github.com/ggml-org/whisper.cpp
-cd whisper.cpp && flock -w 3600 <lock-файл> bash -c 'cmake -B build -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON && cmake --build build -j 4 --target whisper-server'
+cd whisper.cpp && cmake -B build -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON && cmake --build build -j 4 --target whisper-server
 ls -la build/bin/whisper-server
 ```
 
@@ -1078,16 +1079,16 @@ ls -l   # 574041195 и 885098 байт
 - [ ] **Step 3: Запустить сервер и подготовить русскую речь**
 
 ```bash
-cd $BUILD_ROOT/whisper.cpp && flock -w 3600 <lock-файл> ./build/bin/whisper-server \
+cd $BUILD_ROOT/whisper.cpp && ./build/bin/whisper-server \
   -m $BUILD_ROOT/models/ggml-large-v3-turbo-q5_0.bin -l auto \
   --vad -vm $BUILD_ROOT/models/ggml-silero-v5.1.2.bin --port 8178 -t 4 &
 ```
 
-Русская речь: голосовое из Telegram, уже расшифрованное ai-lab 09.09 («Это локальная модель, её как бы нет…»):
+Русская речь: любое голосовое сообщение, для которого уже есть эталонная расшифровка шлюзом («Это локальная модель, её как бы нет…»):
 
 ```bash
 S=<временный каталог>
-ffmpeg -y -i $HOME/downloads/<голосовое>.oga -ac 1 -ar 16000 -sample_fmt s16 $S/ru.wav
+ffmpeg -y -i <голосовое>.oga -ac 1 -ar 16000 -sample_fmt s16 $S/ru.wav
 ```
 
 Если `ffmpeg` нет — `python3 -c "import soundfile"` и конвертация через `soundfile`/`resampy`; если и их нет — попросить у владельца любой `*.mic.wav` из `Recordings`.
@@ -1101,7 +1102,7 @@ curl -s http://127.0.0.1:8178/inference \
 python3 -c "import json;d=json.load(open('$S/inference.json'));print(d['text'][:200]);print(len(d['segments']),'segments');print(d['segments'][0])"
 ```
 
-Expected: текст про «локальную модель», сегменты с `start`/`end`. Сверить с транскриптом ai-lab по смыслу.
+Expected: текст про «локальную модель», сегменты с `start`/`end`. Сверить с эталонной расшифровкой по смыслу.
 
 - [ ] **Step 5: Фикстура и тест**
 
@@ -1109,7 +1110,7 @@ Expected: текст про «локальную модель», сегмент�
 mkdir -p src-tauri/fixtures
 python3 - <<'EOF'
 import json,os
-S=os.environ.get('S','<временный каталог>')
+S=os.environ['S']   # тот же временный каталог, что в шагах 3–4
 d=json.load(open(f'{S}/inference.json'))
 for s in d['segments']: s.pop('tokens',None)   # токены весят много и не читаются
 json.dump(d,open('src-tauri/fixtures/whisper_cpp_inference.json','w'),ensure_ascii=False,indent=1)

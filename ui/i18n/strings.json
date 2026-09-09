@@ -514,12 +514,12 @@
       "en": "Only system audio made it in. Your microphone isn't there. Check it in settings."
     },
     "quietTitle": {
-      "ru": "Вас слышно заметно тише",
-      "en": "Your voice is much quieter"
+      "ru": "Вас почти не слышно",
+      "en": "Your voice is barely there"
     },
     "quietText": {
-      "ru": "Ваш микрофон записался намного тише собеседников — расшифровка может пропустить ваши реплики. Проверьте его в настройках перед следующей встречей.",
-      "en": "Your microphone came out far quieter than the others, so the transcript may miss what you said. Check it in settings before the next meeting."
+      "ru": "Микрофон записал ваш голос слишком тихо, почти вровень с шумом — расшифровка может пропустить ваши реплики. Проверьте его в настройках перед следующей встречей.",
+      "en": "Your microphone recorded your voice too quietly, barely above the noise, so the transcript may miss what you said. Check it in settings before the next meeting."
     },
     "transcriptTitle": {
       "ru": "Расшифровка не получилась",

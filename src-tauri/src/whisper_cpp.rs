@@ -7,8 +7,9 @@
 //! Ключа нет, отмены нет, один запрос за раз. Подробности и что из этого
 //! следует для интерфейса — `docs/2026-09-09-whisper-server-design.md`.
 
-use crate::transcribe::{Label, Segment, TrackResult, TranscribeError};
+use crate::transcribe::{Label, Segment, TrackResult, TranscribeError, POLL_DEADLINE};
 use serde::Deserialize;
+use std::path::Path;
 
 /// Ровно те поля `verbose_json`, что нужны. Остальное (`id`, `end`, `tokens`,
 /// `language`, вероятности языков) не читается.
@@ -45,6 +46,64 @@ pub fn parse_response(body: &str, label: Label) -> Result<TrackResult, Transcrib
         segments.push(Segment { start, label, text: s.text.trim().to_string(), speaker: None });
     }
     Ok(TrackResult { segments, text: resp.text.trim().to_string() })
+}
+
+/// Сколько символов тела ошибки показать человеку. Тела whisper-server
+/// однострочные; предел — на случай HTML-страницы от чужого сервера по
+/// этому адресу.
+const ERROR_BODY_CHARS: usize = 200;
+
+/// Одна дорожка целиком: отправить, дождаться, разобрать.
+///
+/// Таймаута на сам запрос нет: ответ приходит только после полного расчёта,
+/// а это на CPU — до часа на часовую дорожку. Граница одна, общая на весь
+/// вызов, — `POLL_DEADLINE`, тот же предел, что у ожидания задачи на шлюзе:
+/// клиент не сдаётся раньше, чем сдался бы там.
+///
+/// Отмена (`select!` в `spawn_transcribe_worker`) бросает эту future, reqwest
+/// закрывает соединение — для приложения дорожка отменена сразу. Сервер при
+/// этом ДОСЧИТЫВАЕТ запрос до конца и только потом замечает обрыв (он
+/// однопоточный, API отмены у него нет); следующая дорожка встанет за ним.
+/// Это записано в README, обойти нельзя.
+pub async fn transcribe(
+    client: &reqwest::Client,
+    url: &str,
+    wav_path: &Path,
+    label: Label,
+) -> Result<TrackResult, TranscribeError> {
+    let track = wav_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio.wav")
+        .to_string();
+    // `Part::file` — потоком через открытый дескриптор, тот же приём, что
+    // `transcribe::submit`: дорожка на часовую встречу — ~115 МБ.
+    let part = reqwest::multipart::Part::file(wav_path)
+        .await?
+        .file_name(track.clone())
+        .mime_str("audio/wav")?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        // `auto` — язык встречи не связан с языком интерфейса.
+        .text("language", "auto")
+        .text("response_format", "verbose_json")
+        .text("temperature", "0.0");
+
+    let запрос = async {
+        let resp = client.post(format!("{url}/inference")).multipart(form).send().await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        Ok::<_, TranscribeError>((status, body))
+    };
+    let (status, body) = match tokio::time::timeout(POLL_DEADLINE, запрос).await {
+        Ok(r) => r?,
+        Err(_) => return Err(TranscribeError::Timeout(track)),
+    };
+    if !status.is_success() {
+        let короткое: String = body.chars().take(ERROR_BODY_CHARS).collect();
+        return Err(TranscribeError::JobFailed(track, format!("{status}: {}", короткое.trim())));
+    }
+    parse_response(&body, label)
 }
 
 #[cfg(test)]
@@ -100,5 +159,102 @@ mod tests {
     fn мусор_вместо_json_это_ошибка_разбора() {
         let err = parse_response("<html>404</html>", Label::Owner).unwrap_err();
         assert!(matches!(err, TranscribeError::Parse(_)), "получили {err}");
+    }
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Стаб whisper-server: принимает ОДИН запрос, дочитывает его тело по
+    /// `Content-Length` (иначе reqwest увидит обрыв посреди отправки файла)
+    /// и отвечает заданным статусом и телом. Возвращает адрес.
+    async fn стаб(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let (mut header_end, mut content_length) = (None, 0usize);
+            loop {
+                let n = sock.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        content_length = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(he) = header_end {
+                    if buf.len() - he >= content_length {
+                        break;
+                    }
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.shutdown().await.ok();
+        });
+        addr
+    }
+
+    fn wav_файл() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mr-wcpp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mic.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..1600 {
+            w.write_sample(0i16).unwrap();
+        }
+        w.finalize().unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn успешный_ответ_разбирается_в_дорожку() {
+        let url = стаб("200 OK", ОТВЕТ).await;
+        let client = reqwest::Client::new();
+        let r = transcribe(&client, &url, &wav_файл(), Label::Owner).await.unwrap();
+        assert_eq!(r.segments.len(), 2);
+        assert_eq!(r.text, "Привет. Это проверка.");
+    }
+
+    /// 400/500 от whisper-server — короткий человеческий текст («no 'file'
+    /// field», «failed to read WAV»); он и уходит в карточку записи, вместе
+    /// со статусом. Никакого «проверьте ключ»: ключа у этого сервера нет.
+    #[tokio::test]
+    async fn ошибка_сервера_уходит_с_её_текстом_и_без_совета_про_ключ() {
+        let url = стаб("500 Internal Server Error", "failed to read WAV").await;
+        let client = reqwest::Client::new();
+        let err = transcribe(&client, &url, &wav_файл(), Label::Owner).await.unwrap_err();
+        let текст = err.to_string();
+        assert!(текст.contains("500"), "{текст}");
+        assert!(текст.contains("failed to read WAV"), "{текст}");
+        assert!(!текст.contains("ключ"), "{текст}");
+        assert!(matches!(err, TranscribeError::JobFailed(ref track, _) if track == "mic.wav"), "{err}");
+    }
+
+    /// Сервер не запущен — сетевая ошибка reqwest как есть: «connection
+    /// refused» на localhost и есть честный диагноз.
+    #[tokio::test]
+    async fn недоступный_сервер_это_сетевая_ошибка() {
+        let client = reqwest::Client::new();
+        let err = transcribe(&client, "http://127.0.0.1:1", &wav_файл(), Label::Owner).await.unwrap_err();
+        assert!(matches!(err, TranscribeError::Network(_)), "{err}");
     }
 }

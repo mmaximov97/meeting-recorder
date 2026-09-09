@@ -205,6 +205,11 @@ mod tests {
         ]
     }"#;
 
+    /// Живой ответ whisper-server b4938+ на русскую речь (09.09.2026), без
+    /// токенов. Если формат `verbose_json` у сервера поменяется, первым
+    /// упадёт этот тест, а не расшифровка у человека.
+    const ЖИВОЙ_ОТВЕТ: &str = include_str!("../fixtures/whisper_cpp_inference.json");
+
     #[test]
     fn сегменты_разбираются_с_таймкодами_и_без_ведущих_пробелов() {
         let r = parse_response(ОТВЕТ, Label::Owner).unwrap();
@@ -243,6 +248,14 @@ mod tests {
     fn мусор_вместо_json_это_ошибка_разбора() {
         let err = parse_response("<html>404</html>", Label::Owner).unwrap_err();
         assert!(matches!(err, TranscribeError::Parse(_)), "получили {err}");
+    }
+
+    #[test]
+    fn живой_ответ_сервера_разбирается() {
+        let r = parse_response(ЖИВОЙ_ОТВЕТ, Label::Owner).unwrap();
+        assert!(!r.segments.is_empty());
+        assert!(r.text.to_lowercase().contains("модел"), "{}", r.text);
+        assert!(r.segments.windows(2).all(|w| w[0].start <= w[1].start), "таймкоды по возрастанию");
     }
 
     #[tokio::test]

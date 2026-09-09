@@ -4,6 +4,7 @@
 //! `GET /v1/jobs/:id`), здесь не изобретается заново.
 
 use crate::local;
+use crate::whisper_cpp;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -454,6 +455,10 @@ pub async fn poll_until_done(
 /// `Local` игнорирует `client`/`url`/`key`/`on_job` целиком (замыкание не
 /// вызывается вовсе — заводить задачу в очереди отмены здесь нечего) и идёт
 /// прямиком в честную заглушку `local::transcribe_local`.
+///
+/// `WhisperCpp` — один синхронный вызов `whisper_cpp::transcribe`; `key` и
+/// `on_job` в этой ветке не нужны: у whisper-server нет ни ключа, ни id
+/// задачи, класть в очередь отмены нечего.
 pub async fn transcribe_track(
     mode: Mode,
     client: &reqwest::Client,
@@ -465,7 +470,7 @@ pub async fn transcribe_track(
 ) -> Result<TrackResult, TranscribeError> {
     match mode {
         Mode::Local => local::transcribe_local(path, label).await.map_err(TranscribeError::from),
-        Mode::WhisperCpp => unreachable!("ветка появится в Task 5"),
+        Mode::WhisperCpp => whisper_cpp::transcribe(client, url, path, label).await,
         Mode::Gateway => {
             let job_id = submit(client, url, key, path).await?;
             on_job(job_id.clone());
@@ -1190,5 +1195,28 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.to_string(), "local.notWired");
+    }
+
+    /// В режиме `WhisperCpp` развилка идёт в `whisper_cpp::transcribe`, а не в
+    /// `submit` шлюза: `on_job` не зовётся (задачи с id у whisper-server
+    /// нет), а недоступный адрес даёт сетевую ошибку, не `SubmitRejected`.
+    #[tokio::test]
+    async fn развилка_в_whisper_cpp_не_заводит_задачу_на_шлюзе() {
+        let client = reqwest::Client::new();
+        let err = transcribe_track(
+            Mode::WhisperCpp,
+            &client,
+            "http://127.0.0.1:1",
+            "",
+            Path::new("/dev/null"),
+            Label::Owner,
+            |_| panic!("у whisper-server нет id задачи — on_job звать нечем"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, TranscribeError::Network(_) | TranscribeError::Io(_)),
+            "ожидали сеть или файл, получили: {err}"
+        );
     }
 }

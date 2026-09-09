@@ -600,6 +600,20 @@
       "en": "The microphone wasn't saved. It is still \"{name}\". Try again."
     }
   },
+  "update": {
+    "available": {
+      "ru": "Вышла версия {v}",
+      "en": "Version {v} is out"
+    },
+    "download": {
+      "ru": "Скачать",
+      "en": "Download"
+    },
+    "later": {
+      "ru": "Позже",
+      "en": "Later"
+    }
+  },
   "permission": {
     "deviceGone": {
       "ru": " (сейчас недоступен)",

@@ -9,13 +9,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-/// Где расшифровывать — действующее значение `Config::transcribe_mode`
-/// (`config.rs`). Разбор строки в это значение живёт здесь, а не в
-/// `config.rs`, тем же способом, каким разбор языка живёт в
-/// `i18n::effective_lang`, а не в `config.rs` (см. докблок поля `language`).
+/// Где считается расшифровка. Разбор из конфига — `effective_mode`; сам
+/// конфиг про сеть, очередь и движок ничего не знает (см. докблоки полей
+/// `transcribe_mode` и `transcribe_server` в `config.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Server,
+    /// Шлюз selfhost-ai-lab: async-задача, опрос, диаризация, ключ.
+    Gateway,
+    /// `whisper-server` из whisper.cpp: один синхронный POST, без ключа,
+    /// без диаризации. Обычно на этом же компьютере.
+    WhisperCpp,
+    /// Встроенный движок — честная заглушка, спрятана (`LOCAL_MODE_AVAILABLE`).
     Local,
 }
 
@@ -23,18 +27,22 @@ pub enum Mode {
 /// честная заглушка (`docs/2026-09-02-local-transcription-spec.md`). Пока так,
 /// режим спрятан целиком: из настроек его не выбрать (`ui/main.js`,
 /// `ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН`), а `"local"`, оставшийся в конфиге с тех пор,
-/// как выпадашка его предлагала, ведёт на сервер, а не в заглушку с «движок не
-/// подключён». Когда движок появится — поставить `true` здесь и в `main.js`,
-/// больше ничего возвращать не надо: каркас вокруг режима на месте.
+/// как выпадашка его предлагала, ведёт на выбранный сервер, а не в заглушку с
+/// «движок не подключён». Когда движок появится — поставить `true` здесь и в
+/// `main.js`, больше ничего возвращать не надо: каркас вокруг режима на месте.
 pub const LOCAL_MODE_AVAILABLE: bool = false;
 
-/// `Some("local")` — на этом компьютере, но только когда движок есть
-/// (`LOCAL_MODE_AVAILABLE`). Всё остальное, включая `None` (поля ещё не было
-/// в конфиге, когда он появился на диске) — сервер, как было всегда.
-pub fn effective_mode(cfg_mode: Option<&str>) -> Mode {
-    match cfg_mode {
-        Some("local") if LOCAL_MODE_AVAILABLE => Mode::Local,
-        _ => Mode::Server,
+/// Из двух полей конфига — один режим.
+///
+/// `transcribe_mode == "local"` побеждает, но только при поднятом
+/// `LOCAL_MODE_AVAILABLE`. Иначе решает тип сервера: `"whisper_cpp"` —
+/// whisper-server, всё остальное, включая `None` (поля ещё не было в конфиге,
+/// когда он появился на диске) и незнакомые строки — шлюз, как было всегда.
+pub fn effective_mode(cfg_mode: Option<&str>, cfg_server: Option<&str>) -> Mode {
+    match (cfg_mode, cfg_server) {
+        (Some("local"), _) if LOCAL_MODE_AVAILABLE => Mode::Local,
+        (_, Some("whisper_cpp")) => Mode::WhisperCpp,
+        _ => Mode::Gateway,
     }
 }
 
@@ -432,7 +440,7 @@ pub async fn poll_until_done(
 /// Одна дорожка целиком, с разводкой по режиму — единственное место в
 /// приложении, которое решает «локально или на сервере» на уровне вызова.
 ///
-/// `Server` — ровно то, что раньше было зашито прямо в `main.rs::дорожка_целиком`:
+/// `Gateway` — ровно то, что раньше было зашито прямо в `main.rs::дорожка_целиком`:
 /// `submit`, затем `on_job(job_id)` (кладёт задачу в очередь отмены и шлёт
 /// прогресс «Опрашиваю…»), затем `poll_until_done`. Ни порядок вызовов, ни
 /// сами функции здесь не поменялись — они переехали на одну функцию выше, но
@@ -452,7 +460,8 @@ pub async fn transcribe_track(
 ) -> Result<TrackResult, TranscribeError> {
     match mode {
         Mode::Local => local::transcribe_local(path, label).await.map_err(TranscribeError::from),
-        Mode::Server => {
+        Mode::WhisperCpp => unreachable!("ветка появится в Task 5"),
+        Mode::Gateway => {
             let job_id = submit(client, url, key, path).await?;
             on_job(job_id.clone());
             poll_until_done(client, url, key, &job_id, label).await
@@ -1129,19 +1138,29 @@ mod tests {
     }
 
     #[test]
-    fn отсутствие_поля_и_незнакомое_значение_дают_сервер() {
-        assert_eq!(effective_mode(None), Mode::Server);
-        assert_eq!(effective_mode(Some("что-то незнакомое")), Mode::Server);
-        assert_eq!(effective_mode(Some("server")), Mode::Server);
+    fn отсутствие_полей_и_незнакомые_значения_дают_шлюз() {
+        assert_eq!(effective_mode(None, None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("что-то незнакомое"), None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("server"), None), Mode::Gateway);
+        assert_eq!(effective_mode(None, Some("gateway")), Mode::Gateway);
+        assert_eq!(effective_mode(None, Some("что-то незнакомое")), Mode::Gateway);
     }
 
-    /// Пока движка нет, «local» в конфиге — это сервер: человек, у которого
-    /// значение осталось от прежней выпадашки, должен получить расшифровку, а
-    /// не «движок не подключён». Тест обязан развернуться, когда флаг поднимут.
     #[test]
-    fn local_в_конфиге_ведёт_на_сервер_пока_движка_нет() {
+    fn тип_сервера_whisper_cpp_разбирается_явно() {
+        assert_eq!(effective_mode(None, Some("whisper_cpp")), Mode::WhisperCpp);
+        assert_eq!(effective_mode(Some("server"), Some("whisper_cpp")), Mode::WhisperCpp);
+    }
+
+    /// Пока движка нет, «local» в конфиге — это сервер того типа, что выбран:
+    /// человек, у которого значение осталось от прежней выпадашки, должен
+    /// получить расшифровку, а не «движок не подключён». Тест обязан
+    /// развернуться, когда флаг поднимут.
+    #[test]
+    fn local_в_конфиге_ведёт_на_выбранный_сервер_пока_движка_нет() {
         assert!(!LOCAL_MODE_AVAILABLE, "движок подключили — верни режим и переверни тест");
-        assert_eq!(effective_mode(Some("local")), Mode::Server);
+        assert_eq!(effective_mode(Some("local"), None), Mode::Gateway);
+        assert_eq!(effective_mode(Some("local"), Some("whisper_cpp")), Mode::WhisperCpp);
     }
 
     /// Гвоздь задачи «развилка выбирает правильную ветку»: в режиме `Local`

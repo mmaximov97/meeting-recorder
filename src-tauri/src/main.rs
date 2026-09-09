@@ -1204,6 +1204,16 @@ fn set_transcribe_mode(mode: Option<String>, app: AppHandle) -> Result<(), Strin
     cfg.save(&app)
 }
 
+/// Тип сервера расшифровки: `"gateway"` — шлюз selfhost-ai-lab, `"whisper_cpp"`
+/// — whisper-server. Только сохраняет выбор: развилка читает конфиг при
+/// каждой расшифровке (`run_transcription`), второй источник правды не нужен.
+#[tauri::command]
+fn set_transcribe_server(kind: Option<String>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.transcribe_server = kind;
+    cfg.save(&app)
+}
+
 /// Состояние модели локальной расшифровки — по факту на диске и на диске
 /// свободного места, не по памяти между вызовами: окно настроек могли
 /// закрыть и открыть заново, скачивание могли прервать снаружи.
@@ -1391,7 +1401,7 @@ fn cancel_transcription(
 async fn run_transcription(folder: Option<String>, base: String, app: AppHandle) -> Result<(), String> {
     let (folder, base, app) = (&folder, base.as_str(), &app);
     let cfg = Config::load(app);
-    let mode = transcribe::effective_mode(cfg.transcribe_mode.as_deref());
+    let mode = transcribe::effective_mode(cfg.transcribe_mode.as_deref(), cfg.transcribe_server.as_deref());
 
     let dir = match folder {
         Some(f) => recordings_root().join(f),
@@ -1568,14 +1578,14 @@ async fn дорожка_целиком(
     folder: &Option<String>,
     base: &str,
 ) -> Result<transcribe::TrackResult, transcribe::TranscribeError> {
-    // «Отправляю…» в локальном режиме было бы враньём: никуда ничего не уходит,
-    // работа сразу считается на этой машине. Поэтому там первая же стадия —
-    // «Расшифровываю…». В серверном стадии две, и вторая наступает не по
-    // таймеру, а по факту заведённой задачи — то есть из `on_job`, между
-    // отправкой и первым опросом.
     match mode {
-        transcribe::Mode::Local => emit_transcribe_progress(app, folder, base, "polling"),
-        transcribe::Mode::Server => emit_transcribe_progress(app, folder, base, "uploading"),
+        // «Отправляю…» здесь было бы враньём: локальный движок никуда не
+        // шлёт, а whisper-server на localhost принимает файл за секунду и
+        // дальше считает — суть происходящего «Расшифровываю…».
+        transcribe::Mode::Local | transcribe::Mode::WhisperCpp => {
+            emit_transcribe_progress(app, folder, base, "polling")
+        }
+        transcribe::Mode::Gateway => emit_transcribe_progress(app, folder, base, "uploading"),
     }
     transcribe::transcribe_track(mode, client, url, key, path, label, |job_id| {
         queue.note_job(job_id);
@@ -1634,6 +1644,7 @@ fn main() {
             set_theme,
             set_transcribe_config,
             set_transcribe_mode,
+            set_transcribe_server,
             local_model_status,
             local_model_download,
             local_model_remove,
@@ -2686,9 +2697,9 @@ mod tests {
     /// понятного «настройте шлюз».
     #[test]
     fn серверный_режим_без_настроек_отказывает() {
-        assert!(ключи_шлюза(transcribe::Mode::Server, None, None).is_err());
+        assert!(ключи_шлюза(transcribe::Mode::Gateway, None, None).is_err());
         assert!(ключи_шлюза(
-            transcribe::Mode::Server,
+            transcribe::Mode::Gateway,
             Some("   ".to_string()),
             Some("k".to_string())
         )
@@ -2701,7 +2712,7 @@ mod tests {
     fn серверный_режим_чистит_пробелы_и_хвостовой_слеш() {
         assert_eq!(
             ключи_шлюза(
-                transcribe::Mode::Server,
+                transcribe::Mode::Gateway,
                 Some("  http://localhost:8080/  ".to_string()),
                 Some("  секрет  ".to_string())
             ),

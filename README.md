@@ -20,8 +20,9 @@
 
 MeetRec notices when a call starts, offers to record it, and writes two separate tracks: your microphone and the system audio. Afterwards it can turn the recording into text with the speakers kept apart.
 
-<!-- TODO: заменить на настоящий скриншот или gif, когда будет чем снять -->
-<p align="center"><em>Screenshot goes here.</em></p>
+<p align="center">
+  <img src="docs/media/meetrec.gif" width="720" alt="The MeetRec window: a list of recorded calls from Zoom, Teams, Slack and Discord, a recording running with both tracks, the recording menu and the settings screen">
+</p>
 
 ## What it does
 

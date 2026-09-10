@@ -152,12 +152,20 @@ class Стенд(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def сцена(self):
+    def пары(self):
         запрос = self.path.split("?")
         if len(запрос) < 2:
-            return "idle"
-        пары = dict(п.split("=", 1) for п in запрос[1].split("&") if "=" in п)
-        return пары.get("s", "idle")
+            return {}
+        return dict(п.split("=", 1) for п in запрос[1].split("&") if "=" in п)
+
+    def сцена(self):
+        return self.пары().get("s", "idle")
+
+    def язык(self):
+        """`ru` по умолчанию: у README две версии, и для английской нужны
+        английские кадры. Чужие значения не пропускаем — i18n знает два."""
+        я = self.пары().get("lang", "ru")
+        return я if я in ("ru", "en") else "ru"
 
     def со_стендом(self, файл):
         """Тот же файл из ui/, но с подставным Tauri первым скриптом в <head>."""
@@ -181,11 +189,37 @@ class Стенд(http.server.SimpleHTTPRequestHandler):
         if путь == "/__measure":
             return self.отдать(МЕРКА.replace("{s}", self.сцена()), "text/html; charset=utf-8")
         if путь == "/__shot":
+            # Высота НЕ фиксирована. Раньше стояло 640 — высота настоящего
+            # окна, — и всё, что в него не влезало, обрезалось посреди
+            # карточки: на кадре оставался обрубок фразы. Для съёмки нужен
+            # экран целиком, поэтому рамка растёт под содержимое. Ширина
+            # остаётся настоящей: раскладка зависит от неё, не от высоты.
+            #
+            # Фон прозрачный, углы скруглены: кадр кладут в README на чужой
+            # фон, и прямоугольник со своей подложкой выглядит там наклейкой.
+            # Снимать с `--default-background-color=00000000`.
+            #
+            # Высота меряется в цикле, а не один раз по `load`: сцены досыпают
+            # строки событиями уже после загрузки (см. shim.js), и однократный
+            # замер поймал бы список короче настоящего.
             return self.отдать(
                 "<!doctype html><meta charset=utf-8>"
-                "<style>html,body{margin:0;background:#1a1b26}"
+                "<style>html,body{margin:0;background:transparent}"
+                ".ramka{width:460px;border-radius:14px;overflow:hidden;display:block}"
                 "iframe{width:460px;height:640px;border:0;display:block}</style>"
-                f'<iframe src="/index.html?s={self.сцена()}"></iframe>',
+                f'<div class=ramka><iframe id=f src="/index.html?s={self.сцена()}&lang={self.язык()}"></iframe></div>'
+                "<script>"
+                "var f=document.getElementById('f');"
+                "f.addEventListener('load',function(){"
+                "var d=f.contentDocument;var n=0;"
+                "var t=setInterval(function(){"
+                "var b=d.querySelector('.body');"
+                "var over=b?b.scrollHeight-b.clientHeight:0;"
+                "if(over>0){f.style.height=(f.clientHeight+over)+'px';}"
+                "if(++n>20){clearInterval(t);}"
+                "},150);"
+                "});"
+                "</script>",
                 "text/html; charset=utf-8",
             )
         if путь in ("/index.html", "/ask.html"):

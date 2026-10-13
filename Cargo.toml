@@ -56,7 +56,7 @@ features = [
     "Win32_Foundation",
 ]
 
-# Core Audio Process Tap (macOS 14.4+). Проверено по исходникам крейта: голых
+# Core Audio Process Tap (macOS 14.2+). Проверено по исходникам крейта: голых
 # extern "C" объявлений не нужно вообще — objc2-core-audio 0.3 покрывает и класс
 # CATapDescription, и все семь функций рецепта (AudioHardwareCreate/DestroyProcessTap,
 # AudioHardwareCreate/DestroyAggregateDevice, AudioDeviceCreateIOProcIDWithBlock,

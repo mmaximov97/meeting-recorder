@@ -17,10 +17,10 @@ Supported systems:
 | | Version |
 |---|---|
 | macOS | 11.0 and up |
-| macOS, capturing system audio | **14.4 and up**. The Core Audio process tap does not exist before that |
+| macOS, capturing system audio | **14.2 and up**. The Core Audio process tap does not exist before that |
 | Windows | 10 and 11 |
 
-That macOS 14.4 line explains most "it records my microphone but not the other person" reports.
+That macOS 14.2 line explains most "it records my microphone but not the other person" reports.
 
 ## Running it
 
@@ -54,7 +54,7 @@ On macOS there is one extra check after a build:
 npm run check-tap-lazy-bind
 ```
 
-It verifies that the Core Audio process tap is bound lazily. If it isn't, the app refuses to launch on macOS older than 14.4 instead of simply doing without system audio.
+It verifies that the Core Audio process tap is bound lazily. If it isn't, the app refuses to launch on macOS older than 14.2 instead of simply doing without system audio.
 
 ## Layout
 

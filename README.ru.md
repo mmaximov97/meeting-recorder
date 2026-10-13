@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/macOS-14.4%2B-lightgrey" alt="macOS 14.4+">
+  <img src="https://img.shields.io/badge/macOS-14.2%2B-lightgrey" alt="macOS 14.2+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-lightgrey" alt="Windows 10/11">
   <a href="README.md">English</a>
 </p>
@@ -53,7 +53,7 @@ xattr -cr /Applications/MeetRec.app
 
 ## Что нужно
 
-- **macOS 14.4 или новее.** Звук системы берётся через Core Audio process tap, в более ранних версиях этого механизма нет.
+- **macOS 14.2 или новее.** Звук системы берётся через Core Audio process tap, в более ранних версиях этого механизма нет.
 - **Windows 10 или 11.** Там звук системы идёт через WASAPI loopback.
 
 ## Разрешения

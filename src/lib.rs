@@ -31,12 +31,12 @@ mod tests {
     ///
     /// `-Wl,-weak_framework,CoreAudio` в `build.rs` — единственное, чем держится
     /// достижимость `capture::macos::unsupported_reason`: без него отсутствующий
-    /// на macOS до 14.4 `AudioHardwareCreateProcessTap` убивает процесс в dyld
+    /// на macOS до 14.2 `AudioHardwareCreateProcessTap` убивает процесс в dyld
     /// ещё до `main`. Рассуждение целиком — в докблоке `MIN_MACOS`
     /// (`src/capture/macos.rs`).
     ///
     /// Пропажа флага не ломает ни сборку, ни один другой тест, и заметить её
-    /// можно только на живой macOS ниже 14.4 — то есть, скорее всего, никогда.
+    /// можно только на живой macOS ниже 14.2 — то есть, скорее всего, никогда.
     /// Отсюда сторож.
     ///
     /// Файл берётся `include_str!`: так тест не зависит от рабочего каталога, а
@@ -53,8 +53,8 @@ mod tests {
              \x20   println!(\"cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio\");\n\
              \n\
              Без него символы Core Audio Process Tap связываются жадно, и на macOS\n\
-             старее 14.4 dyld убивает процесс с \"Symbol not found\" ДО main —\n\
-             вместо объяснения \"нужна macOS 14.4 или новее\" из \
+             старее 14.2 dyld убивает процесс с \"Symbol not found\" ДО main —\n\
+             вместо объяснения \"нужна macOS 14.2 или новее\" из \
              capture::macos::unsupported_reason.\n\
              \n\
              Ленивое связывание подстраховкой не служит: на ld-1053.12 его нет уже\n\

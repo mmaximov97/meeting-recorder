@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/macOS-14.4%2B-lightgrey" alt="macOS 14.4+">
+  <img src="https://img.shields.io/badge/macOS-14.2%2B-lightgrey" alt="macOS 14.2+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-lightgrey" alt="Windows 10/11">
   <a href="README.ru.md">Русская версия</a>
 </p>
@@ -53,7 +53,7 @@ The app notices new releases on its own: once a day it asks GitHub and, if a new
 
 ## Requirements
 
-- **macOS 14.4 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.
+- **macOS 14.2 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.
 - **Windows 10 or 11.** System audio goes through WASAPI loopback.
 
 ## Permissions

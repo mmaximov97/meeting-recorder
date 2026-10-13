@@ -155,7 +155,10 @@ pub fn interleave_streams(streams: &[(u32, &[f32])], total_channels: u32) -> Vec
 ///
 /// # Чем держится отказ: слабая линковка CoreAudio
 ///
-/// Символов `AudioHardwareCreate/DestroyProcessTap` на macOS старее 14.4 нет.
+/// Символов `AudioHardwareCreate/DestroyProcessTap` на macOS старее 14.2 нет.
+/// Порог — ровно `API_AVAILABLE(macos(14.2))` из `AudioHardwareTapping.h`.
+/// Раньше здесь стояло 14.4 без опоры на заголовок, и живая 14.3 (23D56), на
+/// которой тап пишет звук без единой ошибки, получала отказ.
 /// Чтобы человек увидел [`unsupported_reason`], процесс обязан дожить до `main`,
 /// а не умереть в dyld на `Symbol not found`. Это обеспечивает **слабый импорт**:
 /// `-Wl,-weak_framework,CoreAudio` из `build.rs` — своя строка в корневом и в
@@ -184,16 +187,16 @@ pub fn interleave_streams(streams: &[(u32, &[f32])], total_channels: u32) -> Vec
 /// То есть на этом линкере связывание жадное уже при 11.0 — вопреки замерам,
 /// снятым при разработке порта. Сборка при этом проходит, все тесты зелёные, и
 /// guard молча превращается в мёртвый код: на macOS 13 процесс умрёт в
-/// загрузчике. Проверено на живой macOS 14.3, что со слабым импортом отказ
-/// доходит словами; на 14.3 это ещё и подстраховано тем, что сами символы там
-/// уже есть, — но полагаться на это нельзя, на 13 их нет.
+/// загрузчике. Проверено на живой macOS 14.3, что со слабым импортом процесс
+/// доходит до `main`; символы тапа там уже есть, но полагаться на это нельзя —
+/// на 13 их нет.
 ///
 /// Вывод для будущих правок: слабый импорт не зависит ни от deployment target,
 /// ни от версии линкера, поэтому опора теперь на нём. `"11.0"` в конфиге
 /// остаётся — но уже по другой причине: `LSMinimumSystemVersion` — гейт Finder'а,
-/// и при 14.4 система откажет своими словами вместо наших. Проверка на собранном
+/// и при 14.2 система откажет своими словами вместо наших. Проверка на собранном
 /// бинаре: `scripts/check-tap-lazy-bind.sh`.
-pub const MIN_MACOS: (u32, u32) = (14, 4);
+pub const MIN_MACOS: (u32, u32) = (14, 2);
 
 /// Поддерживается ли эта версия. Сравнение лексикографическое по паре.
 pub fn version_supported(major: u32, minor: u32) -> bool {
@@ -218,7 +221,7 @@ pub fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
 /// определить не удалось» иначе не проверяется вовсе, а именно она принимает
 /// самое рискованное решение из трёх.
 fn reason_for(version: Option<&str>) -> Option<String> {
-    const NEED: &str = "нужна macOS 14.4 или новее — используется Core Audio Process Tap API";
+    const NEED: &str = "нужна macOS 14.2 или новее — используется Core Audio Process Tap API";
     match version.and_then(parse_major_minor) {
         Some((major, minor)) if version_supported(major, minor) => None,
         Some((major, minor)) => Some(format!("{NEED} (система сообщает {major}.{minor})")),
@@ -1358,8 +1361,14 @@ mod tests {
     // там же, где решение, а не у одного из вызывающих.
 
     #[test]
-    fn версия_14_4_поддерживается() {
-        assert!(version_supported(14, 4));
+    fn версия_14_2_поддерживается() {
+        assert!(version_supported(14, 2));
+    }
+
+    /// Живая 14.3 (23D56): тап поднялся, IOProc отдал звук, все вызовы noErr.
+    #[test]
+    fn версия_14_3_поддерживается() {
+        assert!(version_supported(14, 3));
     }
 
     #[test]
@@ -1373,8 +1382,8 @@ mod tests {
     }
 
     #[test]
-    fn версия_ниже_14_4_не_поддерживается() {
-        assert!(!version_supported(14, 3));
+    fn версия_ниже_14_2_не_поддерживается() {
+        assert!(!version_supported(14, 1));
         assert!(!version_supported(13, 9));
     }
 
@@ -1402,7 +1411,8 @@ mod tests {
 
     #[test]
     fn поддерживаемая_версия_не_даёт_причины_отказать() {
-        assert_eq!(reason_for(Some("14.4")), None);
+        assert_eq!(reason_for(Some("14.2")), None);
+        assert_eq!(reason_for(Some("14.3")), None);
         assert_eq!(reason_for(Some("26.5.2")), None);
     }
 
@@ -1411,7 +1421,7 @@ mod tests {
     #[test]
     fn старая_версия_даёт_причину_с_обоими_числами() {
         let why = reason_for(Some("13.6")).expect("13.6 тап не поднимет");
-        assert!(why.contains("14.4"), "{why}");
+        assert!(why.contains("14.2"), "{why}");
         assert!(why.contains("13.6"), "{why}");
     }
 

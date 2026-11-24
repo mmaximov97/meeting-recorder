@@ -3077,6 +3077,58 @@ mod tests {
         assert_eq!(muted_seconds(SAMPLE_RATE as u64 + 1), 2);
     }
 
+    /// То же на настоящих WAV: в файле микрофона на месте выключения лежат
+    /// нули, обе дорожки одной длины, файл-спутник знает о выключении.
+    #[test]
+    fn выключенный_микрофон_на_диске_это_нули_и_дорожки_одной_длины() {
+        let root = ScratchDir::new("mute-wav");
+        let mut app = App::with_backends(
+            root.to_path_buf(),
+            Box::new(ФейкAudio {
+                журнал: журнал(),
+                открыт: false,
+                очередь: vec![
+                    (vec![7; 10], vec![7; 10]),
+                    (vec![100; 1000], vec![200; 1000]),
+                    (vec![100; 1600], vec![200; 1600]),
+                    (vec![100; 400], vec![200; 400]),
+                ],
+                выбор: Rc::new(RefCell::new(None)),
+                подмена: None,
+                reopen_падает: false,
+                есть_система: true,
+            }),
+            Box::new(WavSinks),
+        );
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        let (folder, base) = app.current_recording().expect("запись идёт");
+        app.pump_audio().expect("включённый микрофон");
+        app.set_mic_muted(true);
+        app.pump_audio().expect("выключенный микрофон");
+        app.set_mic_muted(false);
+        app.pump_audio().expect("снова включённый");
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        let dir = root.join(&folder);
+        let читать = |дорожка: &str| -> Vec<i16> {
+            hound::WavReader::open(dir.join(format!("{base}.{дорожка}.wav")))
+                .expect("дорожка читается")
+                .samples::<i16>()
+                .map(|s| s.expect("сэмпл"))
+                .collect()
+        };
+        let mic = читать("mic");
+        let sys = читать("system");
+        assert_eq!(mic.len(), sys.len(), "дорожки не разъехались");
+        assert_eq!(mic.len(), 3000);
+        assert!(mic[..1000].iter().all(|s| *s == 100));
+        assert!(mic[1000..2600].iter().all(|s| *s == 0), "на месте выключения — тишина");
+        assert!(mic[2600..].iter().all(|s| *s == 100), "после включения — снова голос");
+        assert!(sys.iter().all(|s| *s == 200), "системная дорожка не тронута");
+        let meta = std::fs::read_to_string(dir.join(format!("{base}.meta.json"))).expect("meta");
+        assert!(meta.contains(r#""mic_muted_sec":1"#), "{meta}");
+    }
+
     #[test]
     fn meta_json_с_выключенным_микрофоном_несёт_его_секунды() {
         let dir = ScratchDir::new("meta-muted");

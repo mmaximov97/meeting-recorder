@@ -1450,6 +1450,15 @@
       .entry-links {
         margin-top: var(--s3);
       }
+      /* Кнопки обновления — тот же button.btn, что «Проверить» у микрофона;
+         при узком окне «Обновить» переносится под «Проверить», а не
+         сжимает её. */
+      .upd-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--s2);
+        margin-top: var(--s3);
+      }
       .entry-link {
         display: flex;
         align-items: center;
@@ -1728,16 +1737,20 @@
             </div>
           </div>
 
-          <!-- Вышел релиз новее запущенного (update.rs). «Скачать» открывает
-               страницу релиза в браузере, «Позже» гасит баннер до следующего
-               релиза. Ниже поломок и выше взвода: это не беда, но и не то,
-               что должно перекрывать «слышу встречу, жду». -->
+          <!-- Вышел релиз новее запущенного (update.rs). На macOS кнопка —
+               «Обновить»: приложение ставит новую версию само и
+               перезапускается, ход дела идёт строкой баннера. На Windows и
+               после неудачной установки — «Скачать», страница релиза в
+               браузере. Подпись ставит main.js, поэтому без data-i18n.
+               «Позже» гасит баннер до следующего релиза. Ниже поломок и выше
+               взвода: это не беда, но и не то, что должно перекрывать «слышу
+               встречу, жду». -->
           <div class="slot" id="s-update">
             <div class="slot-in">
               <div class="banner" id="update" role="status">
                 <span id="update-text"></span>
                 <button class="sec" id="update-later" data-i18n="update.later">Later</button>
-                <button class="sec" id="update-open" data-i18n="update.download">Download</button>
+                <button class="sec" id="update-open">Download</button>
               </div>
             </div>
           </div>
@@ -2013,6 +2026,16 @@
           <div class="grp">
             <h2 data-i18n="app.name">MeetRec</h2>
             <div class="hint" id="app-version"></div>
+            <!-- Обновления: проверка по кнопке и, если есть новее, установка
+                 (macOS) или страница релиза. Ответ — строкой под кнопками,
+                 там же, где нажали; какие кнопки видны, решает main.js
+                 (отрисовать_обновление). -->
+            <div class="upd-actions">
+              <button class="btn" id="upd-check" type="button" data-i18n="update.check">Check for updates</button>
+              <button class="btn" id="upd-install" type="button" data-i18n="update.install" hidden>Update</button>
+              <button class="btn" id="upd-download" type="button" data-i18n="update.download" hidden>Download</button>
+            </div>
+            <div class="hint" id="upd-status" role="status" hidden></div>
             <div class="entry-links">
               <button class="entry-link" id="to-about" type="button">
                 <span data-i18n="nav.about">About the makers</span>

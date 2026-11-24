@@ -265,7 +265,10 @@ fn spawn_blinker(app: &AppHandle) {
 /// выходим сами, иначе «Выход» перестал бы работать вовсе.
 ///
 /// Отдельно — случай «канал принял, но забрать некому»: см. [`QUIT_GRACE`].
-fn request_quit(app: &AppHandle, tx: &Sender<Ctl>) {
+///
+/// Этим же путём уходит процесс после установки обновления (`install_update`
+/// в `main.rs`); новую версию запускает уже `RunEvent::Exit`.
+pub(crate) fn request_quit(app: &AppHandle, tx: &Sender<Ctl>) {
     if tx.send(Ctl::Shutdown).is_err() {
         app.exit(0);
         return;

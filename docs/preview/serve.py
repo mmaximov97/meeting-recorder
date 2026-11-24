@@ -45,6 +45,7 @@ UI = ЗДЕСЬ.parent.parent / "ui"
     ("idle", "Покой"),
     ("armed", "Взвод — окно открыли, пока вопрос висит"),
     ("ask", "Всплывашка «Записать встречу?»"),
+    ("askunmute", "Всплывашка «Вы говорите? Микрофон выключен»"),
     ("recstart", "Идёт запись — начали при открытом окне"),
     ("recording", "Идёт запись — окно открыли посреди встречи"),
     ("muted", "Идёт запись, микрофон выключен — пишется только системный звук"),
@@ -104,9 +105,9 @@ UI = ЗДЕСЬ.parent.parent / "ui"
    document.querySelectorAll('a[data-s]').forEach(x=>x.classList.remove('on'));
    a.classList.add('on');
    // Всплывашка — отдельное окно, и размеры у неё свои.
-   const ask = a.dataset.s === 'ask';
+   const ask = a.dataset.s === 'ask' || a.dataset.s === 'askunmute';
    win.classList.toggle('wide', ask);
-   f.src = ask ? '/ask.html' : '/index.html?s=' + a.dataset.s;
+   f.src = a.dataset.s === 'askunmute' ? '/ask.html?s=unmute' : ask ? '/ask.html' : '/index.html?s=' + a.dataset.s;
  });
  document.querySelector('a[data-s]').classList.add('on');
 </script>

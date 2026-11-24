@@ -1326,6 +1326,15 @@ fn set_mic_muted(muted: bool, state: tauri::State<Cmd>, app: AppHandle) -> Resul
         .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
 }
 
+/// На вопрос «вы говорите при выключенном микрофоне?» ответили «нет» —
+/// смахнули плашку. Не спрашивать ближайшие минуты.
+#[tauri::command]
+fn decline_unmute_question(state: tauri::State<Cmd>, app: AppHandle) -> Result<(), String> {
+    state
+        .send(Ctl::DeclineUnmuteQuestion)
+        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+}
+
 fn emit_transcribe_progress(app: &AppHandle, folder: &Option<String>, base: &str, stage: &str) {
     let _ = app.emit(
         "transcribe-progress",
@@ -1703,6 +1712,7 @@ fn main() {
             local_model_remove,
             set_monitor,
             set_mic_muted,
+            decline_unmute_question,
             rename_recording,
             delete_recording,
             set_audio_retention,

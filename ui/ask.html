@@ -43,6 +43,9 @@ body{
 .ava.teams{background:#6264A7}
 .ava.slack{background:#4A154B}
 .ava.discord{background:#5865F2}
+/* «Вы говорите? Микрофон выключен» — тот же жёлтый, что у выключенного
+   микрофона в главном окне: один смысл — один цвет. */
+.ava.muted{background:#B7791F;color:#fff}
 .ava svg{display:block}
 
 .tx{flex:1;min-width:0}
@@ -92,7 +95,7 @@ body.наведено #card .life{animation-play-state:paused;
   <div id="card">
     <span class="ava" id="ava"></span>
     <span class="tx">
-      <span class="tt" data-i18n="app.windowAsk">Record this meeting?</span>
+      <span class="tt" id="title" data-i18n="app.windowAsk">Record this meeting?</span>
       <span class="ts" id="src"></span>
     </span>
     <button class="go" id="yes" data-i18n="record.confirm">Record</button>

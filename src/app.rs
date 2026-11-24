@@ -21,6 +21,7 @@
 use crate::capture::{build_loopback_capture, start_silence};
 use crate::capture::{build_mic_capture, DeviceChoice};
 use crate::detector::MicSession;
+use crate::muted_speech::MutedSpeech;
 use crate::ringbuf::RingBuffer;
 use crate::session::{Action, Event, SessionMachine, State};
 use crate::storage::{month_dir, recording_filename, Track, WavSink, SAMPLE_RATE};
@@ -731,6 +732,12 @@ pub struct App {
     /// Сколько сэмплов mic-дорожки этой записи заменено тишиной — для
     /// `mic_muted_sec` в файле-спутнике.
     mic_muted_samples: u64,
+    /// Слушает выключенный микрофон: не заговорил ли человек, забыв о
+    /// выключении (см. `muted_speech`). В файл из этого не идёт ничего.
+    muted_speech: MutedSpeech,
+    /// Детектор решил спросить «вы говорите?», а GUI ещё не забрал вопрос —
+    /// см. `take_unmute_question`.
+    unmute_question: bool,
 }
 
 impl App {
@@ -806,6 +813,10 @@ impl App {
         if !matches!(self.machine.state(), State::Recording(_)) {
             return false;
         }
+        if self.mic_muted != on {
+            self.muted_speech.reset();
+            self.unmute_question = false;
+        }
         self.mic_muted = on;
         true
     }
@@ -814,11 +825,26 @@ impl App {
         self.mic_muted
     }
 
+    /// Забрать вопрос «вы говорите при выключенном микрофоне?», если детектор
+    /// его задал. Один раз: следующий `true` будет только после паузы детектора.
+    pub fn take_unmute_question(&mut self) -> bool {
+        std::mem::take(&mut self.unmute_question) && self.mic_muted
+    }
+
+    /// Человек ответил «нет, я не вам» — не спрашивать подольше
+    /// (`muted_speech::SNOOZE`).
+    pub fn decline_unmute_question(&mut self) {
+        self.muted_speech.snooze(crate::muted_speech::SNOOZE);
+    }
+
     /// То, что уходит в mic-дорожку: сами сэмплы или, при выключенном
     /// микрофоне, тишина той же длины (почему той же — см. поле `mic_muted`).
     fn mic_to_write(&mut self, mic: Vec<i16>) -> Vec<i16> {
         if !self.mic_muted {
             return mic;
+        }
+        if self.muted_speech.feed(&mic) {
+            self.unmute_question = true;
         }
         self.mic_muted_samples += mic.len() as u64;
         vec![0; mic.len()]
@@ -878,6 +904,8 @@ impl App {
             current_recording: None,
             mic_muted: false,
             mic_muted_samples: 0,
+            muted_speech: MutedSpeech::default(),
+            unmute_question: false,
         }
     }
 
@@ -1067,6 +1095,7 @@ impl App {
         // Каждая запись начинается с включённым микрофоном — см. поле `mic_muted`.
         self.mic_muted = false;
         self.mic_muted_samples = 0;
+        self.unmute_question = false;
         let src = self.current_source.clone();
         let dir = month_dir(&self.root, self.started);
         let (mic, sys) = free_name_pair(&dir, self.started, &src)?;
@@ -1175,6 +1204,7 @@ impl App {
         }
         self.mic_muted = false;
         self.mic_muted_samples = 0;
+        self.unmute_question = false;
 
         match first_err {
             Some(e) => Err(e),
@@ -3031,6 +3061,40 @@ mod tests {
             записи.contains(&"meta-muted:1".to_string()),
             "0.1 с тишины — это «выключался», а не ноль: {записи:?}"
         );
+    }
+
+    /// Заговорил при выключенном микрофоне — `App` один раз отдаёт вопрос;
+    /// включил микрофон — вопроса больше нет.
+    #[test]
+    fn речь_при_выключенном_микрофоне_даёт_один_вопрос() {
+        let кусок = |a: i16| -> (Vec<i16>, Vec<i16>) {
+            ((0..3200).map(|i| if i % 2 == 0 { a } else { -a }).collect(), vec![0; 3200])
+        };
+        // Выброшенный на старте кусок, 3 с фона (−40 дБ), 2 с голоса (−20 дБ).
+        let mut звук = vec![кусок(1)];
+        звук.extend(std::iter::repeat_n(кусок(328), 15));
+        звук.extend(std::iter::repeat_n(кусок(3277), 10));
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, звук);
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.set_mic_muted(true);
+
+        let mut вопросов = 0;
+        for _ in 0..25 {
+            app.pump_audio().expect("прокачка");
+            if app.take_unmute_question() {
+                вопросов += 1;
+            }
+        }
+        assert_eq!(вопросов, 1, "спросить один раз, а не на каждом тике");
+        assert!(
+            записано(&ж).iter().filter(|s| s.starts_with("write:mic:")).all(|s| s.ends_with(":тишина")),
+            "голос выключенного микрофона в файл не попал: {:?}",
+            записано(&ж)
+        );
+
+        app.set_mic_muted(false);
+        assert!(!app.take_unmute_question(), "включённому микрофону спрашивать нечего");
     }
 
     #[test]

@@ -83,6 +83,9 @@ pub enum Ctl {
     /// То же переключателем — для трея, который состояния не знает (тот же
     /// довод, что у [`Ctl::Toggle`]).
     ToggleMicMuted,
+    /// На вопрос «вы говорите?» ответили «нет» (смахнули плашку): не
+    /// спрашивать подольше.
+    DeclineUnmuteQuestion,
     /// Выход. Обязан пройти через машину: см. [`run`].
     Shutdown,
 }
@@ -155,6 +158,19 @@ fn ask(handle: &AppHandle, source: &str) {
         .body(format!("{source} — ответьте в окне приложения."))
         .show();
 
+    show_ask_popup(handle);
+}
+
+/// Спросить «вы говорите? микрофон выключен» — той же всплывашкой, что и
+/// «записать встречу?».
+///
+/// Именно ею, а не тостом и не главным окном, потому что человек в этот
+/// момент может смотреть на другой экран: всплывашка встаёт на тот монитор,
+/// где сейчас мышь, поверх полноэкранных окон и не забирая фокус у звонка (см.
+/// `show_ask_popup`). Тоста нет намеренно: при показе экрана macOS их глушит,
+/// а повторяться вопрос может раз в минуту — центр уведомлений забился бы ими.
+fn ask_unmute(handle: &AppHandle) {
+    let _ = handle.emit("ask-unmute", ());
     show_ask_popup(handle);
 }
 
@@ -524,6 +540,12 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
     if status.set_mic_muted(app.is_mic_muted()) {
         let _ = handle.emit("mic-muted", app.is_mic_muted());
         tray::set_mic_muted(handle, app.is_mic_muted());
+        // Микрофон включили — из окна, из трея или из самой плашки: вопрос
+        // «вы говорите?» на экране больше ни о чём. В записи плашка другого
+        // вопроса висеть не может (тот живёт только в `Armed`).
+        if !app.is_mic_muted() {
+            hide_ask_popup(handle);
+        }
     }
 
     // Без `emit`: никто не подписан на «какая запись сейчас пишется» —
@@ -576,7 +598,7 @@ fn ctl_to_event(c: &Ctl, s: State) -> Option<(Event, bool)> {
         // `Monitor` раньше, чем дело доходит сюда.
         Ctl::Monitor(_) => None,
         // И выключение микрофона: `drain_ctl` применяет его сам.
-        Ctl::SetMicMuted(_) | Ctl::ToggleMicMuted => None,
+        Ctl::SetMicMuted(_) | Ctl::ToggleMicMuted | Ctl::DeclineUnmuteQuestion => None,
     }
 }
 
@@ -632,6 +654,10 @@ fn drain_ctl(
         }
         if let Ctl::ToggleMicMuted = c {
             app.set_mic_muted(!app.is_mic_muted());
+            continue;
+        }
+        if let Ctl::DeclineUnmuteQuestion = c {
+            app.decline_unmute_question();
             continue;
         }
         // `None` здесь означает «команда не должна была сюда дойти» (см.
@@ -1088,6 +1114,9 @@ pub fn run(
         if let Err(e) = app.pump_audio() {
             let _ = handle.emit("error", e.to_string());
             eprintln!("прокачка аудио: {e}");
+        }
+        if app.take_unmute_question() {
+            ask_unmute(&handle);
         }
         sync(&handle, &app, &status);
 

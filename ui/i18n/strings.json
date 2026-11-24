@@ -98,6 +98,20 @@
       "en": "mic was muted"
     }
   },
+  "unmute": {
+    "askTitle": {
+      "ru": "Вы говорите?",
+      "en": "Are you talking?"
+    },
+    "askText": {
+      "ru": "Микрофон выключен",
+      "en": "Your microphone is off"
+    },
+    "askYes": {
+      "ru": "Включить",
+      "en": "Unmute"
+    }
+  },
   "state": {
     "armedApp": {
       "ru": "Похоже, встреча в {app}",

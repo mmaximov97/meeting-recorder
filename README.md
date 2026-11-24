@@ -29,6 +29,7 @@ MeetRec notices when a call starts, offers to record it, and writes two separate
 - **Notices calls.** Zoom, Teams, Slack and Discord are recognised by their process. A small panel appears over the call window and asks whether to record.
 - **Keeps the first seconds.** Audio runs through a ring buffer, so recording starts a few seconds before you answer the question. Opening lines are not lost.
 - **Two separate tracks.** Your microphone and the system audio go into separate WAV files. You and the other side never overlap.
+- **Mute your microphone mid-call.** Noisy around you? Click the microphone next to its meter, or use the menu bar item. Your track gets silence for that stretch and stays in sync with the other one; the system audio keeps recording.
 - **Stays out of the way.** An icon in the menu bar, a global shortcut, monthly folders, renaming, per-device microphone choice.
 
 ## What makes it different

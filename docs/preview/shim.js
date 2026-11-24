@@ -54,7 +54,7 @@
   const СПИСОК = [
     запись(t(0, 10, 0), "zoom-us"),
     запись(t(0, 14, 30), "microsoft-teams", { duration_sec: 1830, size: 31_200_000 }),
-    запись(t(1, 11, 15), "slack", { duration_sec: 640, size: 12_800_000 }),
+    запись(t(1, 11, 15), "slack", { duration_sec: 640, size: 12_800_000, mic_muted: true }),
     запись(t(1, 16, 5), "discord", { duration_sec: 3720, size: 74_000_000 }),
     // Без системной дорожки — у неё карточка «Собеседников не слышно».
     запись(t(12, 9, 0), "unknown", { duration_sec: 55, size: 1_100_000, system: false }),
@@ -68,11 +68,12 @@
 
   // ── Снимок состояния, который отдаёт get_state ──────────────────────────
   const снимок = {
-    state: S === "recording" ? "recording" : S === "armed" ? "armed" : "idle",
+    state: S === "recording" || S === "muted" ? "recording" : S === "armed" ? "armed" : "idle",
     fatal: S === "fatal" ? "детектор не поднялся: no such device" : null,
     device_warning: S === "devwarn" ? "{0.0.1.00000000}.{9f1c…}" : null,
     mic_deferred: S === "deferred",
     no_system_audio: S === "nosys" ? "process tap: разрешение не выдано (-3812)" : null,
+    mic_muted: S === "muted",
   };
 
   let метроном = null;
@@ -140,7 +141,12 @@
       else emit("levels", { mic: 0, system: 0, monitoring: false });
       return пауза(80);
     },
-    send_event: ({ name }) => {
+    // Как и настоящий бэкенд, отвечает событием, а не результатом команды.
+    set_mic_muted: ({ muted }) => {
+      if (снимок.state === "recording") emit("mic-muted", (снимок.mic_muted = muted));
+      return пауза(40);
+    },
+        send_event: ({ name }) => {
       if (name === "toggle") {
         снимок.state = снимок.state === "recording" ? "idle" : "recording";
         emit("state", снимок.state);
@@ -215,7 +221,7 @@
 
   addEventListener("load", () =>
     setTimeout(() => {
-      if (S === "recording") метроном = setInterval(метр, 100);
+      if (S === "recording" || S === "muted") метроном = setInterval(метр, 100);
       if (S === "recstart") $("rec-btn")?.click();
 
       const первая = { folder: СПИСОК[0].folder, base: СПИСОК[0].name };

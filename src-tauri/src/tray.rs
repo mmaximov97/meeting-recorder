@@ -38,6 +38,13 @@ static BLINK_ON: AtomicBool = AtomicBool::new(true);
 /// tauri 2.11). Единственный способ дотянуться до пункта после сборки меню —
 /// не терять ссылку на него.
 static TOGGLE_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+/// Пункт «Выключить/Включить микрофон» — по той же причине, что и
+/// `TOGGLE_ITEM`. Живой он только в записи: вне её выключать нечего (см.
+/// `App::set_mic_muted`).
+static MIC_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+/// Выключен ли микрофон в идущей записи — для текста пункта и подсказки.
+/// Пишет аудио-поток через [`set_mic_muted`].
+static MIC_MUTED: AtomicBool = AtomicBool::new(false);
 /// Текст фатальной ошибки для подсказки трея. `OnceLock`, потому что фатальная
 /// ошибка одна: выхода из этого состояния нет, перезаписывать нечем.
 static FATAL_MSG: OnceLock<String> = OnceLock::new();
@@ -138,6 +145,7 @@ fn repaint(app: &AppHandle) {
     };
     let lang = i18n::active_lang(app);
     let icon = icon_for(state, BLINK_ON.load(Ordering::Relaxed));
+    let muted = MIC_MUTED.load(Ordering::Relaxed);
     // Шаблонный режим — только для Idle (фирменный знак, см. докблок файла);
     // три активных состояния несут собственный цвет, и шаблон стёр бы его в
     // сплошную заливку. Атомарный сеттер вместо `set_icon` + отдельного
@@ -152,10 +160,19 @@ fn repaint(app: &AppHandle) {
         FATAL => FATAL_MSG
             .get()
             .map_or_else(|| i18n::t("tray.tipBroken", &lang), |m| i18n::t(m, &lang)),
+        RECORDING if muted => i18n::t("tray.tipRecordingMuted", &lang),
         RECORDING => i18n::t("tray.tipRecording", &lang),
         ARMED => i18n::t("tray.tipArmed", &lang),
         _ => i18n::t("tray.tipIdle", &lang),
     }));
+
+    if let Some(item) = MIC_ITEM.get() {
+        let _ = item.set_text(i18n::t(
+            if muted { "tray.micUnmute" } else { "tray.micMute" },
+            &lang,
+        ));
+        let _ = item.set_enabled(state == RECORDING);
+    }
 
     if let Some(item) = TOGGLE_ITEM.get() {
         let _ = item.set_text(match state {
@@ -198,6 +215,14 @@ pub fn set_state(app: &AppHandle, st: UiState) {
     // Каждый заход в Armed начинается с горящей фазы, иначе первый кадр мог бы
     // оказаться притушенным и выглядеть как «ничего не произошло».
     BLINK_ON.store(true, Ordering::Relaxed);
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || repaint(&h));
+}
+
+/// Сообщить трею, выключен ли микрофон в записи. Как и `set_state`, можно
+/// звать откуда угодно.
+pub fn set_mic_muted(app: &AppHandle, muted: bool) {
+    MIC_MUTED.store(muted, Ordering::Relaxed);
     let h = app.clone();
     let _ = app.run_on_main_thread(move || repaint(&h));
 }
@@ -280,9 +305,13 @@ pub fn build(app: &AppHandle, tx: Sender<Ctl>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    // Сразу под «Остановить запись»: оба — про идущую запись. Стартует
+    // погашенным, потому что приложение стартует в Idle.
+    let mic = MenuItem::with_id(app, "mic", i18n::t("tray.micMute", &lang), false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", i18n::t("tray.quit", &lang), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &folder, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &mic, &folder, &quit])?;
     let _ = TOGGLE_ITEM.set(toggle.clone());
+    let _ = MIC_ITEM.set(mic.clone());
 
     TrayIconBuilder::with_id("main")
         .icon(icon_for(IDLE, true))
@@ -299,6 +328,13 @@ pub fn build(app: &AppHandle, tx: Sender<Ctl>) -> tauri::Result<()> {
                 // запись не идёт, причины не видно. Молчать об этом нельзя ровно
                 // так же, как и в request_quit ниже, — случай один и тот же.
                 if tx.send(Ctl::Toggle).is_err() {
+                    crate::status::fatal(app, crate::status::DEAD.to_string());
+                }
+            }
+            // Переключатель, а не «выключить»: как и с `Ctl::Toggle`, решает
+            // аудио-поток по настоящему состоянию, а не трей по своей копии.
+            "mic" => {
+                if tx.send(Ctl::ToggleMicMuted).is_err() {
                     crate::status::fatal(app, crate::status::DEAD.to_string());
                 }
             }

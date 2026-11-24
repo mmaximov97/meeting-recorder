@@ -76,6 +76,11 @@ pub struct Snapshot {
     /// из найденных на диске записей ещё растёт, — иначе `delete_recording`
     /// или автоочистка старого аудио могли бы тронуть файл посреди записи.
     pub current_recording: Option<CurrentRecording>,
+    /// `true` — в идущей записи человек выключил микрофон, в его дорожку идёт
+    /// тишина (см. `App::set_mic_muted`). В снимке, а не только событием:
+    /// окно, открытое посреди встречи, обязано сразу показать выключенный
+    /// микрофон, а не включённый.
+    pub mic_muted: bool,
 }
 
 /// Какая запись пишется прямо сейчас.
@@ -141,6 +146,18 @@ impl Status {
             return false;
         }
         g.mic_deferred = deferred;
+        true
+    }
+
+    /// Записать, выключен ли микрофон в записи. `true` — изменилось: кнопку в
+    /// окне и пункт трея надо перерисовать. Выключить можно и из трея, и из
+    /// окна, поэтому истина одна — здесь, а не в каждом из них.
+    pub fn set_mic_muted(&self, muted: bool) -> bool {
+        let mut g = self.lock();
+        if g.mic_muted == muted {
+            return false;
+        }
+        g.mic_muted = muted;
         true
     }
 
@@ -303,8 +320,19 @@ mod tests {
                 mic_deferred: false,
                 no_system_audio: None,
                 current_recording: None,
+                mic_muted: false,
             }
         );
+    }
+
+    #[test]
+    fn выключение_микрофона_сообщается_только_об_изменении_и_видно_в_снимке() {
+        let s = Status::default();
+        assert!(s.set_mic_muted(true));
+        assert!(!s.set_mic_muted(true));
+        assert!(s.snapshot().mic_muted, "окно, открытое посреди встречи, видит выключение");
+        assert!(s.set_mic_muted(false), "включение — тоже изменение");
+        assert!(!s.snapshot().mic_muted);
     }
 
     /// Снятие — такое же изменение, как установка: запись кончилась, следующая

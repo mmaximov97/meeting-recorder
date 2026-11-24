@@ -77,6 +77,12 @@ pub enum Ctl {
     /// Включить/выключить проверку микрофона. Как и `SetMicDevice`, это не
     /// событие машины: состояние записи от проверки не меняется.
     Monitor(bool),
+    /// Выключить/включить микрофон в идущей записи (кнопка в окне). Не
+    /// событие машины: запись от этого не начинается и не кончается.
+    SetMicMuted(bool),
+    /// То же переключателем — для трея, который состояния не знает (тот же
+    /// довод, что у [`Ctl::Toggle`]).
+    ToggleMicMuted,
     /// Выход. Обязан пройти через машину: см. [`run`].
     Shutdown,
 }
@@ -512,6 +518,14 @@ fn sync(handle: &AppHandle, app: &App, status: &Status) {
         let _ = handle.emit("mic-deferred", app.mic_change_deferred());
     }
 
+    // Отсюда, а не из обработчика команды: выключение снимается и само — с
+    // концом записи (см. `App::set_mic_muted`), и об этом окну и трею тоже
+    // надо узнать.
+    if status.set_mic_muted(app.is_mic_muted()) {
+        let _ = handle.emit("mic-muted", app.is_mic_muted());
+        tray::set_mic_muted(handle, app.is_mic_muted());
+    }
+
     // Без `emit`: никто не подписан на «какая запись сейчас пишется» —
     // список читает её через снимок в момент своего собственного вызова
     // (`list_recordings`, `delete_recording`, автоочистка), а не заранее.
@@ -561,6 +575,8 @@ fn ctl_to_event(c: &Ctl, s: State) -> Option<(Event, bool)> {
         // Тот же случай, что у `SetMicDevice`: `drain_ctl` перехватывает
         // `Monitor` раньше, чем дело доходит сюда.
         Ctl::Monitor(_) => None,
+        // И выключение микрофона: `drain_ctl` применяет его сам.
+        Ctl::SetMicMuted(_) | Ctl::ToggleMicMuted => None,
     }
 }
 
@@ -605,6 +621,17 @@ fn drain_ctl(
             if let Err(e) = app.set_monitor(on) {
                 on_error(format!("проверка микрофона: {e}"));
             }
+            continue;
+        }
+        // Вне записи `set_mic_muted` команду не применяет — это не ошибка, а
+        // кнопка, нажатая на последней секунде встречи: сказать человеку
+        // нечего, окно и трей сами увидят, что записи больше нет.
+        if let Ctl::SetMicMuted(on) = c {
+            app.set_mic_muted(on);
+            continue;
+        }
+        if let Ctl::ToggleMicMuted = c {
+            app.set_mic_muted(!app.is_mic_muted());
             continue;
         }
         // `None` здесь означает «команда не должна была сюда дойти» (см.
@@ -1073,7 +1100,10 @@ pub fn run(
             let _ = handle.emit(
                 "levels",
                 serde_json::json!({
-                    "mic": l.mic,
+                    // Выключенный микрофон — пустая полоска: в файл идёт
+                    // тишина, и полоска обязана показывать то, что пишется.
+                    // Сам уровень в ядре остаётся настоящим — см. `pump_audio`.
+                    "mic": if app.is_mic_muted() { 0.0 } else { l.mic },
                     "system": l.system,
                     "monitoring": app.is_monitoring(),
                     "epoch": monitor_epoch.load(Ordering::SeqCst),
@@ -1490,6 +1520,31 @@ mod tests {
 
         assert!(!quit);
         assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+    }
+
+    /// Выключение микрофона применяется в `drain_ctl` и в машину не уходит:
+    /// запись от него не начинается и не кончается. Вне записи — не
+    /// применяется вовсе.
+    #[test]
+    fn выключение_микрофона_не_событие_машины_и_работает_только_в_записи() {
+        let mut a = app();
+        let (tx, rx) = channel();
+        tx.send(Ctl::ToggleMicMuted).unwrap();
+        let mut seen = Vec::new();
+        drain_ctl(&mut a, &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
+        assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+        assert!(!a.is_mic_muted(), "в Idle выключать нечего");
+
+        a.on_event(Event::ManualStart, None).expect("ручной старт");
+        tx.send(Ctl::ToggleMicMuted).unwrap();
+        drain_ctl(&mut a, &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
+        assert!(a.is_mic_muted(), "трей выключил микрофон в записи");
+
+        tx.send(Ctl::SetMicMuted(false)).unwrap();
+        drain_ctl(&mut a, &rx, None, &AtomicU64::new(0), |_, e, _| seen.push(e), |_| {});
+        assert!(!a.is_mic_muted(), "окно включило обратно");
+        assert!(seen.is_empty(), "уехало в машину: {seen:?}");
+        a.on_event(Event::ManualStop, None).expect("стоп");
     }
 
     #[test]

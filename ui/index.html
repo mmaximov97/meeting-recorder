@@ -498,6 +498,43 @@
         place-items: center;
         cursor: help;
       }
+      /* Кнопка микрофона шире значка системы (22 против 16 px): в 16 px не
+         попасть курсором. Отрицательные поля возвращают полоску на ту же
+         линию, что у системной строки, — две полоски обязаны начинаться
+         ровно друг под другом, иначе их не сравнить глазом. */
+      .recording .mtr .mic-btn {
+        width: 22px;
+        height: 22px;
+        margin: -3px -3px -3px -3px;
+      }
+      .recording .mtr .mic-btn .off,
+      .recording .mtr .mute-note {
+        display: none;
+      }
+      /* Выключенный микрофон: перечёркнутый значок цветом предупреждения и
+         надпись вместо полоски. Полоска не просто гаснет — пустая полоска
+         неотличима от «микрофон не слышит», а это ровно та беда, которую
+         приложение старается не допускать молча. */
+      .recording.mic-muted .mtr .mic-btn {
+        color: var(--warn);
+      }
+      .recording.mic-muted .mtr .mic-btn .on,
+      .recording.mic-muted .mtr.mic .disc {
+        display: none;
+      }
+      .recording.mic-muted .mtr .mic-btn .off {
+        display: block;
+      }
+      .recording.mic-muted .mtr .mute-note {
+        display: block;
+        flex: 1;
+        min-width: 0;
+        font-size: 12px;
+        color: var(--warn);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
       /* ── Метр уровня ──────────────────────────────────────────────────────
          Сегментированная полоска в духе микшера: маска режет её на штрихи
@@ -1743,9 +1780,18 @@
                     <span id="stop-btn-label" data-i18n="record.stop">Stop</span>
                   </button>
                 </div>
-                <div class="mtr">
-                  <span class="ic" data-i18n-attr="title:levels.mic" title="Your microphone"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg></span>
+                <!-- Значок микрофона здесь — кнопка: выключить микрофон посреди
+                     встречи, когда на фоне шумно. Место выбрано рядом с его же
+                     полоской — так видно, что именно выключается. Подпись и
+                     aria-pressed ставит main.js (`показать_выключение_микрофона`):
+                     они зависят от состояния, а не только от языка. -->
+                <div class="mtr mic">
+                  <button class="icon-btn mic-btn" id="mic-mute" aria-pressed="false" aria-label="Mute microphone" title="Mute microphone">
+                    <svg class="on" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>
+                    <svg class="off" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" /><path d="M16.95 16.95A7 7 0 0 1 5 12v-2" /><path d="M18.89 13.23A7 7 0 0 0 19 12v-2" /><path d="m2 2 20 20" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12" /></svg>
+                  </button>
                   <span class="disc sm"><span class="t"></span><span class="f" data-level="mic"></span><b data-peak="mic"></b></span>
+                  <span class="mute-note" data-i18n="record.micMutedNote">Microphone is off — only the others' audio is being recorded</span>
                 </div>
                 <div class="mtr">
                   <span class="ic" data-i18n-attr="title:levels.system" title="System audio — what you hear from the others"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.364 18.364a9 9 0 0 0 0-12.728" /></svg></span>

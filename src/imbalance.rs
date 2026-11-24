@@ -182,24 +182,48 @@ pub fn quiet_mic(m: MicLevels) -> Option<f32> {
 /// файл пересчитывается сам. Без кеша список, обновляющийся на каждый фокус
 /// окна, перечитывал бы диск заново.
 #[derive(Default)]
-pub struct Cache(Mutex<HashMap<(PathBuf, u64, SystemTime), MicLevels>>);
+pub struct Cache(Mutex<HashMap<(PathBuf, u64, SystemTime, bool), Option<MicLevels>>>);
+
+/// Уровни дорожки, на которой человек выключал микрофон.
+///
+/// Выключенный микрофон пишет цифровой ноль (см. `App::set_mic_muted`), и без
+/// этой поправки такие окна легли бы в оценку как «голоса нет»: выключил на
+/// большую часть встречи — получил пометку «вас почти не слышно» за то, что
+/// сам и попросил. Поэтому окна ровно на полу (`FLOOR_DBFS`) отбрасываются.
+///
+/// `None` — после отбрасывания не осталось ничего: микрофон был выключен всю
+/// запись, судить не о чем. Живой тракт ровного цифрового нуля на четверть
+/// секунды не даёт, поэтому шумный, но включённый кусок дорожки так и
+/// остаётся в оценке.
+pub fn mic_levels_without_muted(levels: &[f32]) -> Option<MicLevels> {
+    let живые: Vec<f32> = levels.iter().copied().filter(|l| *l > FLOOR_DBFS).collect();
+    (!живые.is_empty()).then(|| mic_levels(&живые))
+}
 
 impl Cache {
     /// `None` — файла нет или он не читается как WAV. Это не ошибка: пометки
     /// просто не будет.
-    pub fn levels(&self, path: &Path) -> Option<MicLevels> {
+    ///
+    /// `mic_was_muted` — в записи выключали микрофон: оценка идёт по
+    /// [`mic_levels_without_muted`] и тоже может вернуть `None`.
+    pub fn levels(&self, path: &Path, mic_was_muted: bool) -> Option<MicLevels> {
         let meta = std::fs::metadata(path).ok()?;
-        let key = (path.to_path_buf(), meta.len(), meta.modified().ok()?);
+        let key = (path.to_path_buf(), meta.len(), meta.modified().ok()?, mic_was_muted);
         if let Ok(g) = self.0.lock() {
             if let Some(v) = g.get(&key) {
-                return Some(*v);
+                return *v;
             }
         }
-        let v = mic_levels(&window_levels_dbfs(path, 200).ok()?);
+        let windows = window_levels_dbfs(path, 200).ok()?;
+        let v = if mic_was_muted {
+            mic_levels_without_muted(&windows)
+        } else {
+            Some(mic_levels(&windows))
+        };
         if let Ok(mut g) = self.0.lock() {
             g.insert(key, v);
         }
-        Some(v)
+        v
     }
 }
 
@@ -459,6 +483,33 @@ mod tests {
     fn пустой_список_окон_это_молчащий_микрофон() {
         let m = mic_levels(&[]);
         assert_eq!(m, MicLevels { speech: FLOOR_DBFS, noise: FLOOR_DBFS });
+        assert!(quiet_mic(m).is_some());
+    }
+
+    /// Микрофон выключили на 95% встречи: без поправки 90-й перцентиль
+    /// попадает в цифровой ноль, и человек получает «вас почти не слышно» за
+    /// собственное выключение. С поправкой судится только включённый кусок.
+    #[test]
+    fn выключенный_микрофон_не_даёт_пометки_о_тихом_голосе() {
+        let mut окна = vec![FLOOR_DBFS; 95];
+        окна.extend([-30.0, -30.0, -60.0, -60.0, -60.0]);
+        assert!(quiet_mic(mic_levels(&окна)).is_some(), "без поправки — ложная пометка");
+        let m = mic_levels_without_muted(&окна).expect("включённый кусок есть");
+        assert_eq!(quiet_mic(m), None);
+    }
+
+    #[test]
+    fn микрофон_выключенный_всю_запись_не_судится() {
+        assert_eq!(mic_levels_without_muted(&[FLOOR_DBFS; 50]), None);
+    }
+
+    /// Поправка убирает только цифровой ноль: тихий голос во включённом куске
+    /// по-прежнему помечается.
+    #[test]
+    fn тихий_голос_во_включённом_куске_помечается_и_с_поправкой() {
+        let mut окна = vec![FLOOR_DBFS; 50];
+        окна.extend(vec![-58.0; 50]);
+        let m = mic_levels_without_muted(&окна).expect("включённый кусок есть");
         assert!(quiet_mic(m).is_some());
     }
 }

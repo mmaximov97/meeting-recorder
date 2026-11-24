@@ -86,7 +86,10 @@ pub trait SinkFactory {
     /// не пишут вовсе — содержательный дефолт тихо начал бы класть реальные
     /// файлы в рабочий каталог на каждом прогоне `cargo test`. Единственная
     /// содержательная реализация — `WavSinks`.
-    fn write_meta(&self, _dir: &Path, _base: &str, _duration_sec: u32) {}
+    ///
+    /// `mic_muted_sec` — сколько секунд микрофон был выключен человеком (см.
+    /// `App::set_mic_muted`); ноль — не выключался.
+    fn write_meta(&self, _dir: &Path, _base: &str, _duration_sec: u32, _mic_muted_sec: u32) {}
 }
 
 /// Что оркестратору нужно от захвата: взять микрофон, отпустить микрофон,
@@ -177,17 +180,23 @@ impl SinkFactory for WavSinks {
         Ok(Box::new(WavSink::create(dir, filename)?))
     }
 
-    /// Формат зафиксирован намеренно узко — `{"v":1,"duration_sec":N}` и ни
-    /// поля сверх: чем меньше здесь лежит, тем меньше поводов чинить формат
-    /// потом. `v` держит место для будущей несовместимой правки, хотя сегодня
-    /// не читается никем.
+    /// Формат зафиксирован намеренно узко — `{"v":1,"duration_sec":N}` плюс
+    /// `"mic_muted_sec":M`, только если микрофон выключали: чем меньше здесь
+    /// лежит, тем меньше поводов чинить формат потом. `v` держит место для
+    /// будущей несовместимой правки, хотя сегодня не читается никем. Новое
+    /// поле совместимо в обе стороны: старый читатель его не знает и
+    /// пропускает, новый без него считает «не выключался».
     ///
     /// Ошибка записи не поднимается наружу и не должна портить исход
     /// `close_sinks`: файл-спутник вспомогательный, а не часть контракта
     /// «запись состоялась». Не записался — список записей продолжит считать
     /// длительность по размеру WAV, как до этой задачи.
-    fn write_meta(&self, dir: &Path, base: &str, duration_sec: u32) {
-        let content = format!(r#"{{"v":1,"duration_sec":{duration_sec}}}"#);
+    fn write_meta(&self, dir: &Path, base: &str, duration_sec: u32, mic_muted_sec: u32) {
+        let content = if mic_muted_sec > 0 {
+            format!(r#"{{"v":1,"duration_sec":{duration_sec},"mic_muted_sec":{mic_muted_sec}}}"#)
+        } else {
+            format!(r#"{{"v":1,"duration_sec":{duration_sec}}}"#)
+        };
         if let Err(e) = std::fs::write(dir.join(format!("{base}.meta.json")), content) {
             log::warn!("не удалось записать {base}.meta.json: {e}");
         }
@@ -706,6 +715,22 @@ pub struct App {
     /// найденных файлов ещё растёт, — а удалить растущий файл или начать его
     /// расшифровывать значило бы испортить идущую встречу.
     current_recording: Option<(String, String)>,
+    /// Человек выключил микрофон посреди записи: на фоне шумно, а писать
+    /// нужно только собеседников. В mic-дорожку вместо сэмплов идёт цифровая
+    /// тишина ТОЙ ЖЕ длины — выбросить сэмплы было бы проще, но тогда
+    /// mic-дорожка стала бы короче системной, и всё, что их сопоставляет
+    /// (расшифровка с разметкой говорящих), разъехалось бы по времени.
+    ///
+    /// Поток микрофона при этом не закрывается: переоткрыть его на ходу —
+    /// это пауза и риск не получить устройство обратно посреди встречи.
+    ///
+    /// Флаг живёт ровно одну запись: снимается на старте следующей (см.
+    /// `open_sinks`) и на её конце. Перенесённый в новую встречу, он молча
+    /// съел бы голос человека, который о выключении давно забыл.
+    mic_muted: bool,
+    /// Сколько сэмплов mic-дорожки этой записи заменено тишиной — для
+    /// `mic_muted_sec` в файле-спутнике.
+    mic_muted_samples: u64,
 }
 
 impl App {
@@ -770,6 +795,35 @@ impl App {
         self.monitor
     }
 
+    /// Выключить или включить микрофон в идущей записи. `false` — команда не
+    /// применена: записи нет.
+    ///
+    /// Только в `Recording`. До записи выключать нечего, а запомненный заранее
+    /// флаг сработал бы во встрече, о которой человек ещё не думал. В `Armed`
+    /// тоже нет: кольцо предзаписи уже набрано с голосом, и «выключить» там
+    /// значило бы обещать то, чего первые 30 секунд файла не выполнят.
+    pub fn set_mic_muted(&mut self, on: bool) -> bool {
+        if !matches!(self.machine.state(), State::Recording(_)) {
+            return false;
+        }
+        self.mic_muted = on;
+        true
+    }
+
+    pub fn is_mic_muted(&self) -> bool {
+        self.mic_muted
+    }
+
+    /// То, что уходит в mic-дорожку: сами сэмплы или, при выключенном
+    /// микрофоне, тишина той же длины (почему той же — см. поле `mic_muted`).
+    fn mic_to_write(&mut self, mic: Vec<i16>) -> Vec<i16> {
+        if !self.mic_muted {
+            return mic;
+        }
+        self.mic_muted_samples += mic.len() as u64;
+        vec![0; mic.len()]
+    }
+
     /// Явная проверка микрофона: открыть потоки, ничего не записывая.
     ///
     /// Инвариант «микрофон открыт только когда мы слушаем» сохраняется по
@@ -822,6 +876,8 @@ impl App {
             level_sys: 0.0,
             sys_silent_ticks: 0,
             current_recording: None,
+            mic_muted: false,
+            mic_muted_samples: 0,
         }
     }
 
@@ -1008,6 +1064,9 @@ impl App {
 
     /// Открывает обе дорожки под одним, гарантированно свободным именем.
     fn open_sinks(&mut self) -> Res {
+        // Каждая запись начинается с включённым микрофоном — см. поле `mic_muted`.
+        self.mic_muted = false;
+        self.mic_muted_samples = 0;
         let src = self.current_source.clone();
         let dir = month_dir(&self.root, self.started);
         let (mic, sys) = free_name_pair(&dir, self.started, &src)?;
@@ -1072,6 +1131,7 @@ impl App {
         let recording = self.current_recording.take();
         // Хвост, натёкший между последним pump_audio и стопом.
         let (mic, sys) = self.drain_channels();
+        let mic = self.mic_to_write(mic);
         let mut first_err: Option<Box<dyn std::error::Error>> = None;
 
         if let Some(w) = self.sink_mic.as_mut() {
@@ -1109,9 +1169,12 @@ impl App {
             if let Some((_, base)) = &recording {
                 let dir = month_dir(&self.root, self.started);
                 let duration = elapsed_seconds(self.started, Local::now());
-                self.sinks.write_meta(&dir, base, duration);
+                let muted = muted_seconds(self.mic_muted_samples);
+                self.sinks.write_meta(&dir, base, duration, muted);
             }
         }
+        self.mic_muted = false;
+        self.mic_muted_samples = 0;
 
         match first_err {
             Some(e) => Err(e),
@@ -1127,6 +1190,11 @@ impl App {
         // (данные и так проходят здесь), в проверке — единственный смысл.
         // Затухание, а не мгновенный ноль: иначе полоска мигала бы на паузах
         // между словами.
+        //
+        // Уровень mic — по настоящим сэмплам и при выключенном микрофоне: на
+        // macOS этим числом гейтится конец встречи (`Detect::step` в GUI), а
+        // выключение микрофона в записи не значит, что встреча кончилась.
+        // Пустую полоску выключенного микрофона рисует окно, а не ядро.
         self.level_mic = peak(&mic).max(self.level_mic * LEVEL_DECAY);
         self.level_sys = peak(&sys).max(self.level_sys * LEVEL_DECAY);
         match self.machine.state() {
@@ -1135,6 +1203,7 @@ impl App {
                 self.ring_sys.push_slice(&sys);
             }
             State::Recording(_) => {
+                let mic = self.mic_to_write(mic);
                 if let Some(w) = self.sink_mic.as_mut() {
                     w.write(&mic)?;
                 }
@@ -1275,6 +1344,18 @@ fn elapsed_seconds(started: DateTime<Local>, now: DateTime<Local>) -> u32 {
     now.signed_duration_since(started)
         .num_seconds()
         .max(0)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+/// Сэмплы тишины выключенного микрофона → секунды для файла-спутника.
+///
+/// Вверх, а не вниз: по этому числу список решает, была ли тишина в
+/// mic-дорожке намеренной (см. `quiet_mic` в GUI), и выключение на полсекунды
+/// не имеет права превратиться в «не выключался».
+fn muted_seconds(samples: u64) -> u32 {
+    samples
+        .div_ceil(SAMPLE_RATE as u64)
         .try_into()
         .unwrap_or(u32::MAX)
 }
@@ -1538,9 +1619,17 @@ mod tests {
                     .push(format!("write-err:{}", self.дорожка));
                 return Err(ошибка("запись сэмплов провалилась"));
             }
+            // Цифровая тишина помечается отдельно: так видно, что выключенный
+            // микрофон пишет нули, а не выбрасывает сэмплы. Звук в остальных
+            // тестах ненулевой, их записи этот хвост не трогает.
+            let тишина = if !samples.is_empty() && samples.iter().all(|s| *s == 0) {
+                ":тишина"
+            } else {
+                ""
+            };
             self.журнал
                 .borrow_mut()
-                .push(format!("write:{}:{}", self.дорожка, samples.len()));
+                .push(format!("write:{}:{}{тишина}", self.дорожка, samples.len()));
             Ok(())
         }
 
@@ -1589,10 +1678,17 @@ mod tests {
         /// Реального файла не пишет — только фиксирует вызов в журнале, тем же
         /// приёмом, что и `create`/`Sink::write`, чтобы тесты `App` проверяли
         /// факт и содержимое вызова, не трогая диск.
-        fn write_meta(&self, _dir: &Path, base: &str, duration_sec: u32) {
+        fn write_meta(&self, _dir: &Path, base: &str, duration_sec: u32, mic_muted_sec: u32) {
             self.журнал
                 .borrow_mut()
                 .push(format!("meta:{base}:{duration_sec}"));
+            // Отдельной строкой, а не хвостом к `meta:` — разбор той строки в
+            // тестах длительности остаётся прежним.
+            if mic_muted_sec > 0 {
+                self.журнал
+                    .borrow_mut()
+                    .push(format!("meta-muted:{mic_muted_sec}"));
+            }
         }
     }
 
@@ -2893,6 +2989,107 @@ mod tests {
             !записано(&ж).iter().any(|s| s.starts_with("create:")),
             "проверка не открывает файлов: {:?}",
             записано(&ж)
+        );
+    }
+
+    // ---- выключенный микрофон: в mic-дорожку идёт тишина -----------------
+
+    /// Гвоздь задачи: сэмплы выключенного микрофона не выбрасываются, а
+    /// заменяются нулями той же длины — иначе mic-дорожка станет короче
+    /// системной. Системная при этом пишется как есть.
+    #[test]
+    fn выключенный_микрофон_пишет_тишину_той_же_длины() {
+        let ж = журнал();
+        let mut app = стенд(
+            &ж,
+            Поломка::Нет,
+            vec![
+                // Выбрасывается на ручном старте как звук до нажатия.
+                (vec![100; 10], vec![100; 10]),
+                (vec![100; 1000], vec![100; 1000]),
+                (vec![100; 1600], vec![100; 1600]),
+            ],
+        );
+        app.on_event(Event::ManualStart, None).expect("ручной старт");
+        app.pump_audio().expect("прокачка с включённым микрофоном");
+        assert!(app.set_mic_muted(true), "в записи выключение применяется");
+        app.pump_audio().expect("прокачка с выключенным микрофоном");
+        assert!(
+            app.levels().mic > 0.0,
+            "уровень считается по настоящему звуку: им на macOS гейтится конец встречи"
+        );
+        app.on_event(Event::ManualStop, None).expect("стоп");
+
+        let записи = записано(&ж);
+        assert!(записи.contains(&"write:mic:1000".to_string()), "{записи:?}");
+        assert!(записи.contains(&"write:mic:1600:тишина".to_string()), "{записи:?}");
+        assert!(
+            записи.contains(&"write:system:1600".to_string()),
+            "системная дорожка пишется как есть: {записи:?}"
+        );
+        assert!(
+            записи.contains(&"meta-muted:1".to_string()),
+            "0.1 с тишины — это «выключался», а не ноль: {записи:?}"
+        );
+    }
+
+    #[test]
+    fn вне_записи_микрофон_не_выключается() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        assert!(!app.set_mic_muted(true), "в Idle выключать нечего");
+        assert!(!app.is_mic_muted());
+
+        app.on_event(Event::SessionAppeared, None).expect("детект");
+        assert!(
+            !app.set_mic_muted(true),
+            "в Armed кольцо уже набрано с голосом — выключение там обещало бы неправду"
+        );
+        assert!(!app.is_mic_muted());
+    }
+
+    /// Флаг не переживает запись: забытое выключение не имеет права съесть
+    /// голос в следующей встрече.
+    #[test]
+    fn следующая_запись_начинается_с_включённым_микрофоном() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("первый старт");
+        app.set_mic_muted(true);
+        app.on_event(Event::ManualStop, None).expect("первый стоп");
+        assert!(!app.is_mic_muted(), "после записи флаг снят");
+
+        app.on_event(Event::ManualStart, None).expect("второй старт");
+        assert!(!app.is_mic_muted(), "новая запись — с включённым микрофоном");
+        app.on_event(Event::ManualStop, None).expect("второй стоп");
+        assert!(
+            !записано(&ж).iter().any(|s| s.starts_with("meta-muted:")),
+            "первая запись выключала микрофон на ноль сэмплов, вторая не выключала вовсе: {:?}",
+            записано(&ж)
+        );
+    }
+
+    #[test]
+    fn секунды_тишины_округляются_вверх() {
+        assert_eq!(muted_seconds(0), 0);
+        assert_eq!(muted_seconds(1), 1);
+        assert_eq!(muted_seconds(SAMPLE_RATE as u64), 1);
+        assert_eq!(muted_seconds(SAMPLE_RATE as u64 + 1), 2);
+    }
+
+    #[test]
+    fn meta_json_с_выключенным_микрофоном_несёт_его_секунды() {
+        let dir = ScratchDir::new("meta-muted");
+        WavSinks.write_meta(&dir, "встреча", 600, 42);
+        WavSinks.write_meta(&dir, "обычная", 600, 0);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("встреча.meta.json")).expect("meta с выключением"),
+            r#"{"v":1,"duration_sec":600,"mic_muted_sec":42}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("обычная.meta.json")).expect("обычная meta"),
+            r#"{"v":1,"duration_sec":600}"#,
+            "без выключения формат прежний"
         );
     }
 }

@@ -498,6 +498,10 @@ struct Recording {
     /// — та же причина, что у `quiet_mic_db`: группировка чистая и файлов не
     /// читает, а это сверка не с диском, а с состоянием аудио-потока.
     recording_now: bool,
+    /// Во время записи человек выключал микрофон — тишина в его дорожке
+    /// намеренная. Окно пишет об этом в строке записи. Заполняется в
+    /// `list_recordings` из файла-спутника.
+    mic_muted: bool,
 }
 
 #[tauri::command]
@@ -572,20 +576,27 @@ fn duration_sec(track_bytes: u64) -> u32 {
 struct RecordingMeta {
     #[serde(default)]
     duration_sec: u32,
+    /// Сколько секунд человек держал микрофон выключенным; у записей до этой
+    /// правки и у записей без выключения поля нет — это ноль.
+    #[serde(default)]
+    mic_muted_sec: u32,
 }
 
-/// Длительность из файла-спутника, если он лежит рядом и читается.
+/// Файл-спутник целиком, если он лежит рядом и читается.
 ///
 /// `None` — файла нет, он не открылся или его содержимое не разбирается как
 /// JSON нужной формы: во всех трёх случаях вызывающий обязан молча откатиться
 /// на расчёт по размеру `.wav` (`duration_sec` выше), а не уронить список
 /// записей. Битый файл-спутник — это файл, у которого повезло меньше, чем
 /// дорожкам, а не повод перестать показывать запись целиком.
-fn read_duration_meta(path: &Path) -> Option<u32> {
+fn read_meta(path: &Path) -> Option<RecordingMeta> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<RecordingMeta>(&content)
-        .ok()
-        .map(|m| m.duration_sec)
+    serde_json::from_str::<RecordingMeta>(&content).ok()
+}
+
+/// Длительность из файла-спутника — см. [`read_meta`].
+fn read_duration_meta(path: &Path) -> Option<u32> {
+    read_meta(path).map(|m| m.duration_sec)
 }
 
 /// Склеить дорожки в записи по основе имени И папке.
@@ -682,6 +693,7 @@ fn group_recordings(
             duration_sec: 0,
             quiet_mic_db: None,
             recording_now: false,
+            mic_muted: false,
         });
         if is_mic {
             rec.mic = true;
@@ -708,6 +720,7 @@ fn group_recordings(
             duration_sec: 0,
             quiet_mic_db: None,
             recording_now: false,
+            mic_muted: false,
         });
     }
     // Третий проход: файл-спутник побеждает расчёт по размеру — но только для
@@ -747,6 +760,23 @@ struct Found {
     /// Битый или отсутствующий файл просто не попадает сюда — ключа нет,
     /// `group_recordings` откатывается на расчёт по размеру `.wav`.
     durations: HashMap<(String, Option<String>), u32>,
+    /// `(основа, папка)` записей, в которых человек выключал микрофон
+    /// (`mic_muted_sec > 0` в файле-спутнике).
+    mic_muted: HashSet<(String, Option<String>)>,
+}
+
+impl Found {
+    /// Разобрать файл-спутник один раз и разложить по обоим полям.
+    fn add_meta(&mut self, base: &str, folder: Option<&str>, path: &Path) {
+        let Some(m) = read_meta(path) else {
+            return;
+        };
+        let key = (base.to_string(), folder.map(str::to_string));
+        if m.mic_muted_sec > 0 {
+            self.mic_muted.insert(key.clone());
+        }
+        self.durations.insert(key, m.duration_sec);
+    }
 }
 
 /// Файлы корня плюс файлы месячных подпапок. Глубина ровно два уровня:
@@ -766,10 +796,7 @@ fn collect_files(root: &Path) -> Result<Found, String> {
             match e.file_type() {
                 Ok(t) if t.is_file() => {
                     if let Some(base) = name.strip_suffix(".meta.json") {
-                        if let Some(dur) = read_duration_meta(&e.path()) {
-                            out.durations
-                                .insert((base.to_string(), folder.map(str::to_string)), dur);
-                        }
+                        out.add_meta(base, folder, &e.path());
                     }
                     out.files.push((
                         folder.map(str::to_string),
@@ -809,9 +836,7 @@ fn collect_files(root: &Path) -> Result<Found, String> {
             }
             Ok(t) if t.is_file() => {
                 if let Some(base) = name.strip_suffix(".meta.json") {
-                    if let Some(dur) = read_duration_meta(&e.path()) {
-                        out.durations.insert((base.to_string(), None), dur);
-                    }
+                    out.add_meta(base, None, &e.path());
                 }
                 out.files.push((
                     None,
@@ -853,11 +878,16 @@ fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> 
     let root = recordings_root();
     let found = collect_files(&root)?;
     let mut list = group_recordings(found.files, &found.transcripts, &found.durations);
-    let current = status.snapshot().current_recording;
+    let snapshot = status.snapshot();
+    let current = snapshot.current_recording;
     for r in &mut list {
         r.recording_now = current
             .as_ref()
             .is_some_and(|c| Some(c.folder.as_str()) == r.folder.as_deref() && c.base == r.name);
+        r.mic_muted = found.mic_muted.contains(&(r.name.clone(), r.folder.clone()));
+        // У идущей записи файла-спутника ещё нет, и о выключении знает только
+        // аудио-поток. Выключенный сейчас микрофон — та же намеренная тишина.
+        let mic_was_muted = r.mic_muted || (r.recording_now && snapshot.mic_muted);
         // Пометка имеет смысл только для полной пары: одинокая дорожка уже
         // помечена как неполная, и второе предупреждение о ней ничего не добавит.
         if !(r.mic && r.system) {
@@ -870,7 +900,11 @@ fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> 
         // Только дорожка владельца: системная в решении не участвует — её
         // громкость зависит от колонок собеседника, а не от микрофона
         // (см. докблок `imbalance`).
-        if let Some(m) = cache.levels(&dir.join(format!("{}.mic.wav", r.name))) {
+        //
+        // Тишина выключенного микрофона в оценку не идёт: иначе выключение на
+        // большую часть встречи давало бы «вас почти не слышно» (см.
+        // `imbalance::mic_levels_without_muted`).
+        if let Some(m) = cache.levels(&dir.join(format!("{}.mic.wav", r.name)), mic_was_muted) {
             r.quiet_mic_db = imbalance::quiet_mic(m);
         }
     }
@@ -1280,6 +1314,18 @@ fn set_monitor(
     Ok(epoch.0.load(Ordering::SeqCst) + 1)
 }
 
+/// Выключить/включить микрофон в идущей записи — кнопка в окне.
+///
+/// Ответа о результате нет намеренно: вне записи команда просто не
+/// применяется (см. `App::set_mic_muted`), а настоящее состояние окно узнаёт
+/// событием `mic-muted` — тем же, что приходит и после переключения из трея.
+#[tauri::command]
+fn set_mic_muted(muted: bool, state: tauri::State<Cmd>, app: AppHandle) -> Result<(), String> {
+    state
+        .send(Ctl::SetMicMuted(muted))
+        .inspect_err(|_| status::fatal(&app, status::DEAD.to_string()))
+}
+
 fn emit_transcribe_progress(app: &AppHandle, folder: &Option<String>, base: &str, stage: &str) {
     let _ = app.emit(
         "transcribe-progress",
@@ -1656,6 +1702,7 @@ fn main() {
             local_model_download,
             local_model_remove,
             set_monitor,
+            set_mic_muted,
             rename_recording,
             delete_recording,
             set_audio_retention,
@@ -1796,6 +1843,7 @@ mod tests {
             duration_sec: 0,
             quiet_mic_db: None,
             recording_now: false,
+            mic_muted: false,
         }
     }
 

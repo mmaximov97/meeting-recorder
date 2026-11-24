@@ -80,6 +80,22 @@
     "confirm": {
       "ru": "Записать",
       "en": "Record"
+    },
+    "micMute": {
+      "ru": "Выключить микрофон",
+      "en": "Mute microphone"
+    },
+    "micUnmute": {
+      "ru": "Включить микрофон",
+      "en": "Unmute microphone"
+    },
+    "micMutedNote": {
+      "ru": "Микрофон выключен — пишется только звук собеседников",
+      "en": "Microphone is off — only the others' audio is being recorded"
+    },
+    "micWasMuted": {
+      "ru": "микрофон выключался",
+      "en": "mic was muted"
     }
   },
   "state": {
@@ -712,6 +728,18 @@
     "tipBroken": {
       "ru": "Запись не работает",
       "en": "Recording isn't working"
+    },
+    "micMute": {
+      "ru": "Выключить микрофон",
+      "en": "Mute microphone"
+    },
+    "micUnmute": {
+      "ru": "Включить микрофон",
+      "en": "Unmute microphone"
+    },
+    "tipRecordingMuted": {
+      "ru": "Идёт запись, микрофон выключен",
+      "en": "Recording, microphone off"
     }
   },
   "size": {

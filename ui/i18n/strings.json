@@ -638,6 +638,82 @@
     "later": {
       "ru": "Позже",
       "en": "Later"
+    },
+    "install": {
+      "ru": "Обновить",
+      "en": "Update"
+    },
+    "check": {
+      "ru": "Проверить обновления",
+      "en": "Check for updates"
+    },
+    "checking": {
+      "ru": "Проверяю…",
+      "en": "Checking…"
+    },
+    "upToDate": {
+      "ru": "У вас последняя версия ({v})",
+      "en": "You have the latest version ({v})"
+    },
+    "downloading": {
+      "ru": "Скачиваю обновление… {p}%",
+      "en": "Downloading the update… {p}%"
+    },
+    "installing": {
+      "ru": "Устанавливаю обновление…",
+      "en": "Installing the update…"
+    },
+    "restarting": {
+      "ru": "Перезапускаюсь…",
+      "en": "Restarting…"
+    },
+    "errCheck": {
+      "ru": "Не удалось проверить обновления. Попробуйте позже.",
+      "en": "Couldn't check for updates. Try again later."
+    },
+    "errBusy": {
+      "ru": "Обновление уже идёт.",
+      "en": "The update is already in progress."
+    },
+    "errRecording": {
+      "ru": "Обновиться можно, когда запись закончится.",
+      "en": "You can update once the recording ends."
+    },
+    "errDevBuild": {
+      "ru": "Приложение запущено не из MeetRec.app — обновите его вручную.",
+      "en": "The app isn't running from MeetRec.app. Update it manually."
+    },
+    "errReadOnly": {
+      "ru": "Нет прав заменить приложение в папке «{detail}». Скачайте новую версию вручную.",
+      "en": "No permission to replace the app in “{detail}”. Download the new version manually."
+    },
+    "errNotNewer": {
+      "ru": "Новее установленной версии пока ничего нет.",
+      "en": "There's nothing newer than the installed version yet."
+    },
+    "errNoAsset": {
+      "ru": "В этом релизе нет сборки для вашего Mac. Скачайте новую версию вручную.",
+      "en": "This release has no build for your Mac. Download the new version manually."
+    },
+    "errNoDigest": {
+      "ru": "У релиза нет контрольной суммы, проверить скачанное нечем. Скачайте новую версию вручную.",
+      "en": "The release has no checksum, so the download can't be verified. Download the new version manually."
+    },
+    "errDownload": {
+      "ru": "Обновление не скачалось. Проверьте интернет и попробуйте снова.",
+      "en": "The update didn't download. Check your connection and try again."
+    },
+    "errChecksum": {
+      "ru": "Скачанный файл не совпал с релизом и не установлен. Попробуйте снова.",
+      "en": "The downloaded file didn't match the release, so it wasn't installed. Try again."
+    },
+    "errBadBundle": {
+      "ru": "Скачанное приложение не прошло проверку и не установлено. Скачайте новую версию вручную.",
+      "en": "The downloaded app didn't pass verification, so it wasn't installed. Download the new version manually."
+    },
+    "errInstall": {
+      "ru": "Обновление не установилось. Скачайте новую версию вручную.",
+      "en": "The update didn't install. Download the new version manually."
     }
   },
   "permission": {

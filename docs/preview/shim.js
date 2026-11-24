@@ -68,11 +68,40 @@
 
   // ── Снимок состояния, который отдаёт get_state ──────────────────────────
   const снимок = {
-    state: S === "recording" ? "recording" : S === "armed" ? "armed" : "idle",
+    state:
+      S === "recording" || S === "updaterec" ? "recording" : S === "armed" ? "armed" : "idle",
     fatal: S === "fatal" ? "детектор не поднялся: no such device" : null,
     device_warning: S === "devwarn" ? "{0.0.1.00000000}.{9f1c…}" : null,
     mic_deferred: S === "deferred",
     no_system_audio: S === "nosys" ? "process tap: разрешение не выдано (-3812)" : null,
+  };
+
+  // ── Обновления (update.rs) ──────────────────────────────────────────────
+  // Баннер есть во всех сценах `update*`, кроме ручных проверок в настройках:
+  // там важен ответ на кнопку, а не то, что уже нашла фоновая проверка.
+  // `updatewin` — Windows: встроенной установки нет, кнопка ведёт на страницу.
+  const РЕЛИЗ = { version: "0.3.0", url: "https://github.com/mmaximov97/meeting-recorder/releases/tag/v0.3.0" };
+  const БАННЕР = ["update", "updating", "updateerror", "updaterec", "updatewin"].includes(S);
+  const ОТВЕТ_ПРОВЕРКИ = {
+    updatecheck: { current: "0.2.0", latest: РЕЛИЗ },
+    uptodate: { current: "0.2.0", latest: null },
+  };
+  // Скачивание идёт по-настоящему медленно только там, где на него смотрят:
+  // в `updating` оно замирает на 42 %, чтобы кадр был одинаковым.
+  const установить = () => {
+    if (S === "updateerror")
+      return пауза(700).then(() =>
+        Promise.reject({ key: "update.errReadOnly", detail: "/Volumes/MeetRec" }),
+      );
+    const шаги = S === "updating" ? [0, 17, 42] : [0, 23, 58, 91, 100];
+    шаги.forEach((p, i) =>
+      setTimeout(() => emit("update-progress", { stage: "downloading", percent: p }), 150 * i),
+    );
+    if (S === "updating") return пауза(1e9);
+    const конец = 150 * шаги.length;
+    setTimeout(() => emit("update-progress", { stage: "installing", percent: null }), конец);
+    setTimeout(() => emit("update-progress", { stage: "restarting", percent: null }), конец + 600);
+    return пауза(конец + 700, null);
   };
 
   let метроном = null;
@@ -168,6 +197,16 @@
     open_folder: () => пауза(40),
     open_privacy_settings: () => пауза(40),
     open_repository: () => пауза(40),
+    update_status: () => пауза(20, БАННЕР ? РЕЛИЗ : null),
+    update_skip: () => пауза(20, null),
+    update_in_app: () => пауза(0, S !== "updatewin"),
+    update_check: () =>
+      S === "checkerror"
+        ? пауза(500).then(() =>
+            Promise.reject({ key: "update.errCheck", detail: "GitHub ответил 403 Forbidden" }),
+          )
+        : пауза(500, ОТВЕТ_ПРОВЕРКИ[S] ?? { current: "0.2.0", latest: РЕЛИЗ }),
+    update_install: установить,
   };
 
   window.__TAURI__ = {
@@ -215,7 +254,7 @@
 
   addEventListener("load", () =>
     setTimeout(() => {
-      if (S === "recording") метроном = setInterval(метр, 100);
+      if (S === "recording" || S === "updaterec") метроном = setInterval(метр, 100);
       if (S === "recstart") $("rec-btn")?.click();
 
       const первая = { folder: СПИСОК[0].folder, base: СПИСОК[0].name };
@@ -249,9 +288,13 @@
             ?.click(),
         );
 
-      if (["settings", "deferred", "miccheck", "longmic"].includes(S))
-        $("to-settings")?.click();
+      if (S === "updating" || S === "updateerror") setTimeout(() => $("update-open")?.click(), 200);
+
+      const НАСТРОЙКИ = ["settings", "deferred", "miccheck", "longmic"];
+      const ПРОВЕРКИ = ["updatecheck", "uptodate", "checkerror"];
+      if (НАСТРОЙКИ.includes(S) || ПРОВЕРКИ.includes(S)) $("to-settings")?.click();
       if (S === "miccheck") setTimeout(() => $("check")?.click(), 220);
+      if (ПРОВЕРКИ.includes(S)) setTimeout(() => $("upd-check")?.click(), 220);
     }, 60),
   );
 

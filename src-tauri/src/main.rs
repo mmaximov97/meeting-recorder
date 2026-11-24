@@ -372,10 +372,10 @@ fn spawn_retention_worker(app: AppHandle) {
 /// `update.rs`: обновление не повод мешать записывать встречу.
 fn spawn_update_worker(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let client = match reqwest::Client::builder().build() {
+        let client = match update::client() {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("проверка обновлений: HTTP-клиент не создан: {e}");
+                log::warn!("проверка обновлений: {e}");
                 return;
             }
         };
@@ -416,6 +416,139 @@ fn update_skip(
     cfg.update_skipped_version = Some(version);
     cfg.save(&app)?;
     state.set(None);
+    Ok(())
+}
+
+/// «Проверить обновления» в настройках. В отличие от фоновой проверки, на
+/// «Позже» не смотрит и об отказе говорит (`update::check_manually`).
+#[tauri::command]
+async fn update_check(app: AppHandle) -> Result<update::ManualCheck, update::UpdateError> {
+    use update::{err, UpdateError};
+    let client = update::client().map_err(|e| UpdateError::with(err::CHECK, e))?;
+    let latest = update::fetch_latest(&client)
+        .await
+        .map_err(|e| UpdateError::with(err::CHECK, e))?
+        .ok_or_else(|| UpdateError::with(err::CHECK, "ответ GitHub не разобран"))?;
+    Ok(update::check_manually(&app.package_info().version.to_string(), latest))
+}
+
+/// Умеет ли приложение поставить обновление само. Окну это нужно заранее —
+/// подписать кнопку: «Обновить» на macOS, «Скачать» (страница релиза) на
+/// Windows.
+#[tauri::command]
+fn update_in_app() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// «Обновить»: скачать, проверить и поставить новую версию, затем
+/// перезапуститься. Удача не возвращается в окно — процесс уходит на
+/// перезапуск; ход дела окно видит событиями `update-progress`.
+#[tauri::command]
+async fn update_install(app: AppHandle) -> Result<(), update::UpdateError> {
+    #[cfg(target_os = "macos")]
+    {
+        let state = app.state::<update::UpdateState>();
+        if !state.begin_install() {
+            return Err(update::UpdateError::new(update::err::BUSY));
+        }
+        let result = install_update(&app).await;
+        if let Err(e) = &result {
+            log::warn!("обновление не установлено: {e}");
+            state.end_install();
+        }
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err(update::UpdateError::with(update::err::INSTALL, "встроенная установка есть только на macOS"))
+    }
+}
+
+/// Стадия установки для окна: `downloading` (с процентом), `installing`,
+/// `restarting`.
+#[cfg(target_os = "macos")]
+#[derive(Serialize, Clone)]
+struct UpdateProgress {
+    stage: &'static str,
+    percent: Option<u64>,
+}
+
+#[cfg(target_os = "macos")]
+fn emit_update_progress(app: &AppHandle, stage: &'static str, percent: Option<u64>) {
+    let _ = app.emit("update-progress", UpdateProgress { stage, percent });
+}
+
+/// Перезапуск оборвал бы запись на полуслове, а во взводе — встречу, о
+/// которой приложение как раз спрашивает. Окно гасит кнопку само, но запись
+/// могла начаться и после нажатия (хоткей, звонок), поэтому решает снимок.
+#[cfg(target_os = "macos")]
+fn ensure_idle(app: &AppHandle) -> Result<(), update::UpdateError> {
+    match app.state::<Status>().snapshot().state {
+        audio::UiState::Idle => Ok(()),
+        _ => Err(update::UpdateError::new(update::err::RECORDING)),
+    }
+}
+
+/// Весь путь установки, кроме флага «уже идёт» (см. `update_install`).
+#[cfg(target_os = "macos")]
+async fn install_update(app: &AppHandle) -> Result<(), update::UpdateError> {
+    use update::{err, install, UpdateError};
+    ensure_idle(app)?;
+    // `canonicalize` — к настоящему бандлу, если до него дошли по симлинку:
+    // подменять и запускать нужно его, а не ссылку.
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| UpdateError::with(err::DEV_BUILD, e))?;
+    let bundle = install::bundle_from_exe(&exe).ok_or_else(|| UpdateError::with(err::DEV_BUILD, exe.display()))?;
+    let staging = install::Staging::create(&bundle)?;
+
+    let client = update::client().map_err(|e| UpdateError::with(err::DOWNLOAD, e))?;
+    let json = update::fetch_latest_json(&client).await.map_err(|e| UpdateError::with(err::CHECK, e))?;
+    let current = app.package_info().version.to_string();
+    let pkg = install::package_for(&json, &current, std::env::consts::ARCH)?;
+    log::info!("обновление: {current} → {}, {}", pkg.version, pkg.url);
+
+    // Событие на каждый процент, а не на каждый кусок сети: кусков у 5 МБ
+    // сотни, окну хватит сотни перерисовок.
+    let mut shown = None;
+    let archive = install::download(&client, &pkg, |done, total| {
+        let percent = (done * 100).checked_div(total).unwrap_or(0);
+        if shown != Some(percent) {
+            shown = Some(percent);
+            emit_update_progress(app, "downloading", Some(percent));
+        }
+    })
+    .await?;
+
+    emit_update_progress(app, "installing", None);
+    let identifier = app.config().identifier.clone();
+    let handle = app.clone();
+    let target = bundle.clone();
+    // Запись архива, tar, codesign и rename — синхронный ввод-вывод на доли
+    // секунды; на общем async-рантайме он держал бы его поток (см.
+    // `spawn_retention_worker`).
+    tauri::async_runtime::spawn_blocking(move || {
+        let new_app = install::unpack(&staging, &archive, &identifier, &pkg.version)?;
+        // Ещё раз: пока качали, мог начаться звонок.
+        ensure_idle(&handle)?;
+        install::replace(&target, &new_app)
+    })
+    .await
+    .map_err(|e| UpdateError::with(err::INSTALL, e))??;
+
+    log::info!("обновление: новый бандл на месте, перезапуск");
+    emit_update_progress(app, "restarting", None);
+    // Выход тем же путём, что «Выход» из трея: через аудио-поток, который
+    // отпускает микрофон и закрывает файлы. Новую версию запустит
+    // `RunEvent::Exit` (см. `update::relaunch`).
+    app.state::<update::UpdateState>().request_relaunch(bundle);
+    match app.state::<Cmd>().0.lock() {
+        Ok(tx) => tray::request_quit(app, &tx),
+        // Новый бандл уже на месте, отказом это не сделать. Запись не идёт
+        // (`ensure_idle`), финализировать нечего — выходим сами.
+        Err(_) => app.exit(0),
+    }
     Ok(())
 }
 
@@ -1663,7 +1796,10 @@ fn main() {
             cancel_transcription,
             open_recording_folder,
             update_status,
-            update_skip
+            update_skip,
+            update_check,
+            update_in_app,
+            update_install
         ])
         .setup(move |app| {
             // Приложение живёт в Dock как обычное (`ActivationPolicy::Regular`),
@@ -1738,6 +1874,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("не удалось запустить приложение")
         .run(|app_handle, event| {
+            // Только что поставили обновление — процесс уходит, новая версия
+            // запускается (см. `update::relaunch`).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = event {
+                update::relaunch(app_handle);
+            }
+
             // Клик по иконке в Dock у приложения без видимых окон присылает
             // `Reopen` — без этого обработчика повторится ровно та проблема,
             // из-за которой Dock когда-то убирали (см. докблок в `setup()`):

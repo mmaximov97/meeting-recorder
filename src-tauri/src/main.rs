@@ -727,11 +727,6 @@ fn read_meta(path: &Path) -> Option<RecordingMeta> {
     serde_json::from_str::<RecordingMeta>(&content).ok()
 }
 
-/// Длительность из файла-спутника — см. [`read_meta`].
-fn read_duration_meta(path: &Path) -> Option<u32> {
-    read_meta(path).map(|m| m.duration_sec)
-}
-
 /// Склеить дорожки в записи по основе имени И папке.
 ///
 /// Имя дорожки — `{основа}.{mic|system}.wav`, где основа это
@@ -789,7 +784,7 @@ fn read_duration_meta(path: &Path) -> Option<u32> {
 /// ради логики, которой файлы не нужны.
 ///
 /// `durations` — длительности из файлов-спутников `<основа>.meta.json`
-/// (см. `read_duration_meta`), тем же ключом `(основа, папка)`, что и
+/// (см. `read_meta`), тем же ключом `(основа, папка)`, что и
 /// `transcripts`. Разбор их содержимого сюда не спущен намеренно, по той же
 /// причине, что и обход каталога — это чтение файлов, а группировка обязана
 /// оставаться чистой функцией, проверяемой без диска.
@@ -889,7 +884,7 @@ struct Found {
     /// `(основа, папка)` записей, у которых рядом есть `<основа>.transcript`.
     transcripts: HashSet<(String, Option<String>)>,
     /// `(основа, папка)` → длительность из `<основа>.meta.json`, если рядом
-    /// нашёлся файл-спутник и он разобрался (см. `read_duration_meta`).
+    /// нашёлся файл-спутник и он разобрался (см. `read_meta`).
     /// Битый или отсутствующий файл просто не попадает сюда — ключа нет,
     /// `group_recordings` откатывается на расчёт по размеру `.wav`.
     durations: HashMap<(String, Option<String>), u32>,
@@ -2384,7 +2379,7 @@ mod tests {
         assert_eq!(list[0].duration_sec, 600);
     }
 
-    /// `read_duration_meta` не роняет обход каталога: битый или пустой
+    /// `read_meta` не роняет обход каталога: битый или пустой
     /// файл-спутник просто не даёт ключа, а не паникует и не топит остальные
     /// записи в `collect_files`.
     #[test]
@@ -2400,15 +2395,15 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("создать временный каталог");
 
         std::fs::write(dir.join("битый.meta.json"), b"{ not json").unwrap();
-        assert_eq!(read_duration_meta(&dir.join("битый.meta.json")), None);
+        assert_eq!(read_meta(&dir.join("битый.meta.json")).map(|m| m.duration_sec), None);
 
         std::fs::write(dir.join("пустой.meta.json"), b"").unwrap();
-        assert_eq!(read_duration_meta(&dir.join("пустой.meta.json")), None);
+        assert_eq!(read_meta(&dir.join("пустой.meta.json")).map(|m| m.duration_sec), None);
 
-        assert_eq!(read_duration_meta(&dir.join("нет-такого.meta.json")), None);
+        assert_eq!(read_meta(&dir.join("нет-такого.meta.json")).map(|m| m.duration_sec), None);
 
         std::fs::write(dir.join("живой.meta.json"), br#"{"v":1,"duration_sec":42}"#).unwrap();
-        assert_eq!(read_duration_meta(&dir.join("живой.meta.json")), Some(42));
+        assert_eq!(read_meta(&dir.join("живой.meta.json")).map(|m| m.duration_sec), Some(42));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

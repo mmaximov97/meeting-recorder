@@ -44,6 +44,10 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ключи Google для календаря (src-tauri/src/calendar/keys.rs).
+          # Нет секретов — сборка проходит, календарь в ней выключен.
+          MEETREC_GOOGLE_CLIENT_ID: ${{ secrets.MEETREC_GOOGLE_CLIENT_ID }}
+          MEETREC_GOOGLE_CLIENT_SECRET: ${{ secrets.MEETREC_GOOGLE_CLIENT_SECRET }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'MeetRec ${{ github.ref_name }}'

@@ -116,9 +116,24 @@ pub trait AudioIo {
     /// Всё, что накопилось с прошлого раза: `(mic, system)`.
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>);
 
-    /// Сменить микрофон. Применяется к следующему `open()`: менять устройство
-    /// под уже идущей записью значило бы порвать дорожку посередине.
+    /// Запомнить выбор микрофона. Сам поток не трогает: к открытому захвату
+    /// выбор применяет [`AudioIo::reopen_mic`], к закрытому — следующий `open()`.
     fn set_mic_device(&mut self, _choice: DeviceChoice) {}
+
+    /// Пересобрать только поток микрофона под текущий выбор, не трогая
+    /// системную дорожку, — смена микрофона посреди записи.
+    ///
+    /// Новый поток поднимается ДО того, как гасится старый: не открылся новый
+    /// — старый пишет дальше, а ошибка уходит наверх. Звук старого потока,
+    /// который успел натечь, не теряется — его отдаст следующий `drain()`
+    /// раньше звука нового. Поэтому дорожка не рвётся и в файл не попадает
+    /// дыра длиной в открытие устройства; на стыке остаётся только
+    /// расхождение в одну-две пачки колбэка (единицы–десятки мс).
+    ///
+    /// Захват закрыт — делать нечего, `Ok`. Дефолт — no-op для фейков.
+    fn reopen_mic(&mut self) -> Res {
+        Ok(())
+    }
 
     /// `Some(имя)` — при последнем `open()` просили это устройство, не нашли и
     /// взяли системный дефолт.
@@ -208,8 +223,8 @@ impl SinkFactory for WavSinks {
 /// поэтому индикатор микрофона в Windows гаснет сразу после Idle.
 ///
 /// Windows-only вместе с `CpalAudio`, которая единственная её и строит:
-/// у `MacAudio` системная дорожка не в потоке cpal, а в общем на весь процесс
-/// `SystemTap`, и держать под неё поле здесь нечего.
+/// у `MacAudio` системная дорожка не в потоке cpal, а в процесс-тапе
+/// (`SystemTap`), и держать под неё поле здесь нечего.
 #[cfg(target_os = "windows")]
 struct Streams {
     /// Тихий render-поток: не даёт эндпоинту простаивать, иначе WASAPI loopback
@@ -253,6 +268,9 @@ struct CpalAudio {
     opened_at: Option<Instant>,
     logged_mic: bool,
     logged_sys: bool,
+    /// Остаток звука старого микрофона после `reopen_mic` — уходит в начало
+    /// следующего `drain()`.
+    mic_carry: Vec<i16>,
 }
 
 #[cfg(target_os = "windows")]
@@ -266,6 +284,7 @@ impl CpalAudio {
             opened_at: None,
             logged_mic: false,
             logged_sys: false,
+            mic_carry: Vec::new(),
         }
     }
 }
@@ -422,6 +441,23 @@ impl AudioIo for CpalAudio {
     fn close(&mut self) {
         self.streams = None;
         self.opened_at = None;
+        self.mic_carry.clear();
+    }
+
+    /// См. докблок трейта. Loopback и тихий поток не трогаются вовсе.
+    fn reopen_mic(&mut self) -> Res {
+        let Some(streams) = self.streams.as_mut() else {
+            return Ok(());
+        };
+        let (tx_mic, rx_mic) = channel();
+        let (pending, fell_back) = build_mic_capture(&self.mic, tx_mic)?;
+        let mic = pending.play()?;
+        let old = std::mem::replace(&mut streams._mic, mic);
+        let old_rx = std::mem::replace(&mut streams.rx_mic, rx_mic);
+        drop(old);
+        self.mic_carry.extend(old_rx.try_iter().flatten());
+        self.fell_back = fell_back;
+        Ok(())
     }
 
     fn is_open(&self) -> bool {
@@ -429,9 +465,10 @@ impl AudioIo for CpalAudio {
     }
 
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
+        let carry = std::mem::take(&mut self.mic_carry);
         let (mic, sys) = match &self.streams {
             Some(s) => (
-                s.rx_mic.try_iter().flatten().collect::<Vec<i16>>(),
+                carry.into_iter().chain(s.rx_mic.try_iter().flatten()).collect::<Vec<i16>>(),
                 // `None` — loopback сейчас не поднят (см. `reopen_loopback`):
                 // тот же случай, что и полное молчание дорожки, для читателя
                 // `drain()` неотличим и не обязан быть отличим — про причину
@@ -470,162 +507,245 @@ impl AudioIo for CpalAudio {
     }
 }
 
+/// Системная дорожка глазами `MacAudio`: «отдай накопленное». Поднимается
+/// созданием, гаснет в Drop — отдельных start/stop у неё нет.
+///
+/// Трейт, а не голый `SystemTap`, ради тестов: жизненный цикл тапа по
+/// переходам машины проверяется подставной дорожкой, без Core Audio и TCC.
+#[cfg(target_os = "macos")]
+pub trait SystemTrack {
+    fn drain(&mut self) -> Vec<i16>;
+}
+
+#[cfg(target_os = "macos")]
+impl SystemTrack for crate::capture::SystemTap {
+    fn drain(&mut self) -> Vec<i16> {
+        crate::capture::SystemTap::drain(self)
+    }
+}
+
+/// Как поднять системную дорожку. `Err` — текст причины для лога.
+#[cfg(target_os = "macos")]
+type TapStarter = Box<dyn FnMut() -> Result<Box<dyn SystemTrack>, String>>;
+
+/// Как открыть микрофон: живой поток (держим только ради его Drop) и имя
+/// устройства, если просили другое и не нашли.
+#[cfg(target_os = "macos")]
+type MicOpener = Box<
+    dyn FnMut(
+        &DeviceChoice,
+        std::sync::mpsc::Sender<Vec<i16>>,
+    ) -> Res<(Box<dyn std::any::Any>, Option<String>)>,
+>;
+
 /// Реальный захват на macOS: микрофон через cpal, система — через процесс-тап.
 ///
-/// Структурно параллельна [`CpalAudio`], но с одним принципиальным отличием:
-/// системная дорожка НЕ открывается в `open()` и не гаснет в `close()`. Тап
-/// поднят снаружи, до `App`, и течёт всё время работы приложения — иначе
-/// сигналу активности звука, которым на macOS достраивается детект, не на чем
-/// было бы работать до первого детекта (см. докблок `capture::SystemTap`).
+/// Обе дорожки открываются в `open()` и гаснут в `close()`, как у
+/// [`CpalAudio`] на Windows. Раньше тап поднимался на старте приложения и жил
+/// весь процесс — ради уровня системного звука, которым достраивался детект.
+/// Цена оказалась видимой: агрегат тапа открывает вход устройства вывода, и на
+/// гарнитуре с микрофоном macOS весь день показывала оранжевый индикатор при
+/// пустом приложении. Детект теперь смотрит на «чужой захват микрофона»
+/// (`detector::macos`), и тапу незачем жить в простое.
+///
+/// `open()` зовут ровно три места ядра: `Action::StartRingBuffer` (взвод
+/// «Записать встречу?» — отсюда предзапись системного звука),
+/// `Action::StartFileWrite` (ручной старт) и `App::set_monitor(true)`
+/// (проверка микрофона — полоска системного звука в ней живая, как и раньше).
+/// `close()` — `DiscardRing`, `CloseFile`, `reset_to_idle`, выключение проверки.
 ///
 /// `pub` — потому что `MacAudio::new` зовётся из `src-tauri/src/audio.rs`,
 /// другого крейта. Поля при этом остаются приватными: наружу торчит только
 /// конструктор.
 #[cfg(target_os = "macos")]
 pub struct MacAudio {
-    mic: Option<cpal::Stream>,
+    mic: Option<Box<dyn std::any::Any>>,
     mic_rx: Option<Receiver<Vec<i16>>>,
     mic_choice: DeviceChoice,
     fell_back: Option<String>,
-    /// Живёт всё время процесса — сконструирован снаружи и передан сюда,
-    /// а не создаётся в `open()`/`close()`.
-    ///
-    /// `None` — человек отказал в разрешении на захват системного звука
-    /// (см. `new_mic_only`). Приложение при этом продолжает работать, но пишет
-    /// одну дорожку и теряет автодетект: на macOS звонок отличается от просто
-    /// открытого Zoom ровно тем, что система при нём звучит, а без тапа этот
-    /// сигнал не с чего взять.
-    system_tap: Option<std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>>,
+    open_mic: MicOpener,
+    /// `None` — режим одного микрофона: человек отказал в разрешении на захват
+    /// системного звука (см. `new_mic_only`).
+    start_tap: Option<TapStarter>,
+    /// Живая системная дорожка. `Some` только между `open()` и `close()`, и то
+    /// если тап поднялся (см. `start_system`).
+    system: Option<Box<dyn SystemTrack>>,
     /// `MR_DEBUG_TIMING=1` — то же, что у `CpalAudio`, и по той же причине:
     /// живого звонка отладчиком не поймать, а расхождение старта дорожек видно
-    /// только на числах.
-    ///
-    /// Мерить здесь есть что, хотя системная дорожка и не открывается: вопрос
-    /// «сколько микрофон догоняет уже идущий тап» — это ровно то, что ручная
-    /// проверка на macOS и должна увидеть. Переменная обязана работать на обеих
-    /// платформах: инструкция к проверке одна, и молчащий на macOS
-    /// `MR_DEBUG_TIMING` человек прочитал бы как отказ сборки, а не как «эта
-    /// платформа ничего не печатает».
+    /// только на числах. На macOS здесь же видна цена старта тапа.
     timing: bool,
-    /// Начало `open()` — точка отсчёта для дорожки микрофона.
+    /// Начало `open()` — общая точка отсчёта для обеих дорожек.
     opened_at: Option<Instant>,
     logged_mic: bool,
     logged_sys: bool,
+    /// Остаток звука старого микрофона после `reopen_mic` — уходит в начало
+    /// следующего `drain()`.
+    mic_carry: Vec<i16>,
 }
 
 #[cfg(target_os = "macos")]
 impl MacAudio {
-    /// `system_tap` — общий на весь процесс, конструируется и передаётся
-    /// вызывающим (`audio::run()`), а не здесь: это ресурс уровня процесса,
-    /// а не уровня одной записи.
-    pub fn new(
-        mic: DeviceChoice,
-        system_tap: std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>,
-    ) -> Self {
-        Self::with_tap(mic, Some(system_tap))
+    /// Обе дорожки. Тап здесь НЕ поднимается — только в `open()`.
+    pub fn new(mic: DeviceChoice) -> Self {
+        let start: TapStarter = Box::new(|| {
+            crate::capture::SystemTap::start()
+                .map(|t| Box::new(t) as Box<dyn SystemTrack>)
+                .map_err(|e| e.to_string())
+        });
+        Self::with_parts(mic, cpal_mic_opener(), Some(start))
     }
 
-    /// Без системной дорожки: тап не поднялся, потому что человек отказал в
-    /// разрешении на захват звука.
+    /// Без системной дорожки: пробный тап на старте не создался, потому что
+    /// человек отказал в разрешении на захват звука.
     ///
-    /// Отдельный конструктор, а не `new(mic, None)`, чтобы вызов читался как
-    /// решение («пишем только микрофон»), а не как забытый аргумент. Цена этого
-    /// режима не в одной дорожке, а в автодетекте — он перестаёт срабатывать
-    /// совсем, и сказать об этом человеку обязан тот, кто сюда попал
-    /// (`audio::run`), потому что отсюда до UI не дотянуться.
+    /// Отдельный конструктор, а не `new` с флагом, чтобы вызов читался как
+    /// решение («пишем только микрофон»). Сказать об этом человеку обязан тот,
+    /// кто сюда попал (`audio::run`), потому что отсюда до UI не дотянуться.
     pub fn new_mic_only(mic: DeviceChoice) -> Self {
-        Self::with_tap(mic, None)
+        Self::with_parts(mic, cpal_mic_opener(), None)
     }
 
-    fn with_tap(
-        mic: DeviceChoice,
-        system_tap: Option<std::rc::Rc<std::cell::RefCell<crate::capture::SystemTap>>>,
-    ) -> Self {
+    fn with_parts(mic: DeviceChoice, open_mic: MicOpener, start_tap: Option<TapStarter>) -> Self {
         Self {
             mic: None,
             mic_rx: None,
             mic_choice: mic,
             fell_back: None,
-            system_tap,
+            open_mic,
+            start_tap,
+            system: None,
             timing: std::env::var_os("MR_DEBUG_TIMING").is_some(),
             opened_at: None,
             logged_mic: false,
             logged_sys: false,
+            mic_carry: Vec::new(),
+        }
+    }
+
+    /// Поднять тап, если его ещё нет. Отказ не роняет `open()`: встреча с
+    /// одним микрофоном дороже, чем никакая, — та же логика приоритета, что у
+    /// `_sys` в `CpalAudio`. Дорожка при этом остаётся заявленной
+    /// (`has_system`), так что watchdog заметит молчание и позовёт
+    /// `reopen_loopback` — то есть ещё одну попытку.
+    fn start_system(&mut self) {
+        if self.system.is_some() {
+            return;
+        }
+        let Some(start) = self.start_tap.as_mut() else {
+            return;
+        };
+        let t0 = Instant::now();
+        match start() {
+            Ok(track) => {
+                log::info!("системный тап поднят за {:?}", t0.elapsed());
+                self.system = Some(track);
+            }
+            Err(e) => log::error!("системный тап не поднялся: {e} — пока пишется только микрофон"),
         }
     }
 }
 
+/// Настоящий микрофон через cpal.
+#[cfg(target_os = "macos")]
+fn cpal_mic_opener() -> MicOpener {
+    Box::new(|choice, tx| {
+        let (pending, fell_back) = build_mic_capture(choice, tx)?;
+        let stream = pending.play()?;
+        Ok((Box::new(stream) as Box<dyn std::any::Any>, fell_back))
+    })
+}
+
 #[cfg(target_os = "macos")]
 impl AudioIo for MacAudio {
-    /// Открывает ТОЛЬКО микрофон: системная дорожка течёт из `system_tap`
-    /// независимо от этого вызова.
+    /// Тап первым, микрофон вторым. Создание агрегата посреди старта уже
+    /// запущенного cpal-потока давало в нём overrun («A buffer underrun or
+    /// overrun occurred») — порядок «тап, потом микрофон» этого не делает.
     ///
-    /// Разделения «открыть» и «запустить» здесь достаточно в вырожденном виде:
-    /// поток ровно один, выравнивать его не с чем — тап уже идёт, и его время
-    /// отсчитывается от старта приложения, а не от `open()`.
+    /// Отказ микрофона — отказ всего `open()`, как и раньше: уже поднятый тап
+    /// гасится следом, наполовину открытого захвата не остаётся. Отказ тапа —
+    /// только минус системная дорожка (см. `start_system`).
     fn open(&mut self) -> Res {
         if self.mic.is_some() {
             return Ok(());
         }
-        let (tx, rx) = channel();
         let t0 = Instant::now();
-        let (pending, fell_back) = build_mic_capture(&self.mic_choice, tx)?;
-        self.fell_back = fell_back;
+        self.start_system();
         let t1 = Instant::now();
-        self.mic = Some(pending.play()?);
+        let (tx, rx) = channel();
+        let (stream, fell_back) = match (self.open_mic)(&self.mic_choice, tx) {
+            Ok(opened) => opened,
+            Err(e) => {
+                self.system = None;
+                return Err(e);
+            }
+        };
+        self.fell_back = fell_back;
+        self.mic = Some(stream);
+        self.mic_rx = Some(rx);
         let t2 = Instant::now();
         if self.timing {
-            eprintln!("[timing] build(mic)              = {:?}", t1 - t0);
-            eprintln!("[timing] play(mic)               = {:?}", t2 - t1);
-            eprintln!(
-                "[timing] системная дорожка      = уже идёт (тап поднят при старте \
-                 приложения, открывать нечего)"
-            );
+            eprintln!("[timing] start(system tap)       = {:?}", t1 - t0);
+            eprintln!("[timing] open(mic)               = {:?}", t2 - t1);
         }
         self.opened_at = Some(t0);
         self.logged_mic = false;
         self.logged_sys = false;
-        self.mic_rx = Some(rx);
         Ok(())
     }
 
+    /// Гасит обе дорожки. После этого наш процесс не держит ни одного входа —
+    /// ни микрофона, ни агрегата тапа, — и индикаторы macOS гаснут.
     fn close(&mut self) {
+        self.system = None;
         self.mic = None;
         self.mic_rx = None;
         self.opened_at = None;
+        self.mic_carry.clear();
+    }
+
+    /// См. докблок трейта. Тап не трогается: системная дорожка идёт дальше.
+    fn reopen_mic(&mut self) -> Res {
+        if self.mic.is_none() {
+            return Ok(());
+        }
+        let t0 = Instant::now();
+        let (tx, rx) = channel();
+        let (stream, fell_back) = (self.open_mic)(&self.mic_choice, tx)?;
+        let old = self.mic.replace(stream);
+        let old_rx = self.mic_rx.replace(rx);
+        // Drop старого потока останавливает его колбэк; всё, что он успел
+        // положить в канал, забирается после — ничего не теряется.
+        drop(old);
+        if let Some(rx) = old_rx {
+            self.mic_carry.extend(rx.try_iter().flatten());
+        }
+        self.fell_back = fell_back;
+        log::info!("микрофон сменён на лету за {:?}", t0.elapsed());
+        Ok(())
     }
 
     /// Про микрофон — как и требует докблок трейта («горит ли индикатор»).
-    /// Системная дорожка сюда не входит: privacy-индикатора у тапа нет, и
-    /// этим методом она не гейтится.
+    /// Тап живёт ровно тогда же (поднимается и гаснет в тех же `open`/`close`).
     fn is_open(&self) -> bool {
         self.mic.is_some()
     }
 
     fn drain(&mut self) -> (Vec<i16>, Vec<i16>) {
-        let mic: Vec<i16> = self
-            .mic_rx
-            .as_ref()
-            .map(|rx| rx.try_iter().flatten().collect())
-            .unwrap_or_default();
-        // Дренируется ВСЕГДА, даже когда микрофон закрыт: иначе накопленное в
-        // канале тапа росло бы без предела всё время простоя, а уровень
-        // системного звука (второй сигнал детекта на macOS) считался бы по
-        // тому, что играло минуты назад.
-        //
+        let mut mic = std::mem::take(&mut self.mic_carry);
+        if let Some(rx) = self.mic_rx.as_ref() {
+            mic.extend(rx.try_iter().flatten());
+        }
         // Без тапа — пустой вектор, то есть ровно то же, что «тап есть, но
-        // сейчас тихо». Разница между этими случаями видна не здесь, а в
-        // `has_system`: тишина пишется в файл, отсутствие дорожки — нет.
-        let sys = match self.system_tap.as_ref() {
-            Some(t) => t.borrow_mut().drain(),
-            None => Vec::new(),
-        };
+        // данных ещё нет». Разница между «дорожки нет вовсе» и «её сейчас нет»
+        // видна не здесь, а в `has_system`.
+        let sys = self
+            .system
+            .as_mut()
+            .map(|t| t.drain())
+            .unwrap_or_default();
         if self.timing {
             // Замер грубый: drain зовётся из цикла раз в 200 мс, так что
-            // «первый чанк» округлён вверх до тика. Отсчёт — от open(), то есть
-            // от взятия микрофона; для системной дорожки это ответ на вопрос
-            // «сколько её уже было к моменту, когда включился микрофон», а не
-            // «сколько она поднималась».
+            // «первый чанк» округлён вверх до тика. Отсчёт — от начала open().
             if let Some(t0) = self.opened_at {
                 if !self.logged_mic && !mic.is_empty() {
                     eprintln!("[timing] первый чанк mic      = +{:?}", t0.elapsed());
@@ -648,8 +768,24 @@ impl AudioIo for MacAudio {
         self.fell_back.clone()
     }
 
+    /// Ответ на watchdog молчащей системной дорожки: пересобрать тап. Лечит
+    /// и тап, не поднявшийся в `open()`, и агрегат, чьё устройство вывода
+    /// пропало посреди записи (гарнитуру выдернули).
+    fn reopen_loopback(&mut self) -> Res {
+        if self.mic.is_none() {
+            return Ok(());
+        }
+        self.system = None;
+        self.start_system();
+        if self.system.is_some() {
+            Ok(())
+        } else {
+            Err("системный тап не поднялся".into())
+        }
+    }
+
     fn has_system(&self) -> bool {
-        self.system_tap.is_some()
+        self.start_tap.is_some()
     }
 }
 
@@ -699,6 +835,9 @@ pub struct App {
     /// показано» и «что происходит» однажды стоил сорока шести минут записи
     /// не тем микрофоном.
     mic_change_deferred: bool,
+    /// Микрофон сменился на лету — интерфейсу пора сказать об этом. Снимается
+    /// [`App::take_mic_switched`].
+    mic_switched: bool,
     level_mic: f32,
     level_sys: f32,
     /// Сколько тиков подряд `drain()` отдавал пустую system-дорожку при
@@ -750,9 +889,9 @@ impl App {
 
     /// Для платформ, где `AudioIo` собирается снаружи.
     ///
-    /// На macOS это `MacAudio` с общим на весь процесс `SystemTap`: одним
-    /// `DeviceChoice`, который принимает `App::new`, такой захват не
-    /// описывается — тап поднимается раньше `App` и живёт дольше любой записи.
+    /// На macOS это `MacAudio`: одним `DeviceChoice`, который принимает
+    /// `App::new`, такой захват не описывается — снаружи решается, есть ли
+    /// разрешение на системную дорожку (`MacAudio::new` или `new_mic_only`).
     ///
     /// `SinkFactory` при этом всегда `WavSinks`, как и в `App::new`:
     /// варьируется только `AudioIo`. Подставной `SinkFactory` остаётся делом
@@ -761,16 +900,40 @@ impl App {
         Self::with_backends(root, audio, Box::new(WavSinks))
     }
 
-    /// Сменить микрофон. Вступает в силу со следующего открытия потоков.
+    /// Сменить микрофон.
     ///
-    /// Если в этот момент идёт запись (машина не в `Idle`), выбор запоминается,
-    /// но текущая дорожка продолжает писаться прежним устройством — менять его
-    /// на ходу значило бы порвать её посередине. Факт отложенности выставляется
-    /// флагом: сказать об этом обязан интерфейс, иначе смена выглядит
-    /// применённой, а не отложенной.
+    /// Захват открыт (идёт запись, предзапись или проверка) — поток микрофона
+    /// пересобирается сразу ([`AudioIo::reopen_mic`]), и дорожка продолжается
+    /// в тот же `.mic.wav` новым устройством. Захват закрыт — выбор ждёт
+    /// следующего `open()`.
+    ///
+    /// Новое устройство не открылось — пишется прежнее, и это видно: флаг
+    /// отложенности поднимается так же, как раньше при любой смене под
+    /// записью. Иначе выпадашка показывала бы новое устройство, а дорожка
+    /// писалась бы старым — ровно тот молчаливый разрыв, что однажды стоил
+    /// сорока шести минут записи не тем микрофоном.
     pub fn set_mic_device(&mut self, choice: DeviceChoice) {
         self.audio.set_mic_device(choice);
-        self.mic_change_deferred = !matches!(self.machine.state(), State::Idle);
+        let busy = !matches!(self.machine.state(), State::Idle);
+        if !self.audio.is_open() {
+            self.mic_change_deferred = busy;
+            return;
+        }
+        match self.audio.reopen_mic() {
+            Ok(()) => {
+                self.mic_change_deferred = false;
+                self.mic_switched = true;
+            }
+            Err(e) => {
+                log::error!("микрофон на лету не сменился: {e} — пишется прежний");
+                self.mic_change_deferred = busy;
+            }
+        }
+    }
+
+    /// `true` один раз после каждой удачной смены микрофона на лету.
+    pub fn take_mic_switched(&mut self) -> bool {
+        std::mem::take(&mut self.mic_switched)
     }
 
     /// `true` — выбранное устройство ждёт следующей записи, текущая идёт на
@@ -898,6 +1061,7 @@ impl App {
             started: Local::now(),
             monitor: false,
             mic_change_deferred: false,
+            mic_switched: false,
             level_mic: 0.0,
             level_sys: 0.0,
             sys_silent_ticks: 0,
@@ -930,8 +1094,8 @@ impl App {
     /// `pump_audio` дренирует каналы РАНЬШЕ, чем смотрит на состояние машины, и
     /// пишет всё, что вынул, если состояние — `Recording`. На тике, где случился
     /// переход `Idle → Recording`, «всё, что вынул» — это ещё и звук, пришедший
-    /// ДО нажатия: до тика проходит до 200 мс, и на macOS системный тап течёт
-    /// непрерывно, поэтому эти 200 мс там всегда есть и всегда непустые.
+    /// ДО нажатия: до тика проходит до 200 мс, и если до старта шла проверка
+    /// микрофона, каналы к этому моменту уже полны.
     ///
     /// Ловится это только на живой машине: ручная проверка Task 4 дала
     /// системную дорожку на 5119 сэмплов (0.32 с) длиннее микрофонной при
@@ -1735,6 +1899,8 @@ mod tests {
         /// `true` — `reopen_loopback` отвечает ошибкой, как настоящий
         /// `CpalAudio`, когда пересобрать loopback не удалось.
         reopen_падает: bool,
+        /// `true` — `reopen_mic` отказывает: новое устройство не открылось.
+        reopen_mic_падает: bool,
         /// `false` — притворяемся `MacAudio` без тапа: человек отказал в
         /// разрешении на захват системного звука.
         есть_система: bool,
@@ -1774,6 +1940,14 @@ mod tests {
             self.подмена.clone()
         }
 
+        fn reopen_mic(&mut self) -> Res {
+            self.журнал.borrow_mut().push("audio:reopen_mic".into());
+            if self.reopen_mic_падает {
+                return Err(ошибка("микрофон не открылся"));
+            }
+            Ok(())
+        }
+
         fn reopen_loopback(&mut self) -> Res {
             self.журнал.borrow_mut().push("audio:reopen_loopback".into());
             if self.reopen_падает {
@@ -1805,6 +1979,277 @@ mod tests {
         }
     }
 
+    // ---- MacAudio: системный тап живёт только пока открыт захват ----------
+    //
+    // Регресс оранжевого индикатора: тап (и его агрегат, открывающий вход
+    // гарнитуры) раньше жил весь процесс. Теперь он обязан подниматься на тех
+    // же переходах машины, что и микрофон, и гаснуть вместе с ним. Микрофон и
+    // тап здесь подставные: журнал пишет, кто когда поднялся и погас (гашение
+    // — из Drop, то есть ровно тогда, когда отпустил бы настоящий).
+
+    #[cfg(target_os = "macos")]
+    struct ФейкТап(Журнал);
+
+    #[cfg(target_os = "macos")]
+    impl SystemTrack for ФейкТап {
+        fn drain(&mut self) -> Vec<i16> {
+            vec![7; 4]
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ФейкТап {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("tap:stop".into());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ФейкМик(Журнал);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ФейкМик {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("mic:close".into());
+        }
+    }
+
+    /// `тап_поднимается: false` — тап отказывает (устройство вывода пропало).
+    /// `с_тапом: false` — режим одного микрофона (`MacAudio::new_mic_only`).
+    #[cfg(target_os = "macos")]
+    fn mac_audio(ж: &Журнал, с_тапом: bool, тап_поднимается: bool) -> MacAudio {
+        let жм = ж.clone();
+        let open_mic: MicOpener = Box::new(move |_choice, _tx| {
+            жм.borrow_mut().push("mic:open".into());
+            Ok((Box::new(ФейкМик(жм.clone())) as Box<dyn std::any::Any>, None))
+        });
+        let жт = ж.clone();
+        let start: TapStarter = Box::new(move || {
+            if !тап_поднимается {
+                жт.borrow_mut().push("tap:fail".into());
+                return Err("устройство вывода пропало".into());
+            }
+            жт.borrow_mut().push("tap:start".into());
+            Ok(Box::new(ФейкТап(жт.clone())) as Box<dyn SystemTrack>)
+        });
+        MacAudio::with_parts(DeviceChoice::Default, open_mic, с_тапом.then_some(start))
+    }
+
+    /// Смена микрофона на лету: новый поток открывается до закрытия старого,
+    /// тап не трогается, а звук старого потока идёт в дорожку раньше нового.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn смена_микрофона_не_трогает_тап_и_не_теряет_хвост() {
+        let ж = журнал();
+        let жм = ж.clone();
+        let n = Rc::new(RefCell::new(0i16));
+        let open_mic: MicOpener = Box::new(move |_choice, tx| {
+            *n.borrow_mut() += 1;
+            let k = *n.borrow();
+            жм.borrow_mut().push(format!("mic:open{k}"));
+            // Поток сразу «наговорил» — по значению видно, чей это звук.
+            tx.send(vec![k; 3]).unwrap();
+            Ok((Box::new(ФейкМик(жм.clone())) as Box<dyn std::any::Any>, None))
+        });
+        let жт = ж.clone();
+        let start: TapStarter = Box::new(move || {
+            жт.borrow_mut().push("tap:start".into());
+            Ok(Box::new(ФейкТап(жт.clone())) as Box<dyn SystemTrack>)
+        });
+        let mut audio = MacAudio::with_parts(DeviceChoice::Default, open_mic, Some(start));
+        audio.open().expect("open");
+        audio.set_mic_device(DeviceChoice::Id("usb".into()));
+        audio.reopen_mic().expect("смена");
+        assert_eq!(захват(&ж), ["tap:start", "mic:open1", "mic:open2", "mic:close"]);
+        let (mic, _) = audio.drain();
+        assert_eq!(mic, vec![1, 1, 1, 2, 2, 2], "сначала хвост старого микрофона, потом новый");
+        assert!(audio.is_open());
+    }
+
+    /// Новый микрофон не открылся — старый пишет дальше.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn отказ_нового_микрофона_оставляет_старый() {
+        let ж = журнал();
+        let жм = ж.clone();
+        let раз = Rc::new(RefCell::new(0));
+        let open_mic: MicOpener = Box::new(move |_choice, _tx| {
+            *раз.borrow_mut() += 1;
+            if *раз.borrow() > 1 {
+                return Err(ошибка("устройство пропало"));
+            }
+            жм.borrow_mut().push("mic:open".into());
+            Ok((Box::new(ФейкМик(жм.clone())) as Box<dyn std::any::Any>, None))
+        });
+        let mut audio = MacAudio::with_parts(DeviceChoice::Default, open_mic, None);
+        audio.open().expect("open");
+        assert!(audio.reopen_mic().is_err());
+        assert_eq!(захват(&ж), ["mic:open"], "старый поток не закрыт");
+        assert!(audio.is_open());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mac_стенд(ж: &Журнал, поломка: Поломка, тап_поднимается: bool) -> App {
+        App::with_backends(
+            PathBuf::from("."),
+            Box::new(mac_audio(ж, true, тап_поднимается)),
+            Box::new(ФейкSinks {
+                журнал: ж.clone(),
+                поломка,
+            }),
+        )
+    }
+
+    /// Только записи захвата — без файловых событий фейковых синков.
+    #[cfg(target_os = "macos")]
+    fn захват(ж: &Журнал) -> Vec<String> {
+        ж.borrow()
+            .iter()
+            .filter(|s| s.starts_with("tap:") || s.starts_with("mic:"))
+            .cloned()
+            .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn zoom() -> MicSession {
+        MicSession {
+            pid: 7,
+            process_name: "zoom.us".into(),
+        }
+    }
+
+    /// Гвоздь задачи: в простое ни тапа, ни микрофона — ни в `App::new`, ни
+    /// на прокачке, сколько бы тиков ни прошло.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn простой_не_поднимает_тап() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        for _ in 0..50 {
+            app.pump_audio().unwrap();
+        }
+        assert!(захват(&ж).is_empty(), "в Idle захвата быть не должно: {:?}", захват(&ж));
+    }
+
+    /// Взвод «Записать встречу?» поднимает тап, отказ гасит его вместе с
+    /// микрофоном.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn взвод_поднимает_тап_а_отказ_гасит() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        app.on_event(Event::SessionAppeared, Some(&zoom())).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open"]);
+        app.on_event(Event::UserDeclined, None).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open", "tap:stop", "mic:close"]);
+    }
+
+    /// Встреча кончилась до ответа (`DiscardRing` по `SessionGone`) — тап
+    /// гаснет так же, как на отказе.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn конец_встречи_до_ответа_гасит_тап() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        app.on_event(Event::SessionAppeared, Some(&zoom())).unwrap();
+        app.on_event(Event::SessionGone, None).unwrap();
+        assert_eq!(захват(&ж).last().map(String::as_str), Some("mic:close"));
+        assert!(захват(&ж).contains(&"tap:stop".to_string()));
+    }
+
+    /// Предзапись обязана содержать системный звук с первых тиков взвода:
+    /// тап поднимается на `StartRingBuffer`, до вопроса, а не на ответе.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn предзапись_в_armed_содержит_системный_звук() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        app.on_event(Event::SessionAppeared, Some(&zoom())).unwrap();
+        app.pump_audio().unwrap();
+        assert_eq!(app.ring_sys.drain_to_vec(), vec![7; 4]);
+    }
+
+    /// Ручной старт поднимает тап, стоп гасит.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ручной_старт_поднимает_тап_а_стоп_гасит() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        app.on_event(Event::ManualStart, None).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open"]);
+        app.on_event(Event::ManualStop, None).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open", "tap:stop", "mic:close"]);
+    }
+
+    /// Провал действия сбрасывает машину (`reset_to_idle`) — и тап вместе с ней.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn откат_после_ошибки_гасит_тап() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::НеОткрывается, true);
+        assert!(app.on_event(Event::ManualStart, None).is_err());
+        assert_eq!(app.state(), State::Idle);
+        assert_eq!(захват(&ж), ["tap:start", "mic:open", "tap:stop", "mic:close"]);
+    }
+
+    /// Проверка микрофона ведёт себя как раньше: полоска системного звука в
+    /// ней живая, значит тап поднимается, и гаснет с выключением проверки.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn проверка_микрофона_поднимает_и_гасит_тап() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, true);
+        app.set_monitor(true).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open"]);
+        app.set_monitor(false).unwrap();
+        assert_eq!(захват(&ж), ["tap:start", "mic:open", "tap:stop", "mic:close"]);
+    }
+
+    /// Тап не поднялся на старте записи — запись идёт микрофоном, а watchdog
+    /// молчащей дорожки пробует поднять тап ещё раз.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn тап_не_поднялся_запись_идёт_а_watchdog_пробует_снова() {
+        let ж = журнал();
+        let mut app = mac_стенд(&ж, Поломка::Нет, false);
+        app.on_event(Event::ManualStart, None).unwrap();
+        assert!(matches!(app.state(), State::Recording(_)));
+        for _ in 0..SYS_WATCHDOG_TICKS {
+            app.pump_audio().unwrap();
+        }
+        assert_eq!(захват(&ж), ["tap:fail", "mic:open", "tap:fail"]);
+    }
+
+    /// Микрофон не открылся — уже поднятый тап обязан погаснуть: наполовину
+    /// открытый захват держал бы агрегат (и вход гарнитуры) без записи.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn отказ_микрофона_гасит_уже_поднятый_тап() {
+        let ж = журнал();
+        let жт = ж.clone();
+        let start: TapStarter = Box::new(move || {
+            жт.borrow_mut().push("tap:start".into());
+            Ok(Box::new(ФейкТап(жт.clone())) as Box<dyn SystemTrack>)
+        });
+        let open_mic: MicOpener = Box::new(|_choice, _tx| Err(ошибка("микрофон занят")));
+        let mut audio = MacAudio::with_parts(DeviceChoice::Default, open_mic, Some(start));
+        assert!(audio.open().is_err());
+        assert!(!audio.is_open());
+        assert_eq!(захват(&ж), ["tap:start", "tap:stop"]);
+    }
+
+    /// Режим одного микрофона тап не трогает вовсе.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn режим_одного_микрофона_тап_не_поднимает() {
+        let ж = журнал();
+        let mut audio = mac_audio(&ж, false, true);
+        audio.open().unwrap();
+        assert!(!audio.has_system());
+        audio.close();
+        assert_eq!(захват(&ж), ["mic:open", "mic:close"]);
+    }
+
     /// App на подставном бэкенде. `dir` — заведомо несуществующий путь: до
     /// файловой системы эти тесты не доходят, всё ловится фейками.
     fn стенд(
@@ -1830,6 +2275,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает: false,
+                reopen_mic_падает: false,
                 есть_система,
             }),
             Box::new(ФейкSinks {
@@ -1855,6 +2301,7 @@ mod tests {
                 выбор: выбор.clone(),
                 подмена: подмена.map(str::to_string),
                 reopen_падает: false,
+                reopen_mic_падает: false,
                 есть_система: true,
             }),
             Box::new(ФейкSinks {
@@ -1884,6 +2331,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает,
+                reopen_mic_падает: false,
                 есть_система: true,
             }),
             Box::new(ФейкSinks {
@@ -2748,21 +3196,69 @@ mod tests {
         assert!(!app.mic_change_deferred());
     }
 
-    /// Главный случай: под идущей записью устройство не меняется, и это должно
-    /// быть видно. Молчание здесь однажды стоило 46 минут записи не тем
-    /// микрофоном — выпадашка показывала новое устройство, дорожка писалась
-    /// прежним.
+    /// Стенд, у которого новый микрофон не открывается посреди записи.
+    fn стенд_мик_не_открывается(журнал: &Журнал) -> App {
+        App::with_backends(
+            PathBuf::from("."),
+            Box::new(ФейкAudio {
+                журнал: журнал.clone(),
+                открыт: false,
+                очередь: Vec::new(),
+                выбор: Rc::new(RefCell::new(None)),
+                подмена: None,
+                reopen_падает: false,
+                reopen_mic_падает: true,
+                есть_система: true,
+            }),
+            Box::new(ФейкSinks {
+                журнал: журнал.clone(),
+                поломка: Поломка::Нет,
+            }),
+        )
+    }
+
+    /// Главный случай: смена под записью применяется сразу, тем же файлом —
+    /// пересобирается только микрофон, запись не останавливается.
     #[test]
-    fn смена_устройства_под_записью_откладывается_и_это_видно() {
+    fn смена_устройства_под_записью_применяется_на_лету() {
         let ж = журнал();
         let mut app = стенд(&ж, Поломка::Нет, Vec::new());
-        app.on_event(Event::ManualStart, None)
-            .expect("старт записи");
+        app.on_event(Event::ManualStart, None).expect("старт записи");
+        let до = ж.borrow().len();
         app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
-        assert!(
-            app.mic_change_deferred(),
-            "запись идёт на прежнем устройстве — интерфейс обязан это сказать"
+        assert!(!app.mic_change_deferred(), "откладывать нечего — устройство уже сменилось");
+        assert!(app.take_mic_switched(), "интерфейсу пора сказать о смене");
+        assert!(!app.take_mic_switched(), "сообщается один раз");
+        assert_eq!(
+            ж.borrow()[до..].to_vec(),
+            vec!["audio:reopen_mic".to_string()],
+            "ни закрытия захвата, ни новых файлов — только пересборка микрофона"
         );
+        assert!(app.current_recording().is_some(), "запись идёт дальше");
+    }
+
+    /// «Как в системе» — такой же выбор, и он тоже переключается на лету.
+    #[test]
+    fn возврат_к_системному_микрофону_тоже_на_лету() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.set_mic_device(DeviceChoice::Default);
+        assert!(app.take_mic_switched());
+        assert!(!app.mic_change_deferred());
+    }
+
+    /// Новое устройство не открылось — пишется прежнее, и это видно. Молчание
+    /// здесь однажды стоило 46 минут записи не тем микрофоном.
+    #[test]
+    fn не_открылся_новый_микрофон_пишется_прежний_и_это_видно() {
+        let ж = журнал();
+        let mut app = стенд_мик_не_открывается(&ж);
+        app.on_event(Event::ManualStart, None).expect("старт записи");
+        app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
+        assert!(app.mic_change_deferred(), "запись идёт на прежнем устройстве — интерфейс обязан это сказать");
+        assert!(!app.take_mic_switched());
+        assert!(app.current_recording().is_some(), "отказ нового микрофона запись не роняет");
     }
 
     /// Заметка живёт ровно столько, сколько идёт запись, которая новое
@@ -2770,12 +3266,22 @@ mod tests {
     #[test]
     fn конец_записи_снимает_отложенность() {
         let ж = журнал();
-        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
-        app.on_event(Event::ManualStart, None)
-            .expect("старт записи");
+        let mut app = стенд_мик_не_открывается(&ж);
+        app.on_event(Event::ManualStart, None).expect("старт записи");
         app.set_mic_device(DeviceChoice::Id("{0.0.1.00000000}.{guid}".into()));
         assert!(app.mic_change_deferred(), "предусловие теста");
         app.on_event(Event::ManualStop, None).expect("стоп записи");
+        assert!(!app.mic_change_deferred());
+    }
+
+    /// Проверка микрофона в покое тоже слушает новое устройство сразу.
+    #[test]
+    fn смена_во_время_проверки_пересобирает_микрофон() {
+        let ж = журнал();
+        let mut app = стенд(&ж, Поломка::Нет, Vec::new());
+        app.set_monitor(true).expect("проверка");
+        app.set_mic_device(DeviceChoice::Default);
+        assert!(ж.borrow().contains(&"audio:reopen_mic".to_string()));
         assert!(!app.mic_change_deferred());
     }
 
@@ -2972,6 +3478,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает: false,
+                reopen_mic_падает: false,
                 есть_система: true,
             }),
             Box::new(WavSinks),
@@ -3160,6 +3667,7 @@ mod tests {
                 выбор: Rc::new(RefCell::new(None)),
                 подмена: None,
                 reopen_падает: false,
+                reopen_mic_падает: false,
                 есть_система: true,
             }),
             Box::new(WavSinks),

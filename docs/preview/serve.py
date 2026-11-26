@@ -42,14 +42,36 @@ UI = ЗДЕСЬ.parent.parent / "ui"
 }
 
 СЦЕНЫ = [
-    ("idle", "Покой"),
+    ("idle", "Покой — встречи и записи"),
+    ("calnow", "Покой — встреча уже идёт"),
+    ("calempty", "Покой — встреч сегодня больше нет"),
+    ("caloffline", "Покой — нет связи с Google"),
+    ("nocal", "Покой — календарь не подключён"),
+    ("calrevoked", "Покой — календарь отключился"),
+    ("nocalbuild", "Покой — сборка без календаря"),
+    ("scr-off", "Покой — экран выкл"),
+    ("scr-menu-win", "Покой — меню, окна"),
+    ("scr-menu-one", "Покой — меню, окна, одна встреча"),
+    ("scr-menu-disp", "Покой — меню, экраны"),
+    ("scr-on", "Покой — экран пишется (вкл)"),
+    ("scr-noperm", "Покой — нет доступа"),
     ("armed", "Взвод — окно открыли, пока вопрос висит"),
     ("ask", "Всплывашка «Записать встречу?»"),
     ("askunmute", "Всплывашка «Вы говорите? Микрофон выключен»"),
     ("recstart", "Идёт запись — начали при открытом окне"),
     ("recording", "Идёт запись — окно открыли посреди встречи"),
-    ("muted", "Идёт запись, микрофон выключен — пишется только системный звук"),
-    ("loading", "Первая загрузка списка"),
+    ("recquiet", "Пульт — собеседников не слышно"),
+    ("recstopping", "Пульт — останавливаю"),
+    ("recdevwarn", "Пульт — микрофон недоступен"),
+    ("recdeferred", "Пульт — микрофон сменили под записью"),
+    ("recnosys", "Пульт — звук системы не пишется"),
+    ("recscreen", "Пульт — пишется окно"),
+    ("recscreen-disp", "Пульт — пишется экран"),
+    ("recscreen-failed", "Пульт — экран не пишется"),
+    ("recmicmenu", "Пульт — меню микрофона"),
+    ("recscrmenu", "Пульт — меню экрана"),
+    ("recmuted", "Пульт — микрофон выключен, пишется только системный звук"),
+    ("loading", "Первая загрузка списка (скелетон)"),
     ("empty", "Пустой список"),
     ("long", "Длинное имя записи"),
     ("rename", "Переименование"),
@@ -59,13 +81,45 @@ UI = ЗДЕСЬ.parent.parent / "ui"
     ("transcribing", "Идёт расшифровка"),
     ("queued", "Очередь из трёх"),
     ("done", "Запись с готовой расшифровкой"),
+    ("menu-copy-path", "Меню готовой записи — «Скопировать путь к расшифровке»"),
+    ("menu-partial", "Меню записи с частичной расшифровкой — «Расшифровать заново»"),
+    ("tr-open", "Панель расшифровки открыта — длинная запись"),
+    ("tr-search", "Расшифровка — поиск «экран»"),
+    ("tr-nohit", "Расшифровка — ничего не нашлось"),
+    ("tr-menu", "Расшифровка — меню «⋯»"),
+    ("tr-loading", "Панель расшифровки — загрузка"),
+    ("tr-error", "Панель расшифровки — файл не найден"),
+    ("tr-empty", "Панель расшифровки — в записи была тишина"),
+    ("tr-again", "Панель расшифровки — расшифровываю заново"),
     ("cancelled", "Отмена расшифровки — после нажатия"),
     ("rowerror", "Ошибка расшифровки"),
     ("nosys", "Нет системного звука"),
     ("devwarn", "Недоступный микрофон"),
     ("fatal", "Фатальная ошибка"),
-    ("settings", "Экран настроек"),
-    ("miccheck", "Проверка микрофона"),
+    ("settings", "Настройки — календарь подключён"),
+    ("set-calconfirm", "Настройки — «Отключить календарь?»"),
+    ("set-nocal", "Настройки — календарь не подключён"),
+    ("set-calwait", "Настройки — жду ответа из браузера"),
+    ("set-calrefused", "Настройки — Google не дал доступ"),
+    ("set-calrevoked", "Настройки — календарь отключился"),
+    ("set-caloffline", "Настройки — нет связи с Google"),
+    ("set-nocalbuild", "Настройки — сборка без календаря"),
+    ("set-whisper", "Настройки — расшифровка через whisper-server"),
+    ("miccheck", "Настройки — проверка микрофона"),
+    ("set-screen-off", "Настройки — запись экрана выкл"),
+    ("set-screen", "Настройки — запись экрана вкл: экран L27e-30"),
+    ("set-screen-window", "Настройки — запись экрана вкл: окно Zoom"),
+    ("set-screen-menu", "Настройки — меню «Что записывать»"),
+    ("set-screen-noperm", "Настройки — запись экрана: нет разрешения macOS"),
+    ("set-screen-win", "Настройки — запись экрана на Windows"),
+    ("set-screen-old", "Настройки — запись экрана на macOS 14"),
+    ("set-local", "Настройки — расшифровка на этом компьютере, модель на месте"),
+    ("set-local-missing", "Настройки — модель не скачана"),
+    ("set-local-downloading", "Настройки — модель качается"),
+    ("set-local-nospace", "Настройки — не хватает места под модель"),
+    ("set-local-failed", "Настройки — модель не скачалась"),
+    ("about", "О приложении"),
+    ("support", "Поддержать проект"),
     ("longmic", "Длинное имя микрофона"),
     ("deferred", "Микрофон сменили под идущей записью"),
     ("update", "Вышло обновление — баннер"),
@@ -93,10 +147,15 @@ UI = ЗДЕСЬ.parent.parent / "ui"
  .win{width:460px;height:640px;border:1px solid #292e42;border-radius:10px;
       overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);background:#1a1b26}
  .win.wide{width:876px;height:110px;background:linear-gradient(160deg,#2b1f4a,#1b2340 60%,#101827)}
+ .win.tr{width:1000px}
  iframe{width:100%;height:100%;border:0;display:block}
  .note{color:#565f89;font-size:12px;margin-top:14px;line-height:1.55}
+ .themes{display:flex;gap:4px;margin:0 0 16px}
+ .themes a{flex:1;text-align:center}
 </style>
 <div class=panel>
+ <h3>Тема</h3>
+ <p class=themes><a href=# data-t="light" class=on>Светлая</a><a href=# data-t="dark">Тёмная</a></p>
  <h3>Состояние</h3>
  {links}
  <p class=note>Окно ровно 460 — как настоящее.<br>
@@ -105,17 +164,29 @@ UI = ЗДЕСЬ.parent.parent / "ui"
  Это интерфейс из <code>ui/</code>, но без бэкенда: машины записи, прав macOS
  и трея здесь нет. Перед показом смотреть надо и стенд, и живое приложение.</p>
 </div>
-<div><div class=win id=win><iframe id=f src="/index.html?s={first}"></iframe></div></div>
+<div><div class=win id=win><iframe id=f src="/index.html?s={first}&theme=light"></iframe></div></div>
 <script>
  const f=document.getElementById('f'), win=document.getElementById('win');
+ let сцена='{first}', тема='light';
+ const открыть=()=>{
+   // Всплывашка — отдельное окно, и размеры у неё свои.
+   const ask = сцена === 'ask' || сцена === 'askunmute';
+   win.classList.toggle('wide', ask);
+   // Панель расшифровки раздвигает окно до 1000 — рамка тоже.
+   win.classList.toggle('tr', сцена.startsWith('tr-'));
+   f.src = сцена === 'askunmute' ? '/ask.html?s=unmute' : ask ? '/ask.html' : '/index.html?s=' + сцена + '&theme=' + тема;
+ };
  document.querySelectorAll('a[data-s]').forEach(a=>a.onclick=e=>{
    e.preventDefault();
    document.querySelectorAll('a[data-s]').forEach(x=>x.classList.remove('on'));
    a.classList.add('on');
-   // Всплывашка — отдельное окно, и размеры у неё свои.
-   const ask = a.dataset.s === 'ask' || a.dataset.s === 'askunmute';
-   win.classList.toggle('wide', ask);
-   f.src = a.dataset.s === 'askunmute' ? '/ask.html?s=unmute' : ask ? '/ask.html' : '/index.html?s=' + a.dataset.s;
+   сцена=a.dataset.s; открыть();
+ });
+ document.querySelectorAll('a[data-t]').forEach(a=>a.onclick=e=>{
+   e.preventDefault();
+   document.querySelectorAll('a[data-t]').forEach(x=>x.classList.remove('on'));
+   a.classList.add('on');
+   тема=a.dataset.t; открыть();
  });
  document.querySelector('a[data-s]').classList.add('on');
 </script>
@@ -124,8 +195,8 @@ UI = ЗДЕСЬ.parent.parent / "ui"
 # Замер живёт в рамке 460, а не в самой странице: ширину окна в headless-браузере
 # не задать точно, а ширина iframe — задаётся.
 МЕРКА = """<!doctype html><meta charset=utf-8><title>ждём</title>
-<style>html,body{margin:0}iframe{width:460px;height:640px;border:0;display:block}</style>
-<iframe id=f src="/index.html?s={s}"></iframe>
+<style>html,body{margin:0}iframe{width:{w}px;height:640px;border:0;display:block}</style>
+<iframe id=f src="/index.html?s={s}&theme={theme}"></iframe>
 <script>
 setTimeout(()=>{
   const d=document.getElementById('f').contentDocument;
@@ -197,7 +268,14 @@ class Стенд(http.server.SimpleHTTPRequestHandler):
                 "application/javascript; charset=utf-8",
             )
         if путь == "/__measure":
-            return self.отдать(МЕРКА.replace("{s}", self.сцена()), "text/html; charset=utf-8")
+            тема = self.пары().get("theme", "light")
+            тема = тема if тема in ("light", "dark") else "light"
+            return self.отдать(
+                МЕРКА.replace("{s}", self.сцена())
+                .replace("{theme}", тема)
+                .replace("{w}", "1000" if self.сцена().startswith("tr-") else "460"),
+                "text/html; charset=utf-8",
+            )
         if путь == "/__shot":
             # Высота НЕ фиксирована. Раньше стояло 640 — высота настоящего
             # окна, — и всё, что в него не влезало, обрезалось посреди
@@ -217,7 +295,7 @@ class Стенд(http.server.SimpleHTTPRequestHandler):
                 "<style>html,body{margin:0;background:transparent}"
                 ".ramka{width:460px;border-radius:14px;overflow:hidden;display:block}"
                 "iframe{width:460px;height:640px;border:0;display:block}</style>"
-                f'<div class=ramka><iframe id=f src="/index.html?s={self.сцена()}&lang={self.язык()}"></iframe></div>'
+                f'<div class=ramka><iframe id=f src="/index.html?s={self.сцена()}&lang={self.язык()}&theme={self.пары().get("theme", "light")}"></iframe></div>'
                 "<script>"
                 "var f=document.getElementById('f');"
                 "f.addEventListener('load',function(){"

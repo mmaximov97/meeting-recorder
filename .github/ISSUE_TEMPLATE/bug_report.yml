@@ -73,7 +73,7 @@ body:
     attributes:
       label: If this is about missing system audio on macOS
       options:
-        - label: My macOS is 14.2 or newer (capturing the other person's audio needs it)
+        - label: My macOS is 14.4 or newer (capturing the other person's audio needs it)
           required: false
         - label: MeetRec has microphone permission in System Settings → Privacy & Security
           required: false

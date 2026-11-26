@@ -4,9 +4,9 @@
 # процесс в dyld до `main`.
 #
 # Зачем. `unsupported_reason()` в `src/capture/macos.rs` объясняет человеку на
-# старой macOS, что нужна 14.2. Дойти до этого объяснения процесс может только
+# старой macOS, что нужна 14.4. Дойти до этого объяснения процесс может только
 # если загрузчик не споткнётся о `AudioHardwareCreateProcessTap`, которого на
-# системах старее 14.2 нет вовсе. Достаточно любого из двух: символ помечен
+# системах старее 14.4 нет вовсе. Достаточно любого из двух: символ помечен
 # `[weak-import]` (нынешняя опора — `-Wl,-weak_framework,CoreAudio` в обоих
 # `build.rs`) либо связывается лениво (`lazy-bind`, прежняя опора). Полное
 # рассуждение и замеры — в докблоке `MIN_MACOS` (`src/capture/macos.rs`).
@@ -71,9 +71,9 @@ $TAP
 
 LC_BUILD_VERSION minos = ${MINOS:-неизвестно}
 
-Значит, на macOS старее 14.2 процесс умрёт в dyld с
+Значит, на macOS старее 14.4 процесс умрёт в dyld с
 "Symbol not found: _AudioHardwareCreateProcessTap" ДО main, и сообщение
-"нужна macOS 14.2 или новее" из src/capture/macos.rs никто не увидит.
+"нужна macOS 14.4 или новее" из src/capture/macos.rs никто не увидит.
 
 Почти наверняка причина: из build.rs пропал флаг
     println!("cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio");

@@ -2,7 +2,7 @@
   "_": [
     "Единственный источник текстов приложения. Читается и фронтендом, и Rust:",
     "фронтенд забирает файл как есть, Rust вшивает его через include_str!.",
-    "Подстановки в фигурных скобках: {app}, {name}, {n}, {total}, {stage}, {elapsed}.",
+    "Подстановки в фигурных скобках: {app}, {name}, {n}, {total}, {stage}, {elapsed}, {title}, {time}.",
     "Формы множественного числа не заводим намеренно: сокращения «мин», «ч»,",
     "«min», «h» не меняются по числу ни в русском, ни в английском.",
     "Даты, время, размеры файлов здесь не лежат — они собираются системным",
@@ -44,8 +44,8 @@
       "en": "Open"
     },
     "about": {
-      "ru": "О разработчиках",
-      "en": "About the makers"
+      "ru": "О приложении",
+      "en": "About"
     },
     "support": {
       "ru": "Поддержать",
@@ -53,6 +53,8 @@
     }
   },
   "record": {
+    "then": { "ru": "Потом", "en": "Later" },
+    "othersSilentHint": { "ru": "Собеседников не слышно. Проверьте, что звук звонка идёт в эти наушники или колонки.", "en": "The others can't be heard. Check that the call audio plays through these headphones or speakers." },
     "manualName": {
       "ru": "Запись",
       "en": "Recording"
@@ -131,6 +133,8 @@
     }
   },
   "levels": {
+    "othersSilent": { "ru": "Собеседники: тишина", "en": "Others: silence" },
+    "others": { "ru": "Собеседники", "en": "Others" },
     "mic": {
       "ru": "Ваш микрофон",
       "en": "Your microphone"
@@ -158,26 +162,45 @@
       "en": "No recordings yet"
     },
     "text": {
-      "ru": "Приложение само предложит записать, когда услышит звонок. Или нажмите «Начать запись».",
-      "en": "MeetRec will offer to record when it hears a meeting start. Or press Start recording."
+      "ru": "Запись начнётся сама, когда вы зайдёте в Zoom, Meet или Teams.",
+      "en": "Recording starts by itself when you join Zoom, Meet or Teams."
     }
   },
+  "zone": {
+    "next": { "ru": "Дальше", "en": "Up next" },
+    "in": { "ru": "через {time}", "en": "in {time}" },
+    "ongoing": { "ru": "Идёт, до {time}", "en": "On now, until {time}" },
+    "noMore": { "ru": "Сегодня встреч со ссылкой больше нет", "en": "No more meetings with a link today" },
+    "connectText": {
+      "ru": "Подключите календарь, чтобы видеть встречи и заходить в них одной кнопкой.",
+      "en": "Connect your calendar to see meetings and join them with one click."
+    }
+  },
+  "status": {
+    "partial": { "ru": "Расшифрована частично", "en": "Partly transcribed" }
+  },
   "settings": {
+    "apiKeyShort": { "ru": "Ключ", "en": "Key" },
+    "serverUrlShort": { "ru": "Адрес", "en": "Address" },
+    "where": { "ru": "Где расшифровывать", "en": "Where to transcribe" },
+    "groupAbout": { "ru": "О приложении", "en": "About" },
+    "groupLook": { "ru": "Внешний вид", "en": "Appearance" },
+    "groupRecording": { "ru": "Запись", "en": "Recording" },
     "mic": {
       "ru": "Микрофон",
       "en": "Microphone"
     },
     "micFromSystem": {
-      "ru": "Как выбрано в системе",
-      "en": "Whatever the system uses"
+      "ru": "Как в системе",
+      "en": "Same as system"
     },
     "micTest": {
       "ru": "Проверить",
       "en": "Test"
     },
     "micTestStop": {
-      "ru": "Остановить проверку",
-      "en": "Stop the test"
+      "ru": "Остановить",
+      "en": "Stop"
     },
     "micTestOn": {
       "ru": "Включаю…",
@@ -192,7 +215,7 @@
       "en": "The recording in progress keeps the old microphone. The new one starts with the next recording."
     },
     "transcription": {
-      "ru": "Расшифровка встреч",
+      "ru": "Расшифровка",
       "en": "Transcription"
     },
     "serverUrl": {
@@ -312,6 +335,14 @@
     "delete": {
       "ru": "Удалить запись",
       "en": "Delete recording"
+    },
+    "copyTranscriptPath": {
+      "ru": "Скопировать путь к расшифровке",
+      "en": "Copy transcript path"
+    },
+    "pathCopied": {
+      "ru": "Путь скопирован",
+      "en": "Path copied"
     }
   },
   "confirm": {
@@ -333,6 +364,10 @@
     }
   },
   "server": {
+    "label": {
+      "ru": "Сервер",
+      "en": "Server"
+    },
     "gateway": {
       "ru": "Шлюз selfhost-ai-lab",
       "en": "selfhost-ai-lab gateway"
@@ -417,9 +452,10 @@
     }
   },
   "retention": {
+    "note": { "ru": "Удаляются звук и видео экрана, расшифровки остаются. Записи без расшифровки не трогаются.", "en": "Audio and screen video go, transcripts stay. Recordings without a transcript are left alone." },
     "label": {
-      "ru": "Удалять аудио",
-      "en": "Delete audio"
+      "ru": "Удалять звук и видео",
+      "en": "Delete audio and video"
     },
     "never": {
       "ru": "Никогда",
@@ -447,6 +483,9 @@
     }
   },
   "about": {
+    "more": { "ru": "Подробнее", "en": "More" },
+    "footer": { "ru": "MeetRec {v}", "en": "MeetRec {v}" },
+    "source": { "ru": "Исходный код", "en": "Source code" },
     "title": {
       "ru": "О разработчиках",
       "en": "About the makers"
@@ -485,6 +524,8 @@
     }
   },
   "support": {
+    "how": { "ru": "Как помочь", "en": "How to help" },
+    "rowTitle": { "ru": "Поддержать проект", "en": "Support the project" },
     "title": {
       "ru": "Поддержать",
       "en": "Support the project"
@@ -544,12 +585,12 @@
       "en": "Only system audio made it in. Your microphone isn't there. Check it in settings."
     },
     "quietTitle": {
-      "ru": "Вас почти не слышно",
-      "en": "Your voice is barely there"
+      "ru": "Ваш голос почти не записался",
+      "en": "Your voice barely recorded"
     },
     "quietText": {
-      "ru": "Микрофон записал ваш голос слишком тихо, почти вровень с шумом — расшифровка может пропустить ваши реплики. Проверьте его в настройках перед следующей встречей.",
-      "en": "Your microphone recorded your voice too quietly, barely above the noise, so the transcript may miss what you said. Check it in settings before the next meeting."
+      "ru": "В записи почти нет вашей речи. Если вы говорили на встрече, проверьте микрофон в настройках перед следующей.",
+      "en": "There's almost none of your speech in the recording. If you spoke in this meeting, check the microphone in settings before the next one."
     },
     "transcriptTitle": {
       "ru": "Расшифровка не получилась",
@@ -657,6 +698,10 @@
     }
   },
   "update": {
+    "rowTitle": {
+      "ru": "Обновления",
+      "en": "Updates"
+    },
     "available": {
       "ru": "Вышла версия {v}",
       "en": "Version {v} is out"
@@ -752,12 +797,12 @@
       "en": " (currently unavailable)"
     },
     "noSystemAudioShort": {
-      "ru": "Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут.",
-      "en": "System audio isn't being recorded, only your microphone. Meetings won't be detected on their own."
+      "ru": "Звук системы не пишется, в записи будет только ваш микрофон.",
+      "en": "System audio isn't being recorded. Only your microphone will be in the recording."
     },
     "noSystemAudio": {
-      "ru": "Системный звук не пишется — только ваш микрофон. Встречи сами определяться не будут: приложение узнаёт звонок именно по звуку системы. Записать можно вручную — кнопкой, горячей клавишей или из трея. Разрешить можно в Системных настройках → Конфиденциальность и безопасность → Запись экрана и звука, после чего перезапустить приложение.",
-      "en": "System audio isn't being recorded, only your microphone. Meetings won't be detected on their own, because the app recognizes one by system audio. You can still record by hand: the button, the shortcut, or the menu bar. To allow it, go to System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app."
+      "ru": "Звук системы не пишется, поэтому собеседников в записи не будет, только ваш микрофон. Разрешить можно в Системных настройках → Конфиденциальность и безопасность → Запись экрана и звука, потом перезапустите приложение.",
+      "en": "System audio isn't being recorded, so the others won't be in the recording, only your microphone. To allow it, go to System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app."
     },
     "streamDead": {
       "ru": "Аудиопоток остановился: запись не работает, перезапустите приложение.",
@@ -832,6 +877,74 @@
       "en": "Recording, microphone off"
     }
   },
+  "calendar": {
+    "confirmText": { "ru": "Встречи перестанут показываться, записи останутся. Подключить обратно можно в любой момент.", "en": "Meetings will stop showing up. Your recordings stay. You can connect again at any time." },
+    "confirmTitle": { "ru": "Отключить календарь?", "en": "Disconnect the calendar?" },
+    "retry": { "ru": "Повторить", "en": "Retry" },
+    "connectedShort": { "ru": "Подключён · ближайшие встречи", "en": "Connected · upcoming meetings" },
+    "tomorrowShort": { "ru": "завтра", "en": "tomorrow" },
+    "connectedNone": { "ru": "Подключён · встреч со ссылкой на сутки нет", "en": "Connected · no meetings with a link in the next 24 hours" },
+    "connectedNextTomorrow": { "ru": "Подключён · дальше «{title}» завтра в {time}", "en": "Connected · next: “{title}” tomorrow at {time}" },
+    "connectedNext": { "ru": "Подключён · дальше «{title}» в {time}", "en": "Connected · next: “{title}” at {time}" },
+    "revokedShort": { "ru": "Google Календарь отключился", "en": "Google Calendar was disconnected" },
+    "refusedHint": { "ru": "Можно попробовать ещё раз", "en": "You can try again" },
+    "refusedTitle": { "ru": "Google не дал доступ к календарю", "en": "Google didn’t grant access to the calendar" },
+    "connectAgain": { "ru": "Подключить заново", "en": "Connect again" },
+    "connectShort": { "ru": "Подключить", "en": "Connect" },
+    "cardHint": { "ru": "Встречи появятся в окне, в них можно будет зайти одной кнопкой", "en": "Meetings show up in the window, and you can join them with one click" },
+    "google": { "ru": "Google Календарь", "en": "Google Calendar" },
+    "label": { "ru": "Календарь", "en": "Calendar" },
+    "hint": {
+      "ru": "MeetRec напомнит о встрече со ссылкой Zoom, Google Meet или Teams и запишет её одной кнопкой.",
+      "en": "MeetRec reminds you of meetings with a Zoom, Google Meet or Teams link and records them with one click."
+    },
+    "connect": { "ru": "Подключить Google Календарь", "en": "Connect Google Calendar" },
+    "waiting": { "ru": "Жду ответа из браузера…", "en": "Waiting for the browser…" },
+    "cancel": { "ru": "Отмена", "en": "Cancel" },
+    "disconnect": { "ru": "Отключить", "en": "Disconnect" },
+    "nextToday": {
+      "ru": "Ближайшая встреча со ссылкой: «{title}», сегодня в {time}.",
+      "en": "Next meeting with a link: “{title}”, today at {time}."
+    },
+    "nextTomorrow": {
+      "ru": "Ближайшая встреча со ссылкой: «{title}», завтра в {time}.",
+      "en": "Next meeting with a link: “{title}”, tomorrow at {time}."
+    },
+    "none": { "ru": "Встреч со ссылкой на ближайшие сутки нет.", "en": "No meetings with a link in the next 24 hours." },
+    "offline": {
+      "ru": "Нет связи · данные на {time}",
+      "en": "Offline · as of {time}"
+    },
+    "offlineNoData": { "ru": "Нет связи", "en": "Offline" },
+    "revoked": {
+      "ru": "Google Календарь отключился. Войдите заново, чтобы MeetRec снова предлагал встречи.",
+      "en": "Google Calendar was disconnected. Sign in again so MeetRec can suggest meetings."
+    },
+    "reconnect": { "ru": "Войти заново", "en": "Sign in again" },
+    "refused": {
+      "ru": "Google не дал доступ к календарю. Можно попробовать ещё раз.",
+      "en": "Google didn't grant access to the calendar. You can try again."
+    },
+    "browserDone": {
+      "ru": "Готово. Вкладку можно закрыть и вернуться в MeetRec.",
+      "en": "Done. You can close this tab and go back to MeetRec."
+    },
+    "browserFailed": {
+      "ru": "Вход не завершён. Вкладку можно закрыть и вернуться в MeetRec.",
+      "en": "Sign-in didn't finish. You can close this tab and go back to MeetRec."
+    },
+    "join": { "ru": "Зайти и записать", "en": "Join and record" },
+    "joinOnly": { "ru": "Подключиться без записи", "en": "Join without recording" },
+    "more": { "ru": "Ещё", "en": "More" },
+    "inMin": { "ru": "Через {n} мин", "en": "In {n} min" },
+    "starting": { "ru": "Начинается", "en": "Starting" },
+    "startedAgo": { "ru": "Началась {n} мин назад", "en": "Started {n} min ago" },
+    "now": { "ru": "Идёт сейчас", "en": "Happening now" },
+    "untitled": { "ru": "Без названия", "en": "Untitled" },
+    "trayJoin": { "ru": "Подключиться и записать «{title}»", "en": "Join and record “{title}”" },
+    "trayStartsAt": { "ru": "Начало в {time}", "en": "Starts at {time}" },
+    "trayReauth": { "ru": "Google Календарь отключился. Войти заново…", "en": "Google Calendar disconnected. Sign in again…" }
+  },
   "size": {
     "b": {
       "ru": "Б",
@@ -860,12 +973,12 @@
       "en": "Match the system"
     },
     "ru": {
-      "ru": "🇷🇺 Русский",
-      "en": "🇷🇺 Russian"
+      "ru": "Русский",
+      "en": "Russian"
     },
     "en": {
-      "ru": "🇬🇧 Английский",
-      "en": "🇬🇧 English"
+      "ru": "Английский",
+      "en": "English"
     }
   },
   "theme": {
@@ -885,5 +998,124 @@
       "ru": "Тёмная",
       "en": "Dark"
     }
+  },
+  "transcript": {
+    "noHitsText": { "ru": "В этой расшифровке нет «{q}».", "en": "There is no “{q}” in this transcript." },
+    "noHitsTitle": { "ru": "Ничего не нашлось", "en": "Nothing found" },
+    "found": { "ru": "найдено: {n}", "en": "found: {n}" },
+    "search": { "ru": "Поиск по расшифровке", "en": "Search the transcript" },
+    "copyPath": {
+      "ru": "Скопировать путь",
+      "en": "Copy path"
+    },
+    "copyText": {
+      "ru": "Скопировать текст",
+      "en": "Copy text"
+    },
+    "copied": {
+      "ru": "Скопировано",
+      "en": "Copied"
+    },
+    "close": {
+      "ru": "Закрыть",
+      "en": "Close"
+    },
+    "errorTitle": {
+      "ru": "Не получилось открыть расшифровку",
+      "en": "Couldn't open the transcript"
+    },
+    "errorText": {
+      "ru": "Файл переместили или удалили.",
+      "en": "The file was moved or deleted."
+    },
+    "emptyTitle": {
+      "ru": "В расшифровке нет текста",
+      "en": "The transcript has no text"
+    },
+    "emptyText": {
+      "ru": "Возможно, в записи была тишина.",
+      "en": "The recording may have been silent."
+    },
+    "retranscribing": {
+      "ru": "Расшифровываю заново. Пока видна прошлая версия.",
+      "en": "Transcribing again. Showing the previous version for now."
+    },
+    "you": {
+      "ru": "Вы",
+      "en": "You"
+    },
+    "otherSide": {
+      "ru": "Собеседники",
+      "en": "Others"
+    },
+    "open": {
+      "ru": "Открыть расшифровку: {title}",
+      "en": "Open transcript: {title}"
+    }
+    },
+  "pultmic": {
+    "title": { "ru": "Микрофон", "en": "Microphone" },
+    "system": { "ru": "Как в системе", "en": "Same as system" },
+    "hint": { "ru": "Переключится сразу, запись не прервётся.", "en": "Switches right away, the recording keeps going." },
+    "flash": { "ru": "Микрофон: {name}", "en": "Microphone: {name}" },
+    "chipLabel": { "ru": "Микрофон: {name}", "en": "Microphone: {name}" }
+  },
+  "screen": {
+    "label": { "ru": "Запись экрана", "en": "Screen recording" },
+    "note": { "ru": "Видео сохраняется рядом со звуком. Расшифровка его не использует.", "en": "The video is saved next to the audio. Transcription doesn't use it." },
+    "off": { "ru": "Выкл", "en": "Off" },
+    "window": { "ru": "Окно", "en": "Window" },
+    "screen": { "ru": "Экран", "en": "Screen" },
+    "kind": { "ru": "Что записывать", "en": "What to record" },
+    "toggle": { "ru": "Записывать экран", "en": "Record the screen" },
+    "hideSelf": { "ru": "Скрыть MeetRec на записи", "en": "Hide MeetRec in the recording" },
+    "hideSelfNote": { "ru": "Окна MeetRec не попадут в видео.", "en": "MeetRec's windows stay out of the video." },
+    "pultHint": { "ru": "Переключится сразу, в том же видео.", "en": "Switches right away, in the same video." },
+    "chipOff": { "ru": "Экран не пишется", "en": "Screen isn't recorded" },
+    "chipFailed": { "ru": "Не пишется", "en": "Not recording" },
+    "chipLabel": { "ru": "Запись экрана: {what}", "en": "Screen recording: {what}" },
+    "flashMeeting": { "ru": "Пишется окно встречи", "en": "Recording the meeting window" },
+    "flashWindow": { "ru": "Пишется окно {app}", "en": "Recording the {app} window" },
+    "flashScreen": { "ru": "Пишется экран {name}", "en": "Recording the {name} screen" },
+    "flashOff": { "ru": "Экран больше не пишется", "en": "The screen is no longer recorded" },
+    "meeting": { "ru": "Окно встречи", "en": "Meeting window" },
+    "meetingAuto": { "ru": "Найдётся само", "en": "Found automatically" },
+    "meetingNow": { "ru": "Окно встречи найдётся само. Сейчас это {app}", "en": "The meeting window is found automatically. Right now it's {app}" },
+    "meetingHint": { "ru": "Окно встречи найдётся само, когда начнётся запись", "en": "The meeting window is found automatically when recording starts" },
+    "main": { "ru": "основной", "en": "main" },
+    "notOpen": { "ru": "{name} (сейчас не открыто)", "en": "{name} (not open now)" },
+    "whichWindow": { "ru": "Какое окно", "en": "Which window" },
+    "whichScreen": { "ru": "Какой экран", "en": "Which screen" },
+    "refresh": { "ru": "Обновить", "en": "Refresh" },
+    "openSettings": { "ru": "Открыть настройки macOS", "en": "Open macOS Settings" },
+    "noAccessTitle": { "ru": "Нет доступа к записи экрана", "en": "No screen recording permission" },
+    "noAccessText": { "ru": "Включите MeetRec в настройках macOS и перезапустите приложение.", "en": "Turn MeetRec on in macOS Settings and restart the app." },
+    "noPermission": { "ru": "Нет доступа к записи экрана. Включите MeetRec в настройках macOS и перезапустите приложение.", "en": "No screen recording permission. Turn MeetRec on in macOS Settings and restart the app." },
+    "oldMac": { "ru": "Запись экрана работает на macOS 15 и новее (у вас {ver})", "en": "Screen recording works on macOS 15 and later (you have {ver})" },
+    "oldMacNoVer": { "ru": "Запись экрана работает на macOS 15 и новее", "en": "Screen recording works on macOS 15 and later" },
+    "unsupported": { "ru": "Запись экрана недоступна: {reason}.", "en": "Screen recording isn't available: {reason}." },
+    "tipOff": { "ru": "Экран не записывается", "en": "The screen isn't recorded" },
+    "tipMeeting": { "ru": "Записывается окно встречи", "en": "Recording the meeting window" },
+    "tipWindow": { "ru": "Записывается окно {app} — {title}", "en": "Recording the {app} window — {title}" },
+    "tipApp": { "ru": "Записывается окно {app}", "en": "Recording the {app} window" },
+    "tipScreen": { "ru": "Записывается экран {name}", "en": "Recording the {name} screen" },
+    "pultMeeting": { "ru": "Записывается окно встречи — {app}", "en": "Recording the meeting window — {app}" },
+    "pultFailed": { "ru": "Экран не пишется: {why}. {fix}", "en": "The screen isn't recorded: {why}. {fix}" },
+    "whyPermission": { "ru": "нет доступа", "en": "no permission" },
+    "whyNoMeeting": { "ru": "окно встречи не найдено", "en": "the meeting window wasn't found" },
+    "whyNoDisplay": { "ru": "экран не найден", "en": "the screen wasn't found" },
+    "whyOther": { "ru": "сбой записи", "en": "recording failed" },
+    "whyUnsupported": { "ru": "эта система не умеет записывать экран", "en": "this system can't record the screen" },
+    "pultNoWindow": { "ru": "Экран не пишется: окно {app} закрыли. Звук пишется, для следующей записи выберите другое окно или экран.", "en": "The screen isn't recorded: the {app} window was closed. Audio is still recorded. Pick another window or screen for the next recording." },
+    "pultBlocked": { "ru": "Окно {app} не даёт себя записать. Выберите другое окно или экран.", "en": "The {app} window doesn't allow screen recording. Pick another window or screen." },
+    "fixFailed": { "ru": "Звук пишется. Если повторится, перезапустите MeetRec.", "en": "Audio is still recorded. If it happens again, restart MeetRec." },
+    "fixPermission": { "ru": "Звук пишется. Включите MeetRec в настройках macOS и перезапустите приложение.", "en": "Audio is still recorded. Turn MeetRec on in macOS Settings and restart the app." },
+    "fixSource": { "ru": "Звук пишется. Для следующей записи выберите другое окно или экран.", "en": "Audio is still recorded. Pick another window or screen for the next recording." },
+    "fixOther": { "ru": "Звук пишется.", "en": "Audio is still recorded." },
+    "errTitle": { "ru": "Экран не записывается", "en": "The screen isn't being recorded" },
+    "errPermission": { "ru": "У MeetRec нет доступа к записи экрана. Звук пишется. Разрешение — в Системных настройках, после него перезапустите MeetRec.", "en": "MeetRec has no screen recording permission. Audio is still recorded. Grant it in System Settings, then restart MeetRec." },
+    "errWindowGone": { "ru": "Выбранное окно закрыли — пишется только звук. Выберите другое окно или экран кнопкой рядом с «Начать запись».", "en": "The selected window was closed, so only audio is recorded. Pick another window or screen with the button next to Start recording." },
+    "errNoWindow": { "ru": "Не нашёл окно встречи — пишется только звук. Выберите окно или экран кнопкой рядом с «Начать запись».", "en": "Couldn't find the meeting window, so only audio is recorded. Pick a window or screen with the button next to Start recording." },
+    "errBlocked": { "ru": "Окно {app} не даёт себя записать. Выберите другое окно или экран кнопкой рядом с «Начать запись».", "en": "The {app} window doesn't allow screen recording. Pick another window or screen with the button next to Start recording." }
   }
 }

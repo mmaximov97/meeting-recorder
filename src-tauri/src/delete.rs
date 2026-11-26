@@ -7,6 +7,7 @@
 //! единственные копии рабочих разговоров, и безвозвратное удаление одним
 //! кликом недопустимо — см. `trash` в `Cargo.toml`.
 
+use meeting_recorder::screen::video_files;
 use std::path::{Path, PathBuf};
 
 /// Что уезжает вместе с записью: обе дорожки, папка транскрипта и файл-
@@ -17,7 +18,8 @@ use std::path::{Path, PathBuf};
 /// хвост имени, а внутри самого файла хвост не хранится — переезжать вместе
 /// с остальными ему незачем, обновлять нечего. Здесь же удаление — если не
 /// забрать его вместе с записью, он останется на диске сиротой без единой
-/// дорожки и без расшифровки рядом.
+/// дорожки и без расшифровки рядом. Видео экрана — тоже часть записи, но их
+/// под основой может быть несколько: их собирает `screen::video_files`.
 const SUFFIXES: [&str; 4] = [".mic.wav", ".system.wav", ".transcript", ".meta.json"];
 
 /// Отправить запись в корзину целиком: обе дорожки и папку расшифровки, если
@@ -27,12 +29,18 @@ const SUFFIXES: [&str; 4] = [".mic.wav", ".system.wav", ".transcript", ".meta.js
 /// нашлось (ровно так же ведёт себя `rename_recording`). Ошибка — только если
 /// не нашлось совсем ничего: удалять уже нечего, и молчаливый «успех» скрыл
 /// бы, что запись, которую попросили стереть, на этом месте не жила.
-pub fn delete_recording(dir: &Path, base: &str) -> Result<(), String> {
-    let existing: Vec<PathBuf> = SUFFIXES
+/// Всё, что есть на диске от записи: дорожки, расшифровка, спутник и все видео.
+fn parts(dir: &Path, base: &str) -> Vec<PathBuf> {
+    SUFFIXES
         .iter()
         .map(|s| dir.join(format!("{base}{s}")))
         .filter(|p| p.exists())
-        .collect();
+        .chain(video_files(dir, base).into_iter().map(|(_, p)| p))
+        .collect()
+}
+
+pub fn delete_recording(dir: &Path, base: &str) -> Result<(), String> {
+    let existing = parts(dir, base);
     if existing.is_empty() {
         return Err(format!("запись «{base}» не найдена в {}", dir.display()));
     }
@@ -108,8 +116,34 @@ mod tests {
         );
     }
 
+    /// Корзину не трогает: проверяется, ЧТО уехало бы.
     #[test]
-    fn отсутствие_всех_четырёх_это_ошибка() {
+    fn все_видео_записи_уезжают_вместе_с_ней() {
+        let dir = ScratchDir::new("videos");
+        файл(&dir, "2026-07-30_13-03_chrome.mic.wav");
+        файл(&dir, "2026-07-30_13-03_chrome.screen.mp4");
+        файл(&dir, "2026-07-30_13-03_chrome.screen-2.mp4");
+        файл(&dir, "2026-07-30_13-03_chrome.screen-3.mp4");
+        файл(&dir, "2026-07-30_13-03_chrome_2.screen.mp4");
+        let mut names: Vec<String> = parts(&dir, "2026-07-30_13-03_chrome")
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "2026-07-30_13-03_chrome.mic.wav",
+                "2026-07-30_13-03_chrome.screen-2.mp4",
+                "2026-07-30_13-03_chrome.screen-3.mp4",
+                "2026-07-30_13-03_chrome.screen.mp4",
+            ],
+            "соседняя запись `_2` не задета"
+        );
+    }
+
+    #[test]
+    fn отсутствие_всех_частей_это_ошибка() {
         let dir = ScratchDir::new("empty");
         let err = delete_recording(&dir, "2026-07-30_13-03_chrome").unwrap_err();
         assert!(err.contains("не найдена"), "текст ошибки: {err}");

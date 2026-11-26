@@ -48,6 +48,12 @@ env_logger = "0.11"
 # осознанный, версии semver-несовместимы и мирно сосуществуют.
 cpal = "0.18"
 
+# Запись экрана на Windows (src/screen/windows.rs): Windows Graphics Capture и
+# кодировщик Media Foundation в mp4. Тянет свою windows 0.62 рядом с нашей 0.58 —
+# так же осознанно, как cpal.
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
+
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
@@ -56,7 +62,7 @@ features = [
     "Win32_Foundation",
 ]
 
-# Core Audio Process Tap (macOS 14.2+). Проверено по исходникам крейта: голых
+# Core Audio Process Tap (macOS 14.4+). Проверено по исходникам крейта: голых
 # extern "C" объявлений не нужно вообще — objc2-core-audio 0.3 покрывает и класс
 # CATapDescription, и все семь функций рецепта (AudioHardwareCreate/DestroyProcessTap,
 # AudioHardwareCreate/DestroyAggregateDevice, AudioDeviceCreateIOProcIDWithBlock,
@@ -74,3 +80,27 @@ objc2-core-audio = "0.3.2"
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
+# Запись экрана (src/screen/macos.rs): SCStream + SCRecordingOutput (macOS 15+),
+# который сам кодирует H.264 в mp4 — своего кодировщика не держим.
+# objc2-core-media — ради CMTime (частота кадров) и CMSampleBuffer в сигнатуре
+# пустого SCStreamOutput.
+objc2-screen-capture-kit = "0.3.2"
+objc2-core-media = "0.3.2"
+# Меню выбора источника (src/screen/macos.rs): CGImage миниатюры из
+# SCScreenshotManager → JPEG через NSBitmapImageRep; имя монитора —
+# NSScreen.localizedName; иконка приложения — NSRunningApplication.icon,
+# отрисованная в NSBitmapImageRep 64×64 → PNG.
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "objc2-core-foundation",
+    "NSBitmapImageRep",
+    "NSImageRep",
+    "NSScreen",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSRunningApplication",
+    "libc",
+] }

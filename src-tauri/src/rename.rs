@@ -4,6 +4,7 @@
 //! управление уже созданным. Чистая арифметика имён при этом в ядре
 //! (`storage::rename_tail`) — она нужна обоим и тестируется без файлов.
 
+use meeting_recorder::screen::{video_filename_n, video_files};
 use meeting_recorder::storage::rename_tail;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,8 @@ use std::path::{Path, PathBuf};
 /// Всё, из чего состоит запись на диске. `.meta.json` — файл-спутник с
 /// длительностью встречи; без него после переименования длительность
 /// вернулась бы к расчёту по размеру дорожки, а у вычищенной автоочисткой
-/// записи пропала бы совсем.
+/// записи пропала бы совсем. Видео экрана (`.screen.mp4`, `.screen-2.mp4`…) —
+/// та же запись; их собирает `screen::video_files`, номер сохраняется.
 const SUFFIXES: [&str; 4] = [".mic.wav", ".system.wav", ".transcript", ".meta.json"];
 
 /// Переименовывает запись целиком. Возвращает новую основу имени.
@@ -35,6 +37,11 @@ pub fn rename_recording(dir: &Path, base: &str, new_tail: &str) -> Result<String
         .iter()
         .map(|s| (dir.join(format!("{base}{s}")), dir.join(format!("{new_base}{s}"))))
         .filter(|(from, _)| from.exists())
+        .chain(
+            video_files(dir, base)
+                .into_iter()
+                .map(|(n, from)| (from, dir.join(video_filename_n(&new_base, n)))),
+        )
         .collect();
 
     if pairs.is_empty() {
@@ -139,6 +146,47 @@ mod tests {
         assert!(dir.join("2026-07-30_13-03_артем.mic.wav").exists());
         assert!(dir.join("2026-07-30_13-03_артем.system.wav").exists());
         assert!(!dir.join("2026-07-30_13-03_chrome.mic.wav").exists());
+    }
+
+    #[test]
+    fn видео_экрана_переезжает_вместе_с_дорожками() {
+        let dir = ScratchDir::new("video");
+        файл(&dir, "2026-07-30_13-03_chrome.mic.wav");
+        файл(&dir, "2026-07-30_13-03_chrome.screen.mp4");
+
+        rename_recording(&dir, "2026-07-30_13-03_chrome", "артем").expect("переименование");
+
+        assert!(dir.join("2026-07-30_13-03_артем.screen.mp4").exists());
+        assert!(!dir.join("2026-07-30_13-03_chrome.screen.mp4").exists());
+    }
+
+    #[test]
+    fn все_видео_переезжают_с_номерами() {
+        let dir = ScratchDir::new("videos");
+        файл(&dir, "2026-07-30_13-03_chrome.mic.wav");
+        файл(&dir, "2026-07-30_13-03_chrome.screen.mp4");
+        файл(&dir, "2026-07-30_13-03_chrome.screen-2.mp4");
+        файл(&dir, "2026-07-30_13-03_chrome.screen-3.mp4");
+
+        rename_recording(&dir, "2026-07-30_13-03_chrome", "артем").expect("переименование");
+
+        for f in ["screen.mp4", "screen-2.mp4", "screen-3.mp4"] {
+            assert!(dir.join(format!("2026-07-30_13-03_артем.{f}")).exists(), "{f}");
+            assert!(!dir.join(format!("2026-07-30_13-03_chrome.{f}")).exists(), "{f}");
+        }
+    }
+
+    #[test]
+    fn занятое_имя_второго_видео_это_ошибка_до_касания_диска() {
+        let dir = ScratchDir::new("video-taken");
+        файл(&dir, "2026-07-30_13-03_chrome.mic.wav");
+        файл(&dir, "2026-07-30_13-03_chrome.screen-2.mp4");
+        файл(&dir, "2026-07-30_13-03_артем.screen-2.mp4");
+
+        let err = rename_recording(&dir, "2026-07-30_13-03_chrome", "артем").unwrap_err();
+
+        assert!(err.contains("занято"), "текст ошибки: {err}");
+        assert!(dir.join("2026-07-30_13-03_chrome.mic.wav").exists());
     }
 
     /// Транскрипт кладётся рядом с записью внешним скриптом расшифровки. Оставить

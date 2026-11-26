@@ -1,7 +1,7 @@
 // CoreAudio на macOS линкуется СЛАБО. Не удобство и не оптимизация: без этого
 // guard версии в `src/capture/macos.rs` недостижим — символы Process Tap,
-// которых нет на macOS старее 14.2, убивают процесс в dyld до `main`, и
-// сообщение «нужна macOS 14.2 или новее» никто не видит. Со слабым импортом
+// которых нет на macOS старее 14.4, убивают процесс в dyld до `main`, и
+// сообщение «нужна macOS 14.4 или новее» никто не видит. Со слабым импортом
 // отсутствующий символ становится нулевым указателем, процесс доживает до
 // `main` и отказывает словами. Полное рассуждение и замеры — в докблоке
 // `MIN_MACOS` (`src/capture/macos.rs`).
@@ -17,5 +17,8 @@
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio");
+        // ScreenCaptureKit (запись экрана, src/screen/macos.rs) — по той же
+        // причине: на системе без него процесс должен дожить до проверки версии.
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
 }

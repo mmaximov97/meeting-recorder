@@ -3,5 +3,14 @@
   "identifier": "default",
   "description": "Права главного окна: события из аудио-потока и базовые операции с окном.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-set-title"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-title",
+    "core:window:allow-inner-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-current-monitor",
+    "core:window:allow-scale-factor",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
 }

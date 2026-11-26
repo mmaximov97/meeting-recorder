@@ -164,4 +164,45 @@ mod tests {
         al.set("en".to_string());
         assert_eq!(al.get(), "en");
     }
+
+    /// Каждый ключ `calendar.*`, который встречается в коде, есть на обоих
+    /// языках. Без этого забытая строка всплыла бы в меню иконки голым ключом.
+    #[test]
+    fn ключи_календаря_из_кода_есть_на_обоих_языках() {
+        let sources = [
+            include_str!("../../ui/ask.js"),
+            include_str!("../../ui/ask.html"),
+            include_str!("../../ui/main.js"),
+            include_str!("../../ui/index.html"),
+            include_str!("calendar/menu.rs"),
+            include_str!("calendar/commands.rs"),
+            include_str!("audio.rs"),
+        ];
+        let re = regex::Regex::new(r"calendar\.([A-Za-z]+)").unwrap();
+        let mut keys: Vec<String> = sources
+            .iter()
+            .flat_map(|s| re.captures_iter(s).map(|c| c[0].to_string()))
+            // «calendar.rs» в комментариях — имя файла, не ключ.
+            .filter(|k| k != "calendar.rs")
+            .collect();
+        keys.sort();
+        keys.dedup();
+        assert!(keys.len() >= 20, "ключей подозрительно мало: {keys:?}");
+        for key in &keys {
+            for lang in ["ru", "en"] {
+                let s = t(key, lang);
+                assert_ne!(&s, key, "нет перевода {key} / {lang}");
+                assert!(!s.trim().is_empty(), "пустой перевод {key} / {lang}");
+            }
+        }
+    }
+
+    #[test]
+    fn пункт_меню_встречи_по_мокапу() {
+        assert_eq!(
+            t_params("calendar.trayJoin", "ru", &[("title", "Дизайн-ревью PlanPan")]),
+            "Подключиться и записать «Дизайн-ревью PlanPan»"
+        );
+        assert_eq!(t_params("calendar.trayStartsAt", "ru", &[("time", "15:00")]), "Начало в 15:00");
+    }
 }

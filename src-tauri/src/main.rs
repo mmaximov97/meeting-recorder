@@ -6,18 +6,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod calendar;
 mod config;
 mod delete;
 mod i18n;
-use meeting_recorder::imbalance;
+mod imbalance;
 mod local;
 mod rename;
 mod retention;
+mod screen;
 mod status;
 mod transcribe;
-mod update;
 mod whisper_cpp;
 mod tray;
+mod update;
 
 use audio::Ctl;
 use config::Config;
@@ -616,19 +618,28 @@ struct Recording {
     /// Только «да/нет»: разбирать содержимое папки незачем — окну нужно лишь
     /// решить, предлагать ли «Открыть расшифровку» вместо «Расшифровать».
     transcript: bool,
+    /// `true` — расшифровка есть, но одна из дорожек не транскрибировалась
+    /// (см. `run_transcription`: при частичном отказе он дописывает в начало
+    /// `.md` строку `_Дорожка ... не транскрибирована: {e}_`). Заполняется в
+    /// `list_recordings` после группировки — та же причина, что у
+    /// `quiet_mic`: чтение файла здесь чужое для чистой функции.
+    /// `false` и для полной расшифровки, и когда файл не прочитать —
+    /// нечитаемый файл не повод предлагать «Расшифровать заново».
+    transcript_partial: bool,
     /// Длительность записи в секундах — по более полной из двух дорожек.
     ///
     /// Не по `size`: там сумма обеих дорожек, и оборвавшаяся дорожка сделала бы
     /// из 25 минут «40». См. `duration_sec`.
     duration_sec: u32,
-    /// Микрофон владельца записал его слишком тихо: `Some(недобор в дБ)` по
-    /// правилу `imbalance::quiet_mic`, считается по одной дорожке владельца.
-    /// Заполняется в `list_recordings`, отдельно от группировки — та чистая и
-    /// файлов не читает.
-    quiet_mic_db: Option<f32>,
+    /// `true` — голос владельца почти не записался: на микрофоне меньше 30 с
+    /// речи за всю запись или в расшифровке у владельца почти нет слов (см.
+    /// `imbalance::quiet_mic`). Заполняется в `list_recordings` после
+    /// группировки — считать это здесь значило бы тащить в чистую функцию
+    /// чтение файлов.
+    quiet_mic: bool,
     /// `true` — на эту запись прямо сейчас пишутся дорожки. Заполняется в
     /// `list_recordings` после группировки, сверкой со `Status::current_recording`
-    /// — та же причина, что у `quiet_mic_db`: группировка чистая и файлов не
+    /// — та же причина, что у `quiet_mic`: группировка чистая и файлов не
     /// читает, а это сверка не с диском, а с состоянием аудио-потока.
     recording_now: bool,
     /// Во время записи человек выключал микрофон — тишина в его дорожке
@@ -818,8 +829,9 @@ fn group_recordings(
             system: false,
             size: 0,
             transcript,
+            transcript_partial: false,
             duration_sec: 0,
-            quiet_mic_db: None,
+            quiet_mic: false,
             recording_now: false,
             mic_muted: false,
         });
@@ -845,8 +857,9 @@ fn group_recordings(
             system: false,
             size: 0,
             transcript: true,
+            transcript_partial: false,
             duration_sec: 0,
-            quiet_mic_db: None,
+            quiet_mic: false,
             recording_now: false,
             mic_muted: false,
         });
@@ -983,22 +996,22 @@ fn collect_files(root: &Path) -> Result<Found, String> {
 }
 
 /// Список записей для окна: обход каталога, склейка дорожек в пары и разметка
-/// тихого микрофона.
+/// дисбаланса громкости.
 ///
 /// Три шага одной команды, а не три отдельных, и это не одно и то же с точки
 /// зрения того, где что тестируется. Обход (`collect_files`) и склейка
 /// (`group_recordings`) разделены сознательно — см. их докблоки: это
 /// единственная логика здесь, которую можно сломать незаметно, и она чистая,
 /// без файлового ввода-вывода, значит проверяется без диска. Разметка
-/// тихого микрофона, наоборот, СОБРАНА прямо тут, а не вынесена рядом: она читает
-/// содержимое файлов через `Cache::levels`, и утаскивать чтение файлов в чистую
+/// дисбаланса, наоборот, СОБРАНА прямо тут, а не вынесена рядом: она читает
+/// содержимое файлов через `Cache::quiet_mic`, и утаскивать чтение файлов в чистую
 /// функцию значило бы отнять у неё главное свойство — тестируемость без диска.
 ///
 /// Пометка считается только для полных пар (`r.mic && r.system`): одинокая
 /// дорожка уже помечена как неполная в UI, второе предупреждение поверх неё
 /// ничего не добавит, а чтение файла стоит времени зря.
 ///
-/// `recording_now` заполняется той же сверкой, что и тихий микрофон, но без
+/// `recording_now` заполняется той же сверкой, что и дисбаланс, но без
 /// условия на полную пару: запись без системного звука тоже может идти
 /// прямо сейчас, и её тоже нельзя ни удалить, ни расшифровать заново.
 #[tauri::command]
@@ -1013,28 +1026,29 @@ fn list_recordings(cache: tauri::State<Cache>, status: tauri::State<Status>) -> 
             .as_ref()
             .is_some_and(|c| Some(c.folder.as_str()) == r.folder.as_deref() && c.base == r.name);
         r.mic_muted = found.mic_muted.contains(&(r.name.clone(), r.folder.clone()));
-        // У идущей записи файла-спутника ещё нет, и о выключении знает только
-        // аудио-поток. Выключенный сейчас микрофон — та же намеренная тишина.
-        let mic_was_muted = r.mic_muted || (r.recording_now && snapshot.mic_muted);
-        // Пометка имеет смысл только для полной пары: одинокая дорожка уже
-        // помечена как неполная, и второе предупреждение о ней ничего не добавит.
-        if !(r.mic && r.system) {
-            continue;
-        }
         let dir = match &r.folder {
             Some(f) => root.join(f),
             None => root.clone(),
         };
-        // Только дорожка владельца: системная в решении не участвует — её
-        // громкость зависит от колонок собеседника, а не от микрофона
-        // (см. докблок `imbalance`).
-        //
-        // Тишина выключенного микрофона в оценку не идёт: иначе выключение на
-        // большую часть встречи давало бы «вас почти не слышно» (см.
-        // `imbalance::mic_levels_without_muted`).
-        if let Some(m) = cache.levels(&dir.join(format!("{}.mic.wav", r.name)), mic_was_muted) {
-            r.quiet_mic_db = imbalance::quiet_mic(m);
+        if r.transcript {
+            r.transcript_partial = transcript_is_partial(&dir.join(format!("{}.transcript", r.name)));
         }
+        // Пометка имеет смысл только для полной пары: одинокая дорожка уже
+        // помечена как неполная, и второе предупреждение о ней ничего не добавит.
+        // Идущую запись тоже не судим: в первые минуты речи в ней всегда мало,
+        // и пометка мигала бы, пока владелец просто ещё не заговорил.
+        if !(r.mic && r.system) || r.recording_now {
+            continue;
+        }
+        let md = r
+            .transcript
+            .then(|| find_transcript_md(&dir.join(format!("{}.transcript", r.name))).ok())
+            .flatten();
+        // Тишина выключенного микрофона в оценку не идёт: иначе выключение на
+        // большую часть встречи давало бы «голос почти не записался» (см.
+        // `imbalance::Cache::quiet_mic`). Идущую запись сюда не пускает
+        // проверка выше, так что хватает файла-спутника.
+        r.quiet_mic = cache.quiet_mic(&dir.join(format!("{}.mic.wav", r.name)), md.as_deref(), r.mic_muted);
     }
     Ok(list)
 }
@@ -1140,6 +1154,260 @@ fn open_recording_folder(
         return Err(format!("папки {} нет", dir.display()));
     }
     reveal(&dir)
+}
+
+/// Файл расшифровки внутри `<base>.transcript`.
+///
+/// Ищем по расширению, а не по составленному имени `<base>.md`: `rename.rs`
+/// переименовывает саму папку `.transcript` вместе с записью, но не заглядывает
+/// внутрь неё — файл там остаётся под ОСНОВОЙ ИМЕНИ НА МОМЕНТ РАСШИФРОВКИ
+/// (см. `<out_dir>.join(format!("{base}.md"))` в `run_transcription`). После
+/// переименования запроса «дай файл `<новая-основа>.md`» найдёт папку, но не
+/// файл внутри неё — и человек увидел бы «нет расшифровки» про запись, у
+/// которой она есть.
+///
+/// Файлов в папке всего два (`.md` и `.txt`, см. `run_transcription`), и лишь
+/// один из них — `.md`, так что по расширению найти его можно однозначно.
+fn find_transcript_md(dir: &Path) -> Result<PathBuf, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("не удалось прочитать {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("не удалось прочитать {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            return Ok(path);
+        }
+    }
+    Err(format!("в {} нет файла расшифровки", dir.display()))
+}
+
+/// Расшифровка в `transcript_dir` частичная — при слиянии не хватило одной
+/// из двух дорожек.
+///
+/// Читаем только первый килобайт файла, а не весь: пометки, которые ищем,
+/// `run_transcription` дописывает первой строкой (см. `md = format!("_Дорожка
+/// ... не транскрибирована: {e}_\n\n{md}")`), так что они либо в начале
+/// файла, либо их там нет вообще. Отсутствующий или нечитаемый файл — не
+/// частичная расшифровка, а `false`: `list_recordings` вызывается на каждый
+/// обход каталога, и превращать редкую порчу диска в ложную тревогу незачем.
+fn transcript_is_partial(transcript_dir: &Path) -> bool {
+    let Ok(md) = find_transcript_md(transcript_dir) else {
+        return false;
+    };
+    let Ok(mut file) = std::fs::File::open(&md) else {
+        return false;
+    };
+    let mut buf = [0u8; 1024];
+    let n = match std::io::Read::read(&mut file, &mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.lines().any(|line| {
+        let l = line.trim_start();
+        l.starts_with("_Дорожка владельца не транскрибирована")
+            || l.starts_with("_Дорожка собеседников не транскрибирована")
+    })
+}
+
+/// Абсолютный путь к файлу расшифровки — для кнопки «Скопировать путь к
+/// расшифровке» и подписи «Скопировать путь» в самой панели: путь отдаётся
+/// текстом, а не открывается, чтобы его можно было вставить в чат или
+/// агенту, который сам умеет читать файлы.
+#[tauri::command]
+fn transcript_path(folder: Option<String>, base: String) -> Result<String, String> {
+    let dir = recording_dir(&recordings_root(), folder.as_deref(), &base, true)?;
+    let md = find_transcript_md(&dir)?;
+    Ok(md.to_string_lossy().into_owned())
+}
+
+/// Содержимое файла расшифровки — для панели чтения и «Скопировать текст».
+#[tauri::command]
+fn read_transcript(folder: Option<String>, base: String) -> Result<String, String> {
+    let dir = recording_dir(&recordings_root(), folder.as_deref(), &base, true)?;
+    let md = find_transcript_md(&dir)?;
+    std::fs::read_to_string(&md).map_err(|e| format!("не удалось прочитать {}: {e}", md.display()))
+}
+
+/// Раздвигает или сжимает главное окно по ширине для панели расшифровки.
+///
+/// Высота и Y не трогаются никогда — панель растит окно только вбок, список
+/// слева остаётся ровно 460×640. `x` и `width` уже посчитаны на стороне
+/// `ui/main.js` (`ширина_окна`): там же читается текущий монитор и решается,
+/// нужно ли сдвинуть окно влево, чтобы не вылезти за его правый край. Здесь —
+/// только применение готового кадра.
+///
+/// На macOS это родной `setFrame:display:animate:` у `NSWindow`
+/// (`раздвинуть_кадр_macos`): ни CSS, ни `Window::set_size` анимации не дают
+/// — `set_size`/`set_position` всегда мгновенны, а окно — это NSWindow, а не
+/// DOM-узел, на который подействовал бы CSS-переход. На остальных платформах
+/// падаем на тот же мгновенный `set_size`/`set_position`, которым раньше (до
+/// этой команды) двигало окно само `ui/main.js` напрямую через JS API окна.
+///
+/// `animate` — решение `ui/main.js` по `prefers-reduced-motion`: `false`
+/// значит «переставить кадр сразу», без анимации, но тем же вызовом
+/// `setFrame:display:animate:`, а не отдельной веткой — так на всех
+/// платформах ровно два пути (анимированный/мгновенный), а не три.
+///
+/// Заодно меняет пределы ширины, которые человек может задать мышью:
+/// без панели окно — только список, тянется лишь по высоте (ровно
+/// `ШИРИНА_СПИСКА`); с панелью — от `ШИРИНА_С_ПАНЕЛЬЮ` и шире, лишнее место
+/// забирает панель (`.pane-tr` в `ui/index.html`).
+#[tauri::command]
+fn animate_window_width(app: AppHandle, width: f64, x: f64, animate: bool) -> Result<(), String> {
+    let w = app
+        .get_webview_window("main")
+        .ok_or_else(|| "окно main не найдено".to_string())?;
+    let с_панелью = width > ШИРИНА_СПИСКА;
+    #[cfg(target_os = "macos")]
+    {
+        let для_потока = w.clone();
+        w.run_on_main_thread(move || {
+            раздвинуть_кадр_macos(&для_потока, width, x, animate);
+            пределы_ширины_macos(&для_потока, с_панелью);
+        })
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = animate;
+        // Tauri подрезает окно под новые пределы сразу, поэтому порядок важен:
+        // сначала снять тот предел, что мешает новой ширине, потом переставить
+        // кадр, потом поставить новый.
+        if с_панелью {
+            w.set_max_size(None::<tauri::Size>).map_err(|e| e.to_string())?;
+        } else {
+            w.set_min_size(None::<tauri::Size>).map_err(|e| e.to_string())?;
+        }
+        переставить_кадр_мгновенно(&w, width, x)?;
+        пределы_ширины(&w, с_панелью)
+    }
+}
+
+/// Ширина главного окна без панели расшифровки — только список. Другой оно
+/// без панели не бывает: растянуть его можно лишь по высоте.
+const ШИРИНА_СПИСКА: f64 = 460.0;
+/// Наименьшая ширина окна с открытой панелью: 460 списка + 540 панели.
+/// Шире — можно, лишнее забирает панель.
+const ШИРИНА_С_ПАНЕЛЬЮ: f64 = 1000.0;
+/// «Без предела» по высоте, когда предел нужен только по ширине.
+const БЕЗ_ПРЕДЕЛА: f64 = 100_000.0;
+
+/// Пределы ширины для мыши: без панели — ровно `ШИРИНА_СПИСКА`, с панелью —
+/// от `ШИРИНА_С_ПАНЕЛЬЮ` и без верхней границы. Высота свободна всегда.
+///
+/// На macOS — прямые `setMinSize:`/`setMaxSize:` у `NSWindow`, а не
+/// `Window::set_min_size` из Tauri: тот сразу подрезает окно под новый предел,
+/// и анимация раздвижения сорвалась бы в прыжок. Сами `NSWindow` пределы
+/// кадр не трогают — действуют только на то, что тянет человек. Вызывать с
+/// главного потока, по той же причине, что `раздвинуть_кадр_macos`.
+#[cfg(target_os = "macos")]
+fn пределы_ширины_macos(w: &tauri::WebviewWindow, с_панелью: bool) {
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::CGSize;
+
+    let Ok(указатель) = w.ns_window() else {
+        return;
+    };
+    if указатель.is_null() {
+        return;
+    }
+    let (мин, макс) = if с_панелью {
+        (ШИРИНА_С_ПАНЕЛЬЮ, БЕЗ_ПРЕДЕЛА)
+    } else {
+        (ШИРИНА_СПИСКА, ШИРИНА_СПИСКА)
+    };
+    unsafe {
+        let окно = указатель as *mut AnyObject;
+        let было_мин: CGSize = objc2::msg_send![окно, minSize];
+        let _: () = objc2::msg_send![окно, setMinSize: CGSize { width: мин, height: было_мин.height }];
+        let _: () = objc2::msg_send![окно, setMaxSize: CGSize { width: макс, height: БЕЗ_ПРЕДЕЛА }];
+    }
+}
+
+/// То же для остальных платформ — через Tauri, который заодно подрезает окно
+/// под предел (там раздвижение и так мгновенное, анимации срывать нечего).
+#[cfg(not(target_os = "macos"))]
+fn пределы_ширины(w: &tauri::WebviewWindow, с_панелью: bool) -> Result<(), String> {
+    use tauri::{LogicalSize, Size};
+    let (мин, макс) = if с_панелью {
+        (ШИРИНА_С_ПАНЕЛЬЮ, None)
+    } else {
+        (ШИРИНА_СПИСКА, Some(ШИРИНА_СПИСКА))
+    };
+    w.set_min_size(Some(Size::Logical(LogicalSize { width: мин, height: 0.0 })))
+        .map_err(|e| e.to_string())?;
+    w.set_max_size(макс.map(|width| Size::Logical(LogicalSize { width, height: БЕЗ_ПРЕДЕЛА })))
+        .map_err(|e| e.to_string())
+}
+
+/// Читает текущий кадр NSWindow и меняет в нём только ширину и (при нужде) x,
+/// одним вызовом `setFrame:display:animate:` — отсюда и анимация, если
+/// `animate` истинно: Cocoa анимирует переход между старым и новым кадром
+/// сама, шагов подавать не нужно.
+///
+/// Y и высота берутся из ТЕКУЩЕГО кадра, а не пересчитываются — вот почему
+/// верхний край окна остаётся на месте без ручного переворота оси Y: в
+/// координатах Cocoa начало координат внизу слева экрана, и «верх остался,
+/// где был» здесь означает ровно «Y не менялся», раз высота тоже не меняется.
+/// Уехать в сторону мог бы только X — правым краем и клиренсом монитора уже
+/// заведует `ширина_окна` в `ui/main.js`, сюда приходит готовое число.
+///
+/// Указатель `ns_window()` отдан самим tao и живёт всё время жизни окна, окно
+/// живёт до конца процесса (объявлено в конфиге, не уничтожается) — тот же
+/// довод безопасности, что у `показать_поверх` в `audio.rs`. Вызов обязан
+/// идти с главного потока: AppKit не ругается на чужой поток, а убивает
+/// процесс, — это гарантирует `run_on_main_thread` у вызывающего.
+#[cfg(target_os = "macos")]
+fn раздвинуть_кадр_macos(w: &tauri::WebviewWindow, width: f64, x: f64, animate: bool) {
+    use objc2::runtime::AnyObject;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    let Ok(указатель) = w.ns_window() else {
+        return;
+    };
+    if указатель.is_null() {
+        return;
+    }
+    unsafe {
+        let окно = указатель as *mut AnyObject;
+        let текущий: CGRect = objc2::msg_send![окно, frame];
+        let цель = CGRect {
+            origin: CGPoint {
+                x,
+                y: текущий.origin.y,
+            },
+            size: CGSize {
+                width,
+                height: текущий.size.height,
+            },
+        };
+        let _: () = objc2::msg_send![окно, setFrame: цель, display: true, animate: animate];
+    }
+}
+
+/// То же самое, но без анимации — единственное, что умеют `Window::set_size`/
+/// `set_position` из самого Tauri. Используется на не-macOS платформах и
+/// раньше жило прямо в `ui/main.js` (прямые вызовы JS API окна); переехало
+/// сюда вместе с macOS-веткой, чтобы `animate_window_width` была одной точкой
+/// входа для обеих, а не двумя путями с разной логикой на разных концах моста.
+#[cfg(not(target_os = "macos"))]
+fn переставить_кадр_мгновенно(w: &tauri::WebviewWindow, width: f64, x: f64) -> Result<(), String> {
+    let коэфф = w.scale_factor().map_err(|e| e.to_string())?;
+    let высота = w
+        .inner_size()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(коэфф)
+        .height;
+    let y = w
+        .outer_position()
+        .map_err(|e| e.to_string())?
+        .to_logical::<f64>(коэфф)
+        .y;
+    w.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height: высота }))
+        .map_err(|e| e.to_string())?;
+    w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+        .map_err(|e| e.to_string())
 }
 
 /// Открыть раздел настроек, где выдают разрешение на захват системного звука.
@@ -1320,6 +1588,7 @@ fn set_language(language: Option<String>, app: AppHandle) -> Result<(), String> 
     let lang = i18n::effective_lang(cfg.language.as_deref());
     app.state::<i18n::ActiveLang>().set(lang);
     tray::refresh_texts(&app);
+    calendar::invalidate_menu(&app);
     Ok(())
 }
 
@@ -1366,6 +1635,184 @@ fn set_transcribe_mode(mode: Option<String>, app: AppHandle) -> Result<(), Strin
     let mut cfg = Config::load(&app);
     cfg.transcribe_mode = mode;
     cfg.save(&app)
+}
+
+/// Что умеет запись экрана на этой системе и есть ли уже разрешение.
+#[tauri::command]
+fn get_screen_support() -> serde_json::Value {
+    let s = meeting_recorder::screen::support();
+    serde_json::json!({
+        "window": s.window,
+        "screen": s.screen,
+        "reason": s.reason,
+        "permission": meeting_recorder::screen::has_permission(),
+    })
+}
+
+/// `mode: "off" | "window" | "screen"`; `app_id`/`app_name` — для «окна»,
+/// `None` — подбирать звонилку самим. Только сохраняет: рабочий поток
+/// (`screen.rs`) читает конфиг на старте каждой записи, идущую не трогает.
+#[tauri::command]
+fn set_screen_mode(
+    mode: Option<String>,
+    app_id: Option<String>,
+    app_name: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.screen_mode = mode;
+    cfg.screen_app_id = app_id;
+    cfg.screen_app_name = app_name;
+    cfg.save(&app)
+}
+
+/// Спросить разрешение сразу при включении режима, а не на первой встрече.
+/// `true` — разрешение уже действует. На macOS после первого «Разрешить»
+/// оно начинает действовать только с перезапуска — это `false`, и окно
+/// объясняет, что делать.
+#[tauri::command]
+fn request_screen_permission() -> bool {
+    meeting_recorder::screen::has_permission() || meeting_recorder::screen::request_permission()
+}
+
+/// Открыть «Запись экрана» в Системных настройках.
+#[tauri::command]
+fn open_screen_privacy() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Приложения с окнами на экране. `async` и `spawn_blocking` — не украшение:
+/// синхронная команда Tauri выполняется на главном потоке, а ScreenCaptureKit
+/// отвечает асинхронно и мог бы держать окно до пяти секунд.
+#[tauri::command]
+async fn list_screen_apps() -> Result<Vec<serde_json::Value>, String> {
+    let apps = tauri::async_runtime::spawn_blocking(meeting_recorder::screen::list_apps)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(apps
+        .into_iter()
+        .map(|a| serde_json::json!({ "id": a.id, "name": a.name }))
+        .collect())
+}
+
+/// Окна и мониторы для меню выбора источника. `thumbs` — снять миниатюры
+/// (меню ждёт их не дольше ~1 с, не успевшие — `null`). `async` +
+/// `spawn_blocking` — по той же причине, что у `list_screen_apps`.
+/// Ошибка — короткий код (`permission`, `unsupported`, `failed`).
+#[tauri::command]
+async fn list_screen_sources(thumbs: bool) -> Result<serde_json::Value, String> {
+    let s = tauri::async_runtime::spawn_blocking(move || meeting_recorder::screen::list_sources(thumbs))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            log::warn!("список окон для записи экрана: {e}");
+            screen::why(&e).to_string()
+        })?;
+    let windows: Vec<_> = s
+        .windows
+        .into_iter()
+        .map(|w| {
+            serde_json::json!({
+                "id": w.id,
+                "appId": w.app_id,
+                "appName": w.app_name,
+                "title": w.title,
+                "displayId": w.display_id,
+                "thumb": w.thumb,
+                "icon": w.icon,
+            })
+        })
+        .collect();
+    let displays: Vec<_> = s
+        .displays
+        .into_iter()
+        .map(|d| serde_json::json!({ "id": d.id, "name": d.name, "main": d.main, "thumb": d.thumb }))
+        .collect();
+    Ok(serde_json::json!({ "windows": windows, "displays": displays, "meetingApp": s.meeting_app }))
+}
+
+/// Сохранить выбор источника и, если запись идёт, сразу применить его.
+/// `mode: "off" | "meeting" | "window" | "screen"`. Поля пишутся только свои:
+/// выбор окна не стирается, когда человек переключился на «Экран», и
+/// вернувшись, он найдёт своё окно.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+fn set_screen_source(
+    mode: String,
+    window_id: Option<u32>,
+    app_id: Option<String>,
+    app_name: Option<String>,
+    window_title: Option<String>,
+    display_id: Option<u32>,
+    display_name: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    match mode.as_str() {
+        "off" | "meeting" => {}
+        "window" => {
+            let Some(id) = window_id else { return Err("window_id".into()) };
+            cfg.screen_window_id = Some(id);
+            cfg.screen_app_id = app_id;
+            cfg.screen_app_name = app_name;
+            cfg.screen_window_title = window_title;
+        }
+        "screen" => {
+            cfg.screen_display_id = display_id;
+            cfg.screen_display_name = display_name;
+        }
+        _ => return Err("mode".into()),
+    }
+    cfg.screen_mode = Some(mode);
+    cfg.save(&app)?;
+    screen::apply_source();
+    Ok(())
+}
+
+/// Показывать ли окна MeetRec на записи всего экрана. Идёт запись экрана —
+/// применяется сразу.
+#[tauri::command]
+fn set_screen_hide_self(hide: bool, app: AppHandle) -> Result<(), String> {
+    let mut cfg = Config::load(&app);
+    cfg.screen_hide_self = Some(hide);
+    cfg.save(&app)?;
+    if cfg.screen_mode() == meeting_recorder::screen::ScreenMode::Screen {
+        screen::apply_source();
+    }
+    Ok(())
+}
+
+/// Выбор источника, как его понимает запись (старое `"window"` без окна —
+/// `"meeting"`), и что умеет система.
+#[tauri::command]
+fn get_screen_settings(app: AppHandle) -> serde_json::Value {
+    let cfg = Config::load(&app);
+    let s = meeting_recorder::screen::support();
+    serde_json::json!({
+        "mode": cfg.screen_mode().as_str(),
+        "windowId": cfg.screen_window_id,
+        "appId": cfg.screen_app_id,
+        "appName": cfg.screen_app_name,
+        "windowTitle": cfg.screen_window_title,
+        "displayId": cfg.screen_display_id,
+        "displayName": cfg.screen_display_name,
+        "hideSelf": cfg.screen_hide_self(),
+        "support": { "window": s.window, "screen": s.screen, "reason": s.reason },
+        "permission": meeting_recorder::screen::has_permission(),
+    })
+}
+
+/// Последнее событие `screen` — для пульта после перезагрузки окна. `null` —
+/// с запуска приложения запись экрана не начиналась.
+#[tauri::command]
+fn get_screen_status() -> Option<screen::ScreenEvent> {
+    screen::status()
 }
 
 /// Тип сервера расшифровки: `"gateway"` — шлюз selfhost-ai-lab, `"whisper_cpp"`
@@ -1817,8 +2264,8 @@ fn main() {
         // фатальная ошибка там случается раньше, чем webview успеет подписаться.
         .manage(Status::default())
         .manage(Cache::default())
-        .manage(transcribe_queue)
         .manage(update::UpdateState::default())
+        .manage(transcribe_queue)
         .invoke_handler(tauri::generate_handler![
             send_event,
             get_state,
@@ -1834,6 +2281,16 @@ fn main() {
             set_theme,
             set_transcribe_config,
             set_transcribe_mode,
+            get_screen_support,
+            set_screen_mode,
+            request_screen_permission,
+            open_screen_privacy,
+            list_screen_apps,
+            list_screen_sources,
+            set_screen_source,
+            set_screen_hide_self,
+            get_screen_settings,
+            get_screen_status,
             set_transcribe_server,
             local_model_status,
             local_model_download,
@@ -1847,6 +2304,16 @@ fn main() {
             transcribe_recording,
             cancel_transcription,
             open_recording_folder,
+            transcript_path,
+            read_transcript,
+            animate_window_width,
+            calendar::commands::calendar_status,
+            calendar::commands::calendar_connect,
+            calendar::commands::calendar_cancel_connect,
+            calendar::commands::calendar_disconnect,
+            calendar::commands::calendar_join,
+            calendar::commands::calendar_dismiss,
+            audio::ask_menu,
             update_status,
             update_skip,
             update_check,
@@ -1854,6 +2321,17 @@ fn main() {
             update_install
         ])
         .setup(move |app| {
+            // Окно стартует без панели расшифровки — значит, только список:
+            // по ширине его не растянуть (см. `пределы_ширины_macos`).
+            if let Some(w) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                {
+                    let для_потока = w.clone();
+                    let _ = w.run_on_main_thread(move || пределы_ширины_macos(&для_потока, false));
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = пределы_ширины(&w, false);
+            }
             // Приложение живёт в Dock как обычное (`ActivationPolicy::Regular`),
             // а не только в строке меню. Раньше здесь стояла `Accessory`: окно
             // стартовало скрытым, крестик его прятал, и иконка в Dock без
@@ -1883,6 +2361,10 @@ fn main() {
             app.manage(i18n::ActiveLang::new(lang));
 
             tray::build(&handle, tray_tx)?;
+
+            // Календарь — после трея (его пункты встают в готовое меню) и до
+            // аудио-потока (тот спрашивает календарь при каждом взводе).
+            calendar::init(&handle);
 
             // Ctrl+Shift+R — toggle. Что именно делать, решает аудио-поток по
             // состоянию машины: хоткей обязан работать и с закрытым окном, а
@@ -1988,8 +2470,9 @@ mod tests {
             system,
             size,
             transcript: false,
+            transcript_partial: false,
             duration_sec: 0,
-            quiet_mic_db: None,
+            quiet_mic: false,
             recording_now: false,
             mic_muted: false,
         }
@@ -2793,12 +3276,111 @@ mod tests {
         );
     }
 
+    // ---- файл расшифровки внутри .transcript ---------------------------------
+
+    /// Уникальный временный каталог — единственному тесту здесь, которому
+    /// нужен настоящий диск, по тому же приёму, что и у
+    /// `обход_каталога_находит_папки_расшифровок_и_в_корне_и_в_месяце` выше.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "mr-transcript-md-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("создать временный каталог");
+        path
+    }
+
+    /// После переименования папка `.transcript` едет вместе с записью
+    /// (`rename.rs`), а файл внутри неё — нет: его имя застыло на моменте
+    /// расшифровки. `find_transcript_md` обязан найти его по расширению, а не
+    /// по составленному из новой основы имени.
+    #[test]
+    fn находит_md_с_именем_старой_основы() {
+        let dir = scratch_dir("найден");
+        std::fs::write(dir.join("2026-07-30_13-03_chrome.md"), "текст").unwrap();
+        std::fs::write(dir.join("2026-07-30_13-03_chrome.txt"), "текст").unwrap();
+
+        let found = find_transcript_md(&dir).expect("файл должен найтись");
+        assert_eq!(found, dir.join("2026-07-30_13-03_chrome.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ошибка_если_md_в_папке_нет() {
+        let dir = scratch_dir("нет-файла");
+        std::fs::write(dir.join("2026-07-30_13-03_chrome.txt"), "текст").unwrap();
+
+        let err = find_transcript_md(&dir).unwrap_err();
+        assert!(err.contains("нет файла расшифровки"), "текст ошибки: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ошибка_если_папки_transcript_нет_вовсе() {
+        let dir = std::env::temp_dir().join("mr-transcript-md-отсутствует-навсегда");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(find_transcript_md(&dir).is_err());
+    }
+
+    // ---- частичная расшифровка ------------------------------------------------
+
+    #[test]
+    fn частичная_если_не_вышла_дорожка_владельца() {
+        let dir = scratch_dir("частичная-владелец");
+        std::fs::write(
+            dir.join("запись.md"),
+            "_Дорожка владельца не транскрибирована: таймаут_\n\nостальной текст",
+        )
+        .unwrap();
+
+        assert!(transcript_is_partial(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn частичная_если_не_вышла_дорожка_собеседников() {
+        let dir = scratch_dir("частичная-собеседники");
+        std::fs::write(
+            dir.join("запись.md"),
+            "_Дорожка собеседников не транскрибирована: 503_\n\nостальной текст",
+        )
+        .unwrap();
+
+        assert!(transcript_is_partial(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn не_частичная_если_обе_дорожки_вышли() {
+        let dir = scratch_dir("полная");
+        std::fs::write(dir.join("запись.md"), "**Владелец**: привет\n\n**Собеседники**: привет").unwrap();
+
+        assert!(!transcript_is_partial(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn не_частичная_если_файла_нет() {
+        let dir = std::env::temp_dir().join("mr-transcript-partial-отсутствует-навсегда");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!transcript_is_partial(&dir));
+    }
+
     // ---- tauri.conf.json ----------------------------------------------------
 
     /// Караул при значении, которое выглядит опечаткой и ею не является.
     ///
     /// `bundle.macOS.minimumSystemVersion` стоит `11.0`, хотя приложению нужна
-    /// macOS 14.2, — иначе отказ на старой системе не дойдёт до человека:
+    /// macOS 14.4, — иначе отказ на старой системе не дойдёт до человека:
     /// запуск перехватит Finder и откажет своими словами. Рассуждение записано
     /// в нескольких местах (докблок `MIN_MACOS` в `src/capture/macos.rs`,
     /// design-документ, план, README, `scripts/check-tap-lazy-bind.sh`), и ни
@@ -2823,15 +3405,15 @@ mod tests {
             "\n\
              bundle.macOS.minimumSystemVersion обязан остаться \"11.0\".\n\
              \n\
-             Расхождение с настоящим требованием (macOS 14.2) выглядит \
+             Расхождение с настоящим требованием (macOS 14.4) выглядит \
              недосмотром, но им не является.\n\
              \n\
              ЗАЧЕМ. Этот ключ — LSMinimumSystemVersion в Info.plist, то есть гейт \
              Finder'а.\n\
              При 11.0 приложение на старой системе запускается, доходит до main, \
              зовёт\n\
-             unsupported_reason() и объясняет человеку, что нужна 14.2 и почему. \
-             При 14.2\n\
+             unsupported_reason() и объясняет человеку, что нужна 14.4 и почему. \
+             При 14.4\n\
              запуск перехватит сама macOS и откажет своими словами — пользователь \
              не узнает,\n\
              чего именно не хватает, а мы не узнаем, что он вообще пытался.\n\
@@ -2873,7 +3455,7 @@ mod tests {
              В src-tauri/build.rs пропал флаг слабой линковки CoreAudio:\n\
              \x20   println!(\"cargo:rustc-link-arg=-Wl,-weak_framework,CoreAudio\");\n\
              \n\
-             Без него на macOS старее 14.2 dyld убивает GUI с \"Symbol not found:\n\
+             Без него на macOS старее 14.4 dyld убивает GUI с \"Symbol not found:\n\
              _AudioHardwareCreateProcessTap\" ДО main: ни окна, ни тоста, ни \
              объяснения.\n\
              \n\

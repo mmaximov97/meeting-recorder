@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
-  <img src="https://img.shields.io/badge/macOS-14.2%2B-lightgrey" alt="macOS 14.2+">
+  <img src="https://img.shields.io/badge/macOS-14.4%2B-lightgrey" alt="macOS 14.4+">
   <img src="https://img.shields.io/badge/Windows-10%2F11-lightgrey" alt="Windows 10/11">
   <a href="README.ru.md">Русская версия</a>
 </p>
@@ -27,8 +27,10 @@ MeetRec notices when a call starts, offers to record it, and writes two separate
 ## What it does
 
 - **Notices calls.** Zoom, Teams, Slack and Discord are recognised by their process. A small panel appears over the call window and asks whether to record.
+- **Remembers calendar meetings.** Connect Google Calendar, and a minute before a meeting with a Zoom, Google Meet or Teams link a panel offers “Join and record”: one click opens the meeting and starts recording. Missed it? The same command is in the menu bar icon.
 - **Keeps the first seconds.** Audio runs through a ring buffer, so recording starts a few seconds before you answer the question. Opening lines are not lost.
 - **Two separate tracks.** Your microphone and the system audio go into separate WAV files. You and the other side never overlap.
+- **Screen video when you want it.** A button next to Start recording turns on recording of the meeting window, any window or a whole monitor, picked from thumbnails. You can switch the window or the microphone mid-recording. The video sits next to the audio as `<base>.screen.mp4`. Needs macOS 15 or later; on Windows only the whole screen is recorded.
 - **Mute your microphone mid-call.** Noisy around you? Click the microphone next to its meter, or use the menu bar item. Your track gets silence for that stretch and stays in sync with the other one; the system audio keeps recording.
 - **Stays out of the way.** An icon in the menu bar, a global shortcut, monthly folders, renaming, per-device microphone choice.
 
@@ -50,11 +52,9 @@ xattr -cr /Applications/MeetRec.app
 
 **Windows** — `MeetRec_x.y.z_x64-setup.exe` to install, or `MeetRec_vx.y.z_x64-portable.exe` to run without installing.
 
-The app notices new releases on its own: once a day it asks GitHub and, if a newer version is out, shows a "Download / Later" banner in the window. Download opens the release page in your browser; installing is manual, same as the first time. Nothing but the version number is exchanged.
-
 ## Requirements
 
-- **macOS 14.2 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.
+- **macOS 14.4 or newer.** System audio is captured through the Core Audio process tap API, which does not exist in earlier versions.
 - **Windows 10 or 11.** System audio goes through WASAPI loopback.
 
 ## Permissions
@@ -122,6 +122,14 @@ Metal is picked up automatically: on Apple Silicon an hour-long meeting takes a 
 
 One caveat: "Cancel transcription" in the app drops the connection immediately, but the server only notices it between compute steps and aborts with a delay — the next transcription may have to wait tens of seconds behind it.
 
+## Google Calendar
+
+Connect it in Settings → Calendar. MeetRec reads the meetings from all calendars of the account (including ones shared with you) for the next 24 hours: title, time and call link. If you decline the calendar-list permission at sign-in, only the primary calendar is read. It cannot change the calendar. The access key is kept in the macOS Keychain, not in the settings file. Disconnect deletes it and revokes access at Google.
+
+Google has not reviewed MeetRec yet, so sign-in shows an “unverified app” warning: choose Continue. If Google refuses anyway, recording still works without the calendar.
+
+The app is signed ad hoc, so after an update macOS may ask whether MeetRec can use the Keychain.
+
 ## Shortcuts
 
 `Ctrl+Shift+R` starts and stops recording. It works with the window closed.
@@ -137,6 +145,8 @@ cargo test --workspace
 npm install
 npx tauri build
 ```
+
+The calendar is built in only when the build gets Google keys: `MEETREC_GOOGLE_CLIENT_ID` and `MEETREC_GOOGLE_CLIENT_SECRET` in the environment or in `~/.config/meetrec/google-oauth.env`. Without them everything else works and the Calendar section is not shown.
 
 Use `npx tauri build`, not `cargo tauri build`.
 

@@ -1,0 +1,8 @@
+{
+  "access_token": "ya29.test-access",
+  "expires_in": 3599,
+  "refresh_token": "1//test-refresh",
+  "scope": "openid https://www.googleapis.com/auth/userinfo.email",
+  "token_type": "Bearer",
+  "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL2FjY291bnRzLmdvb2dsZS5jb20iLCJlbWFpbCI6Im5hbWVAZ21haWwuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWV9.c2lnbmF0dXJl"
+}

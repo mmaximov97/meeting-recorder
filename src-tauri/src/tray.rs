@@ -15,12 +15,13 @@
 
 use crate::audio::{Ctl, UiState};
 use crate::i18n;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use crate::calendar::menu::MenuLine;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
@@ -38,6 +39,11 @@ static BLINK_ON: AtomicBool = AtomicBool::new(true);
 /// tauri 2.11). Единственный способ дотянуться до пункта после сборки меню —
 /// не терять ссылку на него.
 static TOGGLE_ITEM: OnceLock<MenuItem<Wry>> = OnceLock::new();
+/// Меню целиком — чтобы ставить и убирать пункты встреч сверху. Достать его
+/// из трея обратно нечем (см. `TOGGLE_ITEM`).
+static MENU: OnceLock<Menu<Wry>> = OnceLock::new();
+/// Сколько пунктов календаря сейчас стоит в начале меню.
+static CAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Пункт «Выключить/Включить микрофон» — по той же причине, что и
 /// `TOGGLE_ITEM`. Живой он только в записи: вне её выключать нечего (см.
 /// `App::set_mic_muted`).
@@ -198,6 +204,45 @@ pub fn refresh_texts(app: &AppHandle) {
     let _ = app.run_on_main_thread(move || repaint(&h));
 }
 
+/// Поставить пункты встреч в начало меню. Можно звать откуда угодно —
+/// правка уедет на главный поток.
+pub fn set_calendar_lines(app: &AppHandle, lines: Vec<MenuLine>) {
+    let h = app.clone();
+    let _ = app.run_on_main_thread(move || apply_calendar_lines(&h, &lines));
+}
+
+/// Старые пункты снимаются с начала меню по счётчику, новые ставятся туда
+/// же. Ссылки на сами пункты не храним: всё календарное всегда сверху.
+fn apply_calendar_lines(app: &AppHandle, lines: &[MenuLine]) {
+    let Some(menu) = MENU.get() else { return };
+    let old = CAL_COUNT.swap(0, Ordering::Relaxed);
+    for _ in 0..old {
+        let _ = menu.remove_at(0);
+    }
+    let mut n = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let added = match line {
+            MenuLine::Join { id, text } => {
+                MenuItem::with_id(app, format!("cal-join:{id}"), text, true, None::<&str>)
+                    .and_then(|it| menu.insert(&it, n))
+            }
+            // Серый «Начало в 15:00» — неактивный пункт: нажимать нечего.
+            MenuLine::Caption(text) => {
+                MenuItem::with_id(app, format!("cal-caption:{i}"), text, false, None::<&str>)
+                    .and_then(|it| menu.insert(&it, n))
+            }
+            MenuLine::Reauth(text) => MenuItem::with_id(app, "cal-reauth", text, true, None::<&str>)
+                .and_then(|it| menu.insert(&it, n)),
+            MenuLine::Separator => PredefinedMenuItem::separator(app).and_then(|it| menu.insert(&it, n)),
+        };
+        match added {
+            Ok(()) => n += 1,
+            Err(e) => log::warn!("трей: пункт календаря не встал: {e}"),
+        }
+    }
+    CAL_COUNT.store(n, Ordering::Relaxed);
+}
+
 /// Сообщить трею новое состояние. Можно звать откуда угодно — перерисовка сама
 /// уедет на главный поток.
 pub fn set_state(app: &AppHandle, st: UiState) {
@@ -312,7 +357,11 @@ pub fn build(app: &AppHandle, tx: Sender<Ctl>) -> tauri::Result<()> {
     // погашенным, потому что приложение стартует в Idle.
     let mic = MenuItem::with_id(app, "mic", i18n::t("tray.micMute", &lang), false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", i18n::t("tray.quit", &lang), true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &mic, &folder, &quit])?;
+    // Разделитель перед «Выход» — как во всех состояниях мокапа
+    // `tmp/mockups/calendar-join.html`.
+    let sep = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&toggle, &mic, &folder, &sep, &quit])?;
+    let _ = MENU.set(menu.clone());
     let _ = TOGGLE_ITEM.set(toggle.clone());
     let _ = MIC_ITEM.set(mic.clone());
 

@@ -5,6 +5,7 @@
 //! устройства как значение — где оно хранится, его не касается.
 
 use meeting_recorder::capture::DeviceChoice;
+use meeting_recorder::screen::{ScreenMode, Target};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -46,9 +47,37 @@ pub struct Config {
     /// а не здесь — этот файл ничего не знает про сеть, очередь расшифровки
     /// и локальный движок.
     pub transcribe_mode: Option<String>,
-    /// Версия релиза, на которой человек нажал «Позже» в баннере обновления
+    /// Почта подключённого Google-аккаунта — только для показа в настройках.
+    pub calendar_email: Option<String>,
+    /// `true` — человек подключил Google Календарь и не отключал. Сам refresh
+    /// token лежит в связке ключей (`calendar/token_store.rs`), не здесь:
+    /// config.json — обычный файл, его видят резервные копии и синхронизация.
+    pub calendar_connected: bool,
+    /// `"off" | "meeting" | "window" | "screen"`. Отсутствие поля (старый
+    /// конфиг) и `None` — `"off"`: запись экрана включает человек, не
+    /// обновление. Старое `"window"` без `screen_window_id` — «окно встречи».
+    /// Разбор — [`Config::screen_mode`].
+    pub screen_mode: Option<String>,
+    /// Bundle id приложения выбранного окна (режим `"window"`): по нему окно
+    /// находится после перезапуска, когда id уже другой.
+    pub screen_app_id: Option<String>,
+    /// Имя того же приложения — только для показа, когда окна сейчас нет.
+    pub screen_app_name: Option<String>,
+    /// `CGWindowID` выбранного окна. Между запусками приложения меняется —
+    /// поэтому рядом приложение и заголовок (`screen::pick_window`).
+    pub screen_window_id: Option<u32>,
+    pub screen_window_title: Option<String>,
+    /// `CGDirectDisplayID` выбранного монитора (режим `"screen"`). `None` —
+    /// основной.
+    pub screen_display_id: Option<u32>,
+    /// Имя монитора: по нему он находится, если id сменился после
+    /// переподключения (`screen::pick_display`).
+    pub screen_display_name: Option<String>,
+    /// Убрать окна MeetRec с записи экрана. `None` — да.
+    pub screen_hide_self: Option<bool>,
+    /// Версия, на которой нажали «Позже» в баннере обновления
     /// (`update.rs`). Отсутствие поля и `None` — ничего не пропускали. Гасит
-    /// ровно одну версию: следующий релиз баннер покажет снова.
+    /// баннер ровно для неё: следующий релиз покажется снова.
     pub update_skipped_version: Option<String>,
     /// `"gateway" | "whisper_cpp"`. Отсутствие поля (старый конфиг) и `None` —
     /// то же самое, что `"gateway"`: шлюз selfhost-ai-lab, как было всегда.
@@ -62,6 +91,33 @@ impl Config {
         match &self.mic_device_id {
             Some(id) => DeviceChoice::Id(id.clone()),
             None => DeviceChoice::Default,
+        }
+    }
+
+    pub fn screen_mode(&self) -> ScreenMode {
+        ScreenMode::from_config(self.screen_mode.as_deref(), self.screen_window_id)
+    }
+
+    pub fn screen_hide_self(&self) -> bool {
+        self.screen_hide_self.unwrap_or(true)
+    }
+
+    /// Что писать по этому конфигу. `source` — хвост основы имени записи,
+    /// подсказка детектора для «окна встречи». `None` — экран не пишется.
+    pub fn screen_target(&self, source: Option<String>) -> Option<Target> {
+        match self.screen_mode() {
+            ScreenMode::Off => None,
+            ScreenMode::Meeting => Some(Target::Meeting { source }),
+            ScreenMode::Window => Some(Target::Window {
+                id: self.screen_window_id?,
+                app_id: self.screen_app_id.clone(),
+                title: self.screen_window_title.clone(),
+            }),
+            ScreenMode::Screen => Some(Target::Display {
+                id: self.screen_display_id,
+                name: self.screen_display_name.clone(),
+                hide_self: self.screen_hide_self(),
+            }),
         }
     }
 
@@ -118,6 +174,16 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            calendar_email: None,
+            calendar_connected: false,
+            screen_mode: None,
+            screen_app_id: None,
+            screen_app_name: None,
+            screen_window_id: None,
+            screen_window_title: None,
+            screen_display_id: None,
+            screen_display_name: None,
+            screen_hide_self: None,
             update_skipped_version: None,
             transcribe_server: None,
         };
@@ -137,6 +203,16 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            calendar_email: None,
+            calendar_connected: false,
+            screen_mode: None,
+            screen_app_id: None,
+            screen_app_name: None,
+            screen_window_id: None,
+            screen_window_title: None,
+            screen_display_id: None,
+            screen_display_name: None,
+            screen_hide_self: None,
             update_skipped_version: None,
             transcribe_server: None,
         };
@@ -167,6 +243,16 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            calendar_email: None,
+            calendar_connected: false,
+            screen_mode: None,
+            screen_app_id: None,
+            screen_app_name: None,
+            screen_window_id: None,
+            screen_window_title: None,
+            screen_display_id: None,
+            screen_display_name: None,
+            screen_hide_self: None,
             update_skipped_version: None,
             transcribe_server: None,
         };
@@ -192,6 +278,16 @@ mod tests {
             theme: None,
             audio_retention_days: None,
             transcribe_mode: None,
+            calendar_email: None,
+            calendar_connected: false,
+            screen_mode: None,
+            screen_app_id: None,
+            screen_app_name: None,
+            screen_window_id: None,
+            screen_window_title: None,
+            screen_display_id: None,
+            screen_display_name: None,
+            screen_hide_self: None,
             update_skipped_version: None,
             transcribe_server: None,
         };
@@ -282,6 +378,85 @@ mod tests {
         let c = Config { transcribe_mode: Some("local".to_string()), ..Config::default() };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(Config::from_str(&json), c);
+    }
+
+    /// Конфиг, записанный до появления календаря, читается как «не подключён».
+    #[test]
+    fn старый_конфиг_без_календаря_это_не_подключён() {
+        let c = Config::from_str(r#"{"mic_device_id":"{id}"}"#);
+        assert_eq!(c.calendar_email, None);
+        assert!(!c.calendar_connected);
+    }
+
+    /// Конфиг до выбора окна: `"window"` значил «окна звонилки», и
+    /// выбранное там приложение было подсказкой, а не окном. Читается как
+    /// «окно встречи» — иначе обновление молча выключило бы запись экрана.
+    #[test]
+    fn старое_окно_без_id_читается_как_окно_встречи() {
+        let c = Config::from_str(r#"{"screen_mode":"window","screen_app_id":"us.zoom.xos","screen_app_name":"zoom.us"}"#);
+        assert_eq!(c.screen_mode(), ScreenMode::Meeting);
+        assert_eq!(
+            c.screen_target(Some("zoom-us".into())),
+            Some(Target::Meeting { source: Some("zoom-us".into()) })
+        );
+        assert!(c.screen_hide_self(), "по умолчанию MeetRec на записи скрыт");
+    }
+
+    #[test]
+    fn выбранное_окно_и_монитор_становятся_целью() {
+        let c = Config::from_str(
+            r#"{"screen_mode":"window","screen_window_id":42,"screen_app_id":"com.apple.Keynote","screen_window_title":"Слайды"}"#,
+        );
+        assert_eq!(
+            c.screen_target(None),
+            Some(Target::Window {
+                id: 42,
+                app_id: Some("com.apple.Keynote".into()),
+                title: Some("Слайды".into()),
+            })
+        );
+        let c = Config::from_str(
+            r#"{"screen_mode":"screen","screen_display_id":5,"screen_display_name":"L27e-30","screen_hide_self":false}"#,
+        );
+        assert_eq!(
+            c.screen_target(None),
+            Some(Target::Display {
+                id: Some(5),
+                name: Some("L27e-30".into()),
+                hide_self: false,
+            })
+        );
+        assert_eq!(Config::from_str(r#"{"screen_mode":"screen"}"#).screen_target(None),
+            Some(Target::Display { id: None, name: None, hide_self: true }), "без выбора — основной");
+        assert_eq!(Config::default().screen_target(None), None);
+    }
+
+    #[test]
+    fn выбор_экрана_переживает_сериализацию() {
+        let c = Config {
+            screen_mode: Some("window".into()),
+            screen_app_id: Some("us.zoom.xos".into()),
+            screen_window_id: Some(7),
+            screen_window_title: Some("Zoom Meeting".into()),
+            screen_display_id: Some(1),
+            screen_display_name: Some("Встроенный дисплей".into()),
+            screen_hide_self: Some(false),
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+    }
+
+    #[test]
+    fn календарь_переживает_сериализацию() {
+        let c = Config {
+            calendar_email: Some("name@gmail.com".to_string()),
+            calendar_connected: true,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(Config::from_str(&json), c);
+        assert!(!json.contains("token"), "токены в config.json не лежат");
     }
 
     /// Конфиг, записанный до появления типа сервера, обязан читаться как

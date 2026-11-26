@@ -24,6 +24,11 @@ pub enum DetectError {
     #[cfg(target_os = "windows")]
     #[error("ошибка COM/WASAPI: {0}")]
     Com(#[from] ::windows::core::Error),
+    /// Не удалось прочитать список аудио-процессов Core Audio — см.
+    /// `MacDetector::mic_in_use_by_others`.
+    #[cfg(target_os = "macos")]
+    #[error("Core Audio: {what} вернул OSStatus {status}")]
+    CoreAudio { what: &'static str, status: i32 },
 }
 
 /// Интервал опроса детектора — единственный источник правды для всех вызывающих.
@@ -44,8 +49,8 @@ pub trait MeetingDetector {
 /// Zoom, и логотип у него общий.
 ///
 /// **Это НЕ детект.** Детект на двух системах устроен по-разному и правильно:
-/// на macOS список имён и есть детект (кто держит микрофон, система без лишних
-/// прав не показывает), а на Windows `WindowsDetector` видит настоящие сессии
+/// на macOS это список имён плюс факт чужого захвата микрофона (см.
+/// `MacDetector::mic_in_use_by_others`), а на Windows `WindowsDetector` видит настоящие сессии
 /// захвата WASAPI. Заводить этот список в детекте Windows нельзя — перестанут
 /// ловиться Zoom во вкладке браузера, Webex и всё, чего в списке нет.
 ///

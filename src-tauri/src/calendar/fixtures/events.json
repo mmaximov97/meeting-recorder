@@ -1,0 +1,59 @@
+{
+  "kind": "calendar#events",
+  "items": [
+    {
+      "id": "zoom-conf", "status": "confirmed", "summary": "Дизайн-ревью PlanPan",
+      "start": {"dateTime": "2026-10-11T15:00:00+03:00"}, "end": {"dateTime": "2026-10-11T16:00:00+03:00"},
+      "conferenceData": {"entryPoints": [
+        {"entryPointType": "phone", "uri": "tel:+1-555-0100"},
+        {"entryPointType": "video", "uri": "https://us02web.zoom.us/j/81234567890?pwd=abc"}
+      ]}
+    },
+    {
+      "id": "meet-hangout", "summary": "Синк с Мишей",
+      "start": {"dateTime": "2026-10-11T15:30:00+03:00"}, "end": {"dateTime": "2026-10-11T16:00:00+03:00"},
+      "hangoutLink": "https://meet.google.com/abc-defg-hij",
+      "attendees": [{"email": "me@example.com", "self": true, "responseStatus": "accepted"}]
+    },
+    {
+      "id": "teams-desc", "summary": "Интервью: продуктовый дизайнер",
+      "start": {"dateTime": "2026-10-11T17:00:00+03:00"}, "end": {"dateTime": "2026-10-11T18:00:00+03:00"},
+      "description": "<p>Присоединиться: <a href=\"https://teams.microsoft.com/l/meetup-join/19%3ameeting_X%40thread.v2/0?context=%7b%7d\">ссылка</a></p>"
+    },
+    {
+      "id": "zoom-location", "summary": "",
+      "start": {"dateTime": "2026-10-11T18:00:00Z"}, "end": {"dateTime": "2026-10-11T18:30:00Z"},
+      "location": "Zoom: https://zoom.us/j/999?pwd=x&amp;uname=y, комната 3"
+    },
+    {
+      "id": "webex-then-zoom", "summary": "Партнёры",
+      "start": {"dateTime": "2026-10-11T19:00:00Z"}, "end": {"dateTime": "2026-10-11T20:00:00Z"},
+      "conferenceData": {"entryPoints": [{"entryPointType": "video", "uri": "https://acme.webex.com/meet/x"}]},
+      "description": "Запасная: https://acme.zoom.us/j/555."
+    },
+    {
+      "id": "all-day", "summary": "Отпуск",
+      "start": {"date": "2026-10-11"}, "end": {"date": "2026-10-12"},
+      "hangoutLink": "https://meet.google.com/aaa-bbbb-ccc"
+    },
+    {
+      "id": "declined", "summary": "Не пойду",
+      "start": {"dateTime": "2026-10-11T16:00:00Z"}, "end": {"dateTime": "2026-10-11T17:00:00Z"},
+      "hangoutLink": "https://meet.google.com/ddd-eeee-fff",
+      "attendees": [
+        {"email": "a@example.com", "responseStatus": "accepted"},
+        {"email": "me@example.com", "self": true, "responseStatus": "declined"}
+      ]
+    },
+    {
+      "id": "no-link", "summary": "Обед",
+      "start": {"dateTime": "2026-10-11T13:00:00Z"}, "end": {"dateTime": "2026-10-11T14:00:00Z"},
+      "location": "Кафе"
+    },
+    {
+      "id": "cancelled", "status": "cancelled", "summary": "Отменили",
+      "start": {"dateTime": "2026-10-11T12:00:00Z"}, "end": {"dateTime": "2026-10-11T12:30:00Z"},
+      "hangoutLink": "https://meet.google.com/ggg-hhhh-iii"
+    }
+  ]
+}

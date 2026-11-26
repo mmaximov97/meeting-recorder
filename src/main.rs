@@ -100,14 +100,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // процесса, и одним `DeviceChoice`, который принимает `App::new`, она не
     // описывается.
     //
-    // Отсюда следствие, которого у консоли раньше не было: она поднимает
-    // процесс-тап, а значит при первом запуске покажет системный диалог
-    // разрешения на захват звука и будет держать приватное агрегированное
-    // устройство всё время работы. Это осознанно: бинарь существует ровно
-    // затем, чтобы прогнать детект и запись без webview, а консоль, не умеющая
-    // писать системную дорожку, эту работу не выполняет.
+    // На старте — только проба (`SystemTap::probe`: тап создаётся и сразу
+    // сносится, устройства не открываются), поэтому при первом запуске
+    // консоль покажет системный диалог разрешения на захват звука, но в
+    // простое не держит ни агрегата, ни входа. Сам тап поднимает
+    // `MacAudio::open` (взвод или `s`) и гасит `close`.
     //
-    // Поэтому отказ здесь остаётся отказом (`?` — выход с текстом), тогда как
+    // Отказ пробы здесь остаётся отказом (`?` — выход с текстом), тогда как
     // GUI на том же отказе продолжает работать одним микрофоном
     // (`audio::run` → `MacAudio::new_mic_only`). Расхождение намеренное и
     // держится на разнице назначений: у GUI задача — записать встречу хоть
@@ -117,14 +116,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // релизного GUI нет.
     #[cfg(target_os = "macos")]
     let mut app = {
-        let system_tap = std::rc::Rc::new(std::cell::RefCell::new(
-            meeting_recorder::capture::SystemTap::start()?,
-        ));
+        meeting_recorder::capture::SystemTap::probe()?;
         App::new_with_audio(
             root,
             Box::new(meeting_recorder::app::MacAudio::new(
                 meeting_recorder::capture::DeviceChoice::Default,
-                system_tap,
             )),
         )
     };
@@ -152,6 +148,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(sessions) => {
                     if debug_poll {
                         eprintln!("[poll] мы pid={me} → {sessions:?}");
+                        // Второй сигнал детекта GUI (`audio::Detect::gate`).
+                        // Консоль его только показывает: гейта у неё нет.
+                        #[cfg(target_os = "macos")]
+                        eprintln!(
+                            "[poll] микрофон держит кто-то, кроме нас: {:?}",
+                            det.mic_in_use_by_others(me)
+                        );
                     }
                     let (found, event) = poll_to_event(was_active, sessions, me);
                     active = found;

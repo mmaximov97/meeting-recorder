@@ -8,6 +8,13 @@ const { getVersion } = window.__TAURI__.app;
 
 const $ = (id) => document.getElementById(id);
 
+// Светофор macOS рисует система поверх нашей шапки (titleBarStyle: Overlay в
+// tauri.conf.json) — шапка оставляет под него место только на маке. На
+// Windows полоса заголовка своя, системная.
+if (/Mac/i.test(navigator.platform || navigator.userAgent)) {
+  document.documentElement.classList.add("mac");
+}
+
 // key -> "uploading" | "polling" | "merging". Источник правды здесь, а не в
 // DOM: строка списка пересобирается всякий раз, когда её содержимое меняется
 // (см. отрисовать_список), и читать состояние обратно из узла значило бы
@@ -47,6 +54,13 @@ let модель_скачивается = false;
 // записи, а в общий баннер сверху (см. подтвердить_удаление) — тем же
 // способом, что и отмена расшифровки (`error.cancel`), а не переименование.
 const подтверждение_удаления = new Set();
+
+// key -> true на 2 секунды после «Скопировать путь к расшифровке» из меню
+// «⋯»: подпись строки на это время показывает галочку и «Путь скопирован»
+// вместо обычной длительности/веса — см. скопировать_путь_из_меню и
+// строка_записи.
+const путь_скопирован = new Set();
+const таймеры_пути_скопирован = new Map();
 
 // key -> { дорожка: "mic" | "system", с: миллисекунды }.
 //
@@ -182,6 +196,9 @@ function показать_отложенность(отложено) {
   $("mic-deferred-text").textContent = сохранённый_микрофон
     ? i18n.t("warn.micSwapped", { name: сохранённый_микрофон })
     : i18n.t("warn.micSwappedSystem");
+  // На пульте — та же фраза серой строкой под кнопкой.
+  $("pult-note").textContent = $("mic-deferred-text").textContent;
+  $("pult-note").hidden = !смена_отложена;
 }
 
 // Приходит идентификатор эндпоинта — показывать его пользователю бессмысленно.
@@ -216,7 +233,11 @@ async function показать_предупреждение_устройств�
 // Баннер не гаснет: тап поднимается один раз при старте, поэтому выданное
 // сейчас разрешение доедет только до следующего запуска. Гаснущий баннер здесь
 // соврал бы — исчез, а вторая дорожка так и не появилась бы.
+let нет_системного_звука = false;
+
 function показать_отсутствие_системного_звука(причина) {
+  нет_системного_звука = Boolean(причина);
+  if (typeof отрисовать_пульт === "function") отрисовать_пульт();
   const el = $("nosysaudio");
   слот("s-nosys", причина);
   if (!причина) {
@@ -409,6 +430,16 @@ function эпоха_свежая(эпоха_события, известная_�
   return эпоха_события === undefined || эпоха_события >= известная_эпоха;
 }
 
+// Режим проверки виден прямо в строке микрофона: подпись уходит отдельной
+// строкой, под списком — уровни «Вы» и «Система» и подсказка. Кнопка в покое
+// синяя «Проверить», в проверке — тихая «Остановить проверку».
+function показать_проверку(идёт) {
+  $("mic-set").classList.toggle("checking", идёт);
+  $("mic-test").hidden = !идёт;
+  $("check").className = "btn";
+  $("check").textContent = идёт ? i18n.t("settings.micTestStop") : i18n.t("settings.micTest");
+}
+
 $("check").addEventListener("click", async () => {
   const включаем = !проверка_идёт;
   // Кнопка гаснет и меняет подпись по клику, а не когда придут уровни: между
@@ -430,7 +461,7 @@ $("check").addEventListener("click", async () => {
     );
   } finally {
     $("check").disabled = false;
-    $("check").textContent = проверка_идёт ? i18n.t("settings.micTestStop") : i18n.t("settings.micTest");
+    показать_проверку(проверка_идёт);
   }
 });
 
@@ -510,23 +541,110 @@ function обновить_канал(канал, линейный) {
     маркер.classList.toggle("on", пиковый_db != null);
     if (проценты != null) маркер.style.setProperty("--peak", проценты);
   }
+  return пиковый_db == null ? null : дб_в_проценты(пиковый_db);
 }
+
+// Собеседников не слышно: звук системы не пишется вовсе (баннер
+// «Звук системы не пишется») или дорожка молчит дольше ТИШИНА_МС подряд во
+// время записи. Порог -50 дБ — ниже обычного шума комнаты в звонке.
+const ТИШИНА_МС = 10000;
+const ТИШИНА_ЛИНЕЙНО = 0.003;
+let тишина_с = null;
+
+function отметить_тишину(линейный) {
+  if (предыдущее_состояние !== "recording") {
+    тишина_с = null;
+    return;
+  }
+  if ((линейный ?? 0) >= ТИШИНА_ЛИНЕЙНО) тишина_с = null;
+  else if (тишина_с == null) тишина_с = Date.now();
+  if (показано_молчат !== собеседники_молчат()) отрисовать_пульт();
+}
+
+// Что сейчас нарисовано на пульте — перерисовываем только при смене.
+let показано_молчат = false;
+
+function собеседники_молчат() {
+  if (нет_системного_звука) return true;
+  return тишина_с != null && Date.now() - тишина_с >= ТИШИНА_МС;
+}
+
+// Пульт: название встречи — идущая встреча из календаря, иначе звонилка,
+// иначе «Запись»; справа сервис; ниже «Потом» — следующая встреча сегодня.
+function отрисовать_пульт() {
+  if (предыдущее_состояние !== "recording") return;
+  const сейчас = Date.now();
+  const встречи = календарь?.auth === "connected" ? (календарь.today ?? []) : [];
+  const идёт = встречи.find((в) => в.start_ms <= сейчас + 5 * 60000 && в.end_ms > сейчас);
+  const следующая = встречи.find((в) => в !== идёт && в.start_ms > сейчас);
+  const имя_звонилки = ЗВОНИЛКИ[звонилка_записи] ?? звонилка_записи;
+  $("rec-name").textContent =
+    идёт?.title?.trim() || имя_звонилки || i18n.t("record.manualName");
+  $("rec-src").textContent = идёт ? (СЕРВИСЫ[идёт.source] ?? "") : "";
+  $("pult-then").hidden = !следующая;
+  if (следующая) {
+    $("then-time").textContent = чч_мм(new Date(следующая.start_ms));
+    $("then-title").textContent = следующая.title?.trim() || i18n.t("calendar.untitled");
+  }
+  const молчат = собеседники_молчат();
+  показано_молчат = молчат;
+  $("lb-them").textContent = i18n.t(молчат ? "levels.othersSilent" : "levels.others");
+  $("lb-them").classList.toggle("bad", молчат);
+  $("pult-warn").hidden = !молчат;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Сегментный индикатор уровня (`.leds`)
+//
+// Переиспользуемый: проверка микрофона в настройках, дальше — пульт записи.
+// Разметка — пустой `<span class="leds" data-leds="mic|system" data-n="24">`,
+// сегменты строит `собрать`. Цвет сегмента задан его местом на шкале, как у
+// полоски `.disc`: до 70% (-18 дБ) зелёный, до 90% (-6 дБ) жёлтый, дальше
+// красный. Горят сегменты до текущего уровня и один — на пике.
+const сегменты = {
+  собрать(узел) {
+    if (узел.childElementCount) return;
+    const n = Number(узел.dataset.n) || 24;
+    узел.style.setProperty("--n", n);
+    for (let i = 0; i < n; i++) {
+      const место = ((i + 0.5) / n) * 100;
+      const с = document.createElement("i");
+      с.className = место < 70 ? "g" : место < 90 ? "a" : "r";
+      узел.append(с);
+    }
+  },
+  показать(узел, проценты, пик_проценты) {
+    сегменты.собрать(узел);
+    const всего = узел.children.length;
+    const горит = Math.round((проценты / 100) * всего);
+    const пик = пик_проценты == null ? -1 : Math.ceil((пик_проценты / 100) * всего) - 1;
+    for (let i = 0; i < всего; i++) {
+      узел.children[i].classList.toggle("on", i < горит || i === пик);
+    }
+  },
+};
 
 function применить_уровни(l) {
   for (const канал of ["mic", "system"]) {
-    const уровень = `${уровень_в_проценты(l[канал])}%`;
+    const проценты = уровень_в_проценты(l[канал]);
+    const уровень = `${проценты}%`;
     for (const заливка of document.querySelectorAll(`[data-level="${канал}"]`)) {
       заливка.style.setProperty("--level", уровень);
     }
-    обновить_канал(канал, l[канал]);
+    const пик_проценты = обновить_канал(канал, l[канал]);
+    if (канал === "system") отметить_тишину(l.system);
+    for (const узел of document.querySelectorAll(`[data-leds="${канал}"]`)) {
+      сегменты.показать(узел, проценты, пик_проценты);
+    }
   }
   // Полоски рисуются всегда — устаревшим не бывает само число. Устаревает
   // только сведение «идёт ли проверка»: событие, отправленное ДО того, как
   // аудио-поток обработал нашу последнюю команду, игнорируем именно в этой
   // части (см. `эпоха_свежая` и её докблок).
   if (эпоха_свежая(l.epoch, известная_эпоха)) {
+    const было = проверка_идёт;
     проверка_идёт = Boolean(l.monitoring);
-    $("check").textContent = проверка_идёт ? i18n.t("settings.micTestStop") : i18n.t("settings.micTest");
+    if (было !== проверка_идёт || $("mic-test").hidden === проверка_идёт) показать_проверку(проверка_идёт);
   }
 }
 
@@ -654,9 +772,12 @@ function ярлык_дня(дата) {
   const разница = Math.round((сегодня - день) / 86400000);
   if (разница === 0) return i18n.t("date.today");
   if (разница === 1) return i18n.t("date.yesterday");
-  const опции = { day: "numeric", month: "long" };
+  // «Пт, 9 октября» / «Fri, October 9»: день недели помогает найти встречу
+  // «в прошлую пятницу» быстрее, чем число.
+  const опции = { weekday: "short", day: "numeric", month: "long" };
   if (день.getFullYear() !== сегодня.getFullYear()) опции.year = "numeric";
-  return new Intl.DateTimeFormat(i18n.lang, опции).format(день);
+  const текст = new Intl.DateTimeFormat(i18n.lang, опции).format(день);
+  return текст.charAt(0).toUpperCase() + текст.slice(1);
 }
 
 // timeStyle: "short" — это 24-часовой формат для русского языка и AM/PM для
@@ -704,19 +825,29 @@ const ЛОГОТИПЫ = {
 };
 
 const ЗНАЧКИ = {
-  микрофон: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>`,
-  многоточие: `<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></svg>`,
+  микрофон: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><rect x="9" y="2" width="6" height="13" rx="3" /></svg>`,
+  многоточие: `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /><circle cx="5" cy="12" r="1" /></svg>`,
   // Перечёркнутый микрофон — беда самой записи: что-то не записалось.
-  микрофон_выкл: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" /><path d="M16.95 16.95A7 7 0 0 1 5 12v-2" /><path d="M18.89 13.23A7 7 0 0 0 19 12v-2" /><path d="m2 2 20 20" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12" /></svg>`,
+  микрофон_выкл: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3" /><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" /><path d="M16.95 16.95A7 7 0 0 1 5 12v-2" /><path d="M18.89 13.23A7 7 0 0 0 19 12v-2" /><path d="m2 2 20 20" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12" /></svg>`,
   // Облако с восклицанием — запись цела, но не доехала до сервера расшифровки.
-  облако_ошибка: `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12v4" /><path d="M12 20h.01" /><path d="M8.128 16.949A7 7 0 1 1 15.71 8h1.79a1 1 0 0 1 0 9h-1.642" /></svg>`,
-  карандаш: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg>`,
-  документ: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></svg>`,
-  заново: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></svg>`,
-  папка: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>`,
-  крестик: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>`,
-  корзина: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>`,
+  облако_ошибка: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12v4" /><path d="M12 20h.01" /><path d="M8.128 16.949A7 7 0 1 1 15.71 8h1.79a1 1 0 0 1 0 9h-1.642" /></svg>`,
+  карандаш: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></svg>`,
+  документ: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></svg>`,
+  заново: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></svg>`,
+  папка: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg>`,
+  крестик: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg>`,
+  корзина: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><line x1="10" y1="11" x2="10" y2="17" /><line x1="14" y1="11" x2="14" y2="17" /></svg>`,
+  // Путь к расшифровке — для «Скопировать путь к расшифровке» в меню «⋯».
+  копия: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>`,
+  // Не найдена/пуста — панель расшифровки, состояния «ошибка» и «пусто».
+  файл_ошибка: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="m14.5 12.5-5 5" /><path d="m9.5 12.5 5 5" /></svg>`,
+  файл_пусто: `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /></svg>`,
 };
+
+// Галочка «скопировано»/«путь скопирован» — размер подставляется под то,
+// где она встаёт: 12px у подписи строки, 13px у кнопок панели.
+const ГАЛОЧКА = (размер) =>
+  `<svg width="${размер}" height="${размер}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>`;
 
 // Единственное место, где в разметку попадает innerHTML, и попадают в него
 // только константы выше — ни одна строка от пользователя (имя записи, имя
@@ -769,7 +900,11 @@ document.addEventListener("click", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") закрыть_меню(true);
+  if (e.key !== "Escape") return;
+  // Меню — первый ответ на Escape: оно поверх панели и обычно то, что открыто
+  // последним. Если меню нет, а панель открыта — Escape закрывает её.
+  if (открытое_меню) закрыть_меню(true);
+  else if (панель_ключ != null) закрыть_панель();
 });
 
 function пункт_меню(разметка, подпись, действие) {
@@ -782,8 +917,9 @@ function пункт_меню(разметка, подпись, действие)
   return b;
 }
 
-// Состав меню зависит от состояния записи: первым пунктом стоит то, зачем его
-// обычно открывают, а всё, что отменяет или переделывает уже сделанное, уходит
+// Состав меню зависит от состояния записи. У готовой расшифровки первые два
+// пункта — то, зачем меню открывают чаще всего: посмотреть текст и взять путь
+// для чата/агента. Всё, что отменяет или переделывает уже сделанное, уходит
 // под разделитель — даже если это самый вероятный клик.
 function собрать_меню(запись, узел_имени) {
   const меню = document.createElement("div");
@@ -793,107 +929,130 @@ function собрать_меню(запись, узел_имени) {
   const идёт = стадия_идёт(стадия) || стадия?.startsWith("queued:");
   const пара = запись.mic && запись.system;
 
-  // Первым пунктом — то, зачем меню обычно открывают у расшифрованной записи.
-  if (запись.transcript) {
+  const сеп = () => Object.assign(document.createElement("div"), { className: "sep" });
+
+  // Идёт расшифровка — короткое меню: отменить или сходить к файлам, ничего
+  // другого не сделать, пока запись занята (см. симметричный запрет
+  // переименования и «Расшифровать заново» ниже).
+  if (идёт) {
     меню.append(
-      пункт_меню(ЗНАЧКИ.документ, i18n.t("menu.openTranscript"), () =>
+      пункт_меню(ЗНАЧКИ.крестик, i18n.t("menu.cancel"), () =>
+        invoke("cancel_transcription", { folder: запись.folder ?? null, base: запись.name }).catch(
+          (e) => показать_ошибку(i18n.t("error.cancel"), e),
+        ),
+      ),
+      пункт_меню(ЗНАЧКИ.папка, i18n.t("menu.showFiles"), () =>
         invoke("open_recording_folder", {
           folder: запись.folder ?? null,
           base: запись.name,
-          transcript: true,
-        }).catch((e) =>
-          показать_ошибку(i18n.t("error.openTranscript"), e),
-        ),
+          transcript: false,
+        }).catch((e) => показать_ошибку(i18n.t("error.openFolder"), e)),
       ),
+      сеп(),
     );
+    const подвал = document.createElement("small");
+    подвал.className = "plain";
+    // Говорим, почему пункта «Расшифровать» нет: меню без объяснения читается
+    // как поломка, а не как «нельзя».
+    подвал.textContent = i18n.t("transcribe.running");
+    меню.append(подвал);
+    return меню;
   }
 
-  // Переименование запрещено, пока запись стоит в очереди или расшифровывается:
-  // `QueueItem` держит старый `base`, `run_transcription` ищет файлы по нему,
-  // и переименование на ходу увело бы их из-под уже идущей расшифровки —
-  // `transcribe-error` пришёл бы с ключом, которого нет ни у одной строки, а
-  // «Отменить расшифровку» стало бы недостижимо. Симметрично тому, как уже
-  // сделано для «Расшифровать встречу» чуть ниже.
-  if (!идёт) {
+  if (запись.transcript) {
     меню.append(
+      пункт_меню(ЗНАЧКИ.документ, i18n.t("menu.openTranscript"), () =>
+        открыть_панель(запись, true),
+      ),
+      пункт_меню(ЗНАЧКИ.копия, i18n.t("menu.copyTranscriptPath"), () =>
+        скопировать_путь_из_меню(запись),
+      ),
+      сеп(),
       пункт_меню(ЗНАЧКИ.карандаш, i18n.t("menu.rename"), () =>
         начать_переименование(запись, узел_имени),
       ),
     );
-  }
-
-  // Расшифровка возможна только у полной пары дорожек: одну без второй шлюзу
-  // отдавать нечего склеивать.
-  if (пара && !запись.transcript && !идёт) {
+    // «Расшифровать заново» — только у полной пары дорожек (одну без второй
+    // шлюзу отдавать нечего склеивать) и только когда расшифровка неполная:
+    // у полной пункт лишний — переделывать уже нечего.
+    if (пара && запись.transcript_partial) {
+      меню.append(пункт_меню(ЗНАЧКИ.заново, i18n.t("menu.again"), () => начать_транскрипцию(запись)));
+    }
     меню.append(
-      пункт_меню(ЗНАЧКИ.документ, i18n.t("menu.transcribe"), () => начать_транскрипцию(запись)),
-    );
-  }
-
-  const низ = [];
-  if (идёт) {
-    низ.push(
-      пункт_меню(ЗНАЧКИ.крестик, i18n.t("menu.cancel"), () =>
-        invoke("cancel_transcription", {
+      пункт_меню(ЗНАЧКИ.папка, i18n.t("menu.showFiles"), () =>
+        invoke("open_recording_folder", {
           folder: запись.folder ?? null,
           base: запись.name,
-        }).catch((e) =>
-          показать_ошибку(i18n.t("error.cancel"), e),
-        ),
+          transcript: false,
+        }).catch((e) => показать_ошибку(i18n.t("error.openFolder"), e)),
+      ),
+    );
+  } else {
+    // Расшифровка возможна только у полной пары дорожек.
+    if (пара) {
+      меню.append(
+        пункт_меню(ЗНАЧКИ.документ, i18n.t("menu.transcribe"), () => начать_транскрипцию(запись)),
+      );
+    }
+    меню.append(
+      пункт_меню(ЗНАЧКИ.карандаш, i18n.t("menu.rename"), () =>
+        начать_переименование(запись, узел_имени),
+      ),
+      сеп(),
+      пункт_меню(ЗНАЧКИ.папка, i18n.t("menu.showFiles"), () =>
+        invoke("open_recording_folder", {
+          folder: запись.folder ?? null,
+          base: запись.name,
+          transcript: false,
+        }).catch((e) => показать_ошибку(i18n.t("error.openFolder"), e)),
       ),
     );
   }
-  if (пара && запись.transcript && !идёт) {
-    низ.push(пункт_меню(ЗНАЧКИ.заново, i18n.t("menu.again"), () => начать_транскрипцию(запись)));
-  }
-  // Папка самой записи, а не общий корень: пункт открыт из меню конкретной
-  // строки, и приводить в каталог с полусотней чужих файлов — не то, о чём
-  // просили.
-  низ.push(
-    пункт_меню(ЗНАЧКИ.папка, i18n.t("menu.showFiles"), () =>
-      invoke("open_recording_folder", {
-        folder: запись.folder ?? null,
-        base: запись.name,
-        transcript: false,
-      }).catch((e) =>
-        показать_ошибку(i18n.t("error.openFolder"), e),
-      ),
-    ),
-  );
 
-  const разделитель = document.createElement("div");
-  разделитель.className = "sep";
-  меню.append(разделитель, ...низ);
-
-  // Удалить нельзя, пока запись пишется прямо сейчас или расшифровывается —
-  // тот же список исключений, что бэкенд проверяет авторитетно сам
-  // (`recording_busy` в `main.rs`, отказ там — окончательный ответ). Здесь
-  // это только чтобы не предлагать действие, которое сервер и так отклонит.
-  // Последним пунктом и за своим разделителем — как и остальное, что
-  // отменяет уже сделанное.
-  const занята = идёт || запись.recording_now;
-  if (!занята) {
-    const разделитель_удаления = document.createElement("div");
-    разделитель_удаления.className = "sep";
+  // Удалить нельзя, пока запись пишется прямо сейчас — тот же список
+  // исключений, что бэкенд проверяет авторитетно сам (`recording_busy` в
+  // `main.rs`, отказ там — окончательный ответ). Здесь это только чтобы не
+  // предлагать действие, которое сервер и так отклонит. Последним пунктом и
+  // за своим разделителем — как и остальное, что отменяет уже сделанное.
+  if (!запись.recording_now) {
     меню.append(
-      разделитель_удаления,
+      сеп(),
       пункт_меню(ЗНАЧКИ.корзина, i18n.t("menu.delete"), () => запросить_удаление(запись)),
     );
   }
 
   const подвал = document.createElement("small");
-  if (идёт) {
-    подвал.className = "plain";
-    // Говорим, почему пункта «Расшифровать» нет: меню без объяснения читается
-    // как поломка, а не как «нельзя».
-    подвал.textContent = i18n.t("transcribe.running");
-  } else {
-    const аномалия = папка_аномальна(запись);
-    подвал.textContent = аномалия ? `${аномалия} / ${запись.name}` : запись.name;
-    подвал.title = подвал.textContent;
-  }
+  const аномалия = папка_аномальна(запись);
+  подвал.textContent = аномалия ? `${аномалия} / ${запись.name}` : запись.name;
+  подвал.title = подвал.textContent;
   меню.append(подвал);
   return меню;
+}
+
+// «Скопировать путь к расшифровке» из меню: путь спрашиваем у бэкенда (файл
+// внутри `<base>.transcript` может называться иначе, если запись успели
+// переименовать — см. `find_transcript_md` в main.rs), копируем, и результат
+// показываем в подписи ЭТОЙ строки — тем же приёмом, что и «Путь скопирован»/
+// «Не удалось скопировать» у других мгновенных действий в списке.
+async function скопировать_путь_из_меню(запись) {
+  const ключ = ключ_транскрипции(запись.folder, запись.name);
+  try {
+    const путь = await invoke("transcript_path", { folder: запись.folder ?? null, base: запись.name });
+    await navigator.clipboard.writeText(путь);
+  } catch {
+    показать_ошибку(i18n.t("error.openTranscript"), "");
+    return;
+  }
+  путь_скопирован.add(ключ);
+  обновить_список();
+  clearTimeout(таймеры_пути_скопирован.get(ключ));
+  таймеры_пути_скопирован.set(
+    ключ,
+    setTimeout(() => {
+      путь_скопирован.delete(ключ);
+      обновить_список();
+    }, 2000),
+  );
 }
 
 function открыть_меню(запись, строка, кнопка, узел_имени) {
@@ -915,6 +1074,582 @@ function открыть_меню(запись, строка, кнопка, уз�
   узел.querySelector("button")?.focus();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Панель расшифровки
+//
+// Живёт справа от списка (ui/index.html, #tr-panel) — окно РАСТЁТ вбок, а не
+// список сжимается внутри прежней ширины: 460px остаются ровно тем экраном,
+// что был до панели, до последнего пикселя. Открытая запись помечена в
+// списке классом `.sel` (см. подпись_строки/строка_записи выше) — сигнатура
+// строки знает про `панель_ключ`, поэтому старую выбранную строку и новую
+// перерисовывает сам обновить_список(), без ручной правки classList отсюда.
+//
+// Сам сдвиг окна делает Rust (`animate_window_width` в main.rs, главным
+// образом ради родной анимации `NSWindow` на macOS — см. её докблок): отсюда
+// уходит уже готовый кадр (ширина и, если нужно, X), а не отдельные команды
+// setSize/setPosition, — поэтому JS-права `core:window:allow-set-size` и
+// `allow-set-position` панели больше не нужны (см. capabilities/default.json).
+const ШИРИНА_ОКНА_С_ПАНЕЛЬЮ = 1000;
+
+let панель_ключ = null; // ключ_транскрипции открытой записи, либо null
+let панель_запись = null; // сама запись — нужна перечитать текст и путь
+let панель_текст = ""; // сырой .md — для «Скопировать текст»
+let панель_путь = ""; // абсолютный путь — для «Скопировать путь»
+let панель_поколение = 0; // против гонок при быстром переключении строк
+let ширина_без_панели = null; // ширина окна ДО открытия — восстанавливается при закрытии
+let x_без_панели = null; // X окна ДО открытия — восстанавливается при закрытии
+
+function идёт_ли_расшифровка(ключ) {
+  const стадия = транскрипции.get(ключ);
+  return стадия_идёт(стадия) || Boolean(стадия?.startsWith("queued:"));
+}
+
+// Человек попросил систему поменьше двигать — тогда даже на macOS кадр
+// переставляется одним прыжком (см. animate_window_width в main.rs: это
+// решает параметр `animate`, а не отдельная ветка кода), а проступание
+// панели ужимается в 0 CSS-правилом на .pane-tr в reduced-motion блоке.
+function снижено_движение() {
+  try {
+    return matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
+// `getCurrentWindow()` возвращает объект и в стенде состояний (docs/preview),
+// но там это заглушка без `innerSize`/`outerPosition`/`currentMonitor` и без
+// настоящего окна ОС — раздвигать нечего. Любая неудача здесь молча
+// пропускается: список и панель обязаны работать и без окна Tauri.
+function получить_окно() {
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
+}
+
+// Считает целевой кадр (ширину и X — высота и Y никогда не меняются, см.
+// докблок animate_window_width в main.rs) и отдаёт его Rust-команде, которая
+// уже сама решает, анимировать её или переставить мгновенно. Если раздвинутое
+// окно вышло бы за правый край своего монитора — сдвигает его влево ровно
+// настолько, чтобы поместиться, а не обрезается краем экрана. Ширина и X «до»
+// запоминаются один раз при открытии и отдаются обратно при закрытии — так
+// повторное открытие/закрытие не съедает и не прибавляет пиксели, даже если
+// человек успел сам подвинуть окно, пока панель открыта.
+async function ширина_окна(открыть, анимировать) {
+  const окно = получить_окно();
+  if (!окно) return;
+  try {
+    const коэфф = await окно.scaleFactor();
+    if (открыть) {
+      const позиция = (await окно.outerPosition()).toLogical(коэфф);
+      if (ширина_без_панели == null) {
+        ширина_без_панели = (await окно.innerSize()).toLogical(коэфф).width;
+        x_без_панели = позиция.x;
+      }
+      let x = позиция.x;
+      try {
+        const монитор = await окно.currentMonitor();
+        if (монитор) {
+          const мп = монитор.position.toLogical(коэфф);
+          const мр = монитор.size.toLogical(коэфф);
+          const край = мп.x + мр.width;
+          if (x + ШИРИНА_ОКНА_С_ПАНЕЛЬЮ > край) {
+            x = Math.max(мп.x, край - ШИРИНА_ОКНА_С_ПАНЕЛЬЮ);
+          }
+        }
+      } catch {
+        // Монитор не определился — раздвигаем на месте, без сдвига по X.
+      }
+      await invoke("animate_window_width", { width: ШИРИНА_ОКНА_С_ПАНЕЛЬЮ, x, animate: анимировать });
+    } else {
+      const ширина = ширина_без_панели ?? (await окно.innerSize()).toLogical(коэфф).width;
+      const x = x_без_панели ?? (await окно.outerPosition()).toLogical(коэфф).x;
+      ширина_без_панели = null;
+      x_без_панели = null;
+      await invoke("animate_window_width", { width: ширина, x, animate: анимировать });
+    }
+  } catch {
+    // Нет настоящего окна (стенд состояний) или платформа не поддержала —
+    // список и панель продолжают работать в своих текущих размерах.
+  }
+}
+
+// Метка сегмента из markdown → «Ты»/«Собеседник(и)». Числовой хвост
+// («Владелец (2)», см. `segment_label` в transcribe.rs — он появляется,
+// только когда на одной дорожке различимо больше одного голоса) снимается:
+// панель не различает голоса поимённо, только «я» и «остальные». Английские
+// варианты названий дорожки распознаются на будущее — сегодня `transcribe.rs`
+// всегда пишет русские «Владелец»/«Собеседники» независимо от языка
+// интерфейса, но формат файла не обещание держаться только за русский.
+function роль_говорящего(метка) {
+  const база = метка.replace(/\s*\(\d+\)\s*$/, "").trim();
+  if (база === "Владелец" || база === "Owner") return "you";
+  if (база === "Собеседники" || база === "Others") return "them";
+  return null;
+}
+
+function метка_говорящего(метка) {
+  const роль = роль_говорящего(метка);
+  if (роль === "you") return i18n.t("transcript.you");
+  if (роль === "them") return i18n.t("transcript.otherSide");
+  return метка;
+}
+
+// `**[MM:SS]** _Метка_ текст` — ровно формат merge_markdown (transcribe.rs
+// ~548-566). Блоки разделены пустой строкой — как в исходном .join("\n\n").
+const СТРОКА_РАСШИФРОВКИ = /^\*\*\[(\d{1,4}:\d{2})\]\*\*\s+_([^_]+)_\s*([\s\S]*)$/;
+
+// Возвращает список блоков: {ts, who, text} для разобранной реплики,
+// {text} — для всего остального (предупреждение о неудавшейся дорожке, хвост
+// без привязки ко времени у нераспознанной диаризации). Форматы, которых
+// парсер не узнал, не отбрасываются — текст всё равно попадает на экран.
+function разобрать_расшифровку(текст) {
+  const блоки = [];
+  for (const часть of String(текст).split(/\n{2,}/)) {
+    const кусок = часть.trim();
+    if (!кусок) continue;
+    const совпадение = СТРОКА_РАСШИФРОВКИ.exec(кусок);
+    if (совпадение) {
+      const [, ts, метка, текст_реплики] = совпадение;
+      блоки.push({ ts, who: метка_говорящего(метка), role: роль_говорящего(метка), text: текст_реплики });
+    } else {
+      блоки.push({ text: кусок });
+    }
+  }
+  return блоки;
+}
+
+function баннер_расшифровка_заново() {
+  const баннер = document.createElement("div");
+  баннер.className = "plate ask";
+  баннер.setAttribute("role", "status");
+  const текст = document.createElement("span");
+  текст.textContent = i18n.t("transcript.retranscribing");
+  const полоска = document.createElement("div");
+  полоска.className = "prog";
+  полоска.append(document.createElement("i"));
+  текст.append(полоска);
+  баннер.append(текст);
+  return баннер;
+}
+
+function скелетон_панели() {
+  // Каждый элемент формы — одна реплика-скелетон: короткая шапка (говорящий
+  // + время) и от одной до трёх строк текста под ней, той же плоской
+  // раскладкой, что и настоящие реплики (см. отрисовать_расшифровку).
+  const ФОРМЫ = [[92, 64], [40], [96, 88, 52], [84, 30], [94, 90, 76, 40], [58]];
+  const frag = document.createDocumentFragment();
+  for (const ширины of ФОРМЫ) {
+    const реплика = document.createElement("div");
+    реплика.className = "sk-rep";
+    реплика.setAttribute("aria-hidden", "true");
+    реплика.append(Object.assign(document.createElement("i"), { className: "sk-head" }));
+    const строки = document.createElement("div");
+    строки.className = "sk-lines";
+    for (const w of ширины) {
+      const полоса = document.createElement("i");
+      полоса.style.width = `${w}%`;
+      строки.append(полоса);
+    }
+    реплика.append(строки);
+    frag.append(реплика);
+  }
+  return frag;
+}
+
+// Общий вид «ошибки»/«пусто» — приём `.empty` из списка (см. index.html):
+// значок, заголовок, текст и, у ошибки, кнопка «Показать файлы».
+// Пусто, ничего не нашлось, ошибка — по центру панели: заголовок, текст и
+// (по случаю) одна тихая кнопка.
+function состояние_панели(заголовок, текст, кнопка) {
+  const блок = document.createElement("div");
+  блок.className = "tr-state";
+  const b = document.createElement("strong");
+  b.textContent = заголовок;
+  const s = document.createElement("span");
+  s.textContent = текст;
+  блок.append(b, s);
+  if (кнопка) {
+    const кн = document.createElement("button");
+    кн.type = "button";
+    кн.className = "btn";
+    кн.textContent = кнопка.текст;
+    кн.addEventListener("click", кнопка.on);
+    блок.append(кн);
+  }
+  return блок;
+}
+
+function показать_файлы_панели() {
+  if (!панель_запись) return;
+  invoke("open_recording_folder", {
+    folder: панель_запись.folder ?? null,
+    base: панель_запись.name,
+    transcript: false,
+  }).catch((e) => показать_ошибку(i18n.t("error.openFolder"), e));
+}
+
+// Текст реплики с подсветкой найденного: узлы собираются по кускам, а не
+// через innerHTML — текст расшифровки чужой.
+function текст_с_подсветкой(узел, текст, запрос) {
+  if (!запрос) {
+    узел.textContent = текст;
+    return false;
+  }
+  const нижний = текст.toLowerCase();
+  let с = 0;
+  let нашлось = false;
+  for (;;) {
+    const i = нижний.indexOf(запрос, с);
+    if (i < 0) break;
+    нашлось = true;
+    if (i > с) узел.append(document.createTextNode(текст.slice(с, i)));
+    const m = document.createElement("mark");
+    m.textContent = текст.slice(i, i + запрос.length);
+    узел.append(m);
+    с = i + запрос.length;
+  }
+  узел.append(document.createTextNode(текст.slice(с)));
+  return нашлось;
+}
+
+function отрисовать_расшифровку(текст, прокрутить_к_найденному) {
+  const тело = $("tr-body");
+  тело.textContent = "";
+  тело.setAttribute("aria-busy", "false");
+  if (панель_ключ != null && идёт_ли_расшифровка(панель_ключ)) {
+    тело.append(баннер_расшифровка_заново());
+  }
+  const запрос = панель_запрос.trim().toLowerCase();
+  let найдено = 0;
+  let первая = null;
+  for (const блок of разобрать_расшифровку(текст)) {
+    const реплика = document.createElement("div");
+    реплика.className = "rep" + (блок.role ? ` ${блок.role}` : "");
+    if (блок.ts != null) {
+      const говорящий = document.createElement("span");
+      говорящий.className = "who";
+      говорящий.textContent = блок.who;
+      const время = document.createElement("span");
+      время.className = "ts";
+      время.textContent = блок.ts;
+      реплика.append(говорящий, время);
+    }
+    const абзац = document.createElement("p");
+    абзац.className = блок.ts != null ? "rep-tx" : "rep-tx plain";
+    if (текст_с_подсветкой(абзац, блок.text, запрос)) {
+      найдено++;
+      реплика.classList.add("hit");
+      первая ??= реплика;
+    }
+    реплика.append(абзац);
+    тело.append(реплика);
+  }
+  $("tr-cnt").textContent = запрос ? i18n.t("transcript.found", { n: найдено }) : "";
+  if (запрос && !найдено) {
+    тело.textContent = "";
+    тело.append(
+      состояние_панели(
+        i18n.t("transcript.noHitsTitle"),
+        i18n.t("transcript.noHitsText", { q: панель_запрос.trim() }),
+      ),
+    );
+  } else if (первая && прокрутить_к_найденному) {
+    первая.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function показать_панель_загрузку() {
+  const тело = $("tr-body");
+  тело.textContent = "";
+  тело.setAttribute("aria-busy", "true");
+  тело.append(скелетон_панели());
+  $("tr-cnt").textContent = "";
+  $("tr-copy-path").disabled = true;
+  $("tr-copy-text").disabled = true;
+}
+
+function показать_панель_ошибку() {
+  const тело = $("tr-body");
+  тело.textContent = "";
+  тело.setAttribute("aria-busy", "false");
+  тело.append(
+    состояние_панели(i18n.t("transcript.errorTitle"), i18n.t("transcript.errorText"), {
+      текст: i18n.t("menu.showFiles"),
+      on: показать_файлы_панели,
+    }),
+  );
+  $("tr-cnt").textContent = "";
+  $("tr-copy-path").disabled = true;
+  $("tr-copy-text").disabled = true;
+}
+
+function показать_панель_пусто() {
+  const тело = $("tr-body");
+  тело.textContent = "";
+  тело.setAttribute("aria-busy", "false");
+  const запись = панель_запись;
+  const можно_заново = запись && запись.mic && запись.system;
+  тело.append(
+    состояние_панели(
+      i18n.t("transcript.emptyTitle"),
+      i18n.t("transcript.emptyText"),
+      можно_заново ? { текст: i18n.t("menu.again"), on: () => начать_транскрипцию(запись) } : null,
+    ),
+  );
+  $("tr-cnt").textContent = "";
+  $("tr-copy-text").disabled = true;
+  // Путь у пустого файла всё равно есть на диске — копировать его можно.
+  $("tr-copy-path").disabled = false;
+}
+
+// Показывает то, что уже лежит в панель_текст, — без похода к диску.
+// Отдельно от загрузить_панель: событие transcribe-done должно перечитать
+// файл заново, а вот переоткрытие уже открытой строки — нет.
+function показать_панель_состояние() {
+  const есть_текст = Boolean(панель_текст && панель_текст.trim());
+  if (!есть_текст) {
+    показать_панель_пусто();
+    return;
+  }
+  отрисовать_расшифровку(панель_текст);
+  $("tr-copy-path").disabled = false;
+  $("tr-copy-text").disabled = false;
+}
+
+async function загрузить_панель(запись, ключ) {
+  const моё = ++панель_поколение;
+  показать_панель_загрузку();
+  let текст;
+  try {
+    текст = await invoke("read_transcript", { folder: запись.folder ?? null, base: запись.name });
+  } catch {
+    if (моё !== панель_поколение || панель_ключ !== ключ) return;
+    показать_панель_ошибку();
+    return;
+  }
+  if (моё !== панель_поколение || панель_ключ !== ключ) return;
+  панель_текст = текст;
+  try {
+    панель_путь = await invoke("transcript_path", { folder: запись.folder ?? null, base: запись.name });
+  } catch {
+    панель_путь = "";
+  }
+  if (моё !== панель_поколение || панель_ключ !== ключ) return;
+  показать_панель_состояние();
+}
+
+// Мета: «Сегодня, 12:00 · 42 мин». Сервис известен, только пока запись не
+// переименована — и тогда он уже стоит в заголовке, второй раз не пишем.
+function мета_панели(запись) {
+  const начало = момент_записи(запись.name);
+  const когда = начало ? `${ярлык_дня(начало)}, ${чч_мм(начало)}` : "";
+  const вычищена = !запись.mic && !запись.system;
+  return [когда, вычищена ? "" : длительность(запись.duration_sec)].filter(Boolean).join(" · ");
+}
+
+function заполнить_заголовок_панели(запись) {
+  const ист = источник(запись);
+  $("tr-title").textContent = ист.имя;
+  $("tr-title").title = ист.имя;
+  $("tr-meta").textContent = мета_панели(запись);
+}
+
+const копия_таймеры = new Map();
+
+function показать_метку_копирования(id, индекс) {
+  for (const [i, узел] of $(id).querySelectorAll(".stack > span").entries()) {
+    узел.classList.toggle("on", i === индекс);
+  }
+}
+
+function сбросить_кнопки_копирования() {
+  clearTimeout(копия_таймеры.get("tr-copy-text"));
+  показать_метку_копирования("tr-copy-text", 0);
+  clearTimeout(копия_таймеры.get("tr-path"));
+}
+
+async function копировать_из_панели(id, текст) {
+  if (!текст) return;
+  try {
+    await navigator.clipboard.writeText(текст);
+  } catch {
+    return;
+  }
+  показать_метку_копирования(id, 1);
+  clearTimeout(копия_таймеры.get(id));
+  копия_таймеры.set(id, setTimeout(() => показать_метку_копирования(id, 0), 2000));
+}
+
+// «Скопировать путь» живёт в «⋯» панели: отклик — «✓ Путь скопирован» на
+// месте меты на две секунды, как у строки списка.
+async function скопировать_путь_панели() {
+  закрыть_меню_панели(true);
+  if (!панель_путь || !панель_запись) return;
+  try {
+    await navigator.clipboard.writeText(панель_путь);
+  } catch {
+    return;
+  }
+  const мета = $("tr-meta");
+  мета.textContent = "";
+  const итог = document.createElement("span");
+  итог.className = "ok-msg";
+  итог.innerHTML = ГАЛОЧКА(16);
+  итог.append(document.createTextNode(i18n.t("menu.pathCopied")));
+  мета.append(итог);
+  const запись = панель_запись;
+  clearTimeout(копия_таймеры.get("tr-path"));
+  копия_таймеры.set(
+    "tr-path",
+    setTimeout(() => {
+      if (панель_запись === запись) $("tr-meta").textContent = мета_панели(запись);
+    }, 2000),
+  );
+}
+
+function открыть_меню_панели() {
+  const меню = $("tr-menu");
+  меню.hidden = false;
+  меню.classList.remove("закрывается");
+  $("tr-more").setAttribute("aria-expanded", "true");
+  $("tr-copy-path").focus();
+}
+
+function закрыть_меню_панели(вернуть_фокус) {
+  const меню = $("tr-menu");
+  if (меню.hidden) return;
+  меню.hidden = true;
+  $("tr-more").setAttribute("aria-expanded", "false");
+  if (вернуть_фокус) $("tr-more").focus();
+}
+
+$("tr-more").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if ($("tr-menu").hidden) открыть_меню_панели();
+  else закрыть_меню_панели(true);
+});
+document.addEventListener("click", (e) => {
+  if (!$("tr-menu").hidden && !$("tr-menu").contains(e.target)) закрыть_меню_панели(false);
+});
+$("tr-menu").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") закрыть_меню_панели(true);
+});
+$("tr-copy-path").addEventListener("click", скопировать_путь_панели);
+$("tr-show-files").addEventListener("click", () => {
+  закрыть_меню_панели(true);
+  показать_файлы_панели();
+});
+$("tr-copy-text").addEventListener("click", () => копировать_из_панели("tr-copy-text", панель_текст));
+$("tr-close").addEventListener("click", () => закрыть_панель());
+
+// Поиск по расшифровке: подсветка <mark>, найденные реплики тонируются,
+// «найдено: N» в поле. Esc очищает поле.
+let панель_запрос = "";
+$("tr-q").addEventListener("input", (e) => {
+  панель_запрос = e.target.value;
+  if (панель_текст && панель_текст.trim()) отрисовать_расшифровку(панель_текст, true);
+});
+$("tr-q").addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && e.target.value) {
+    e.stopPropagation();
+    e.target.value = "";
+    панель_запрос = "";
+    if (панель_текст && панель_текст.trim()) отрисовать_расшифровку(панель_текст);
+  }
+});
+
+// Открывает панель у `запись` (обязана иметь `transcript: true`). Повторный
+// вызов на уже открытой строке (тот же ключ) просто переставляет фокус — ни
+// новой загрузки, ни повторного раздвижения окна не будет: окно уже той
+// ширины, панель уже видна. Клик по ДРУГОЙ строке со своей расшифровкой
+// перечитывает файл заново и сбрасывает прокрутку и кнопки копирования, но
+// окно не трогает — оно уже раздвинуто.
+async function открыть_панель(запись, фокус_заголовка) {
+  if (!запись.transcript) return;
+  const ключ = ключ_транскрипции(запись.folder, запись.name);
+  const переключение = панель_ключ !== ключ;
+  панель_ключ = ключ;
+  панель_запись = запись;
+  заполнить_заголовок_панели(запись);
+  const панель = $("tr-panel");
+  const первое_открытие = панель.hidden;
+  панель.hidden = false;
+  if (первое_открытие) {
+    // Класс — со следующего кадра, а не сразу: иначе браузер схлопнет снятие
+    // `hidden` и появление `.show` в один тик, и CSS-перехода не будет вовсе
+    // (тот же приём, что у каскада новых строк списка, см. въехать()).
+    // Раздвижение окна не ждём — оно идёт параллельно с проступанием
+    // содержимого, а не до или после него: два разных механизма анимации.
+    requestAnimationFrame(() => панель.classList.add("show"));
+    ширина_окна(true, !снижено_движение());
+  }
+  обновить_список();
+  if (переключение) {
+    сбросить_кнопки_копирования();
+    закрыть_меню_панели(false);
+    панель_запрос = "";
+    $("tr-q").value = "";
+    $("tr-body").scrollTop = 0;
+    await загрузить_панель(запись, ключ);
+  }
+  if (фокус_заголовка) $("tr-title").focus({ preventScroll: true });
+}
+
+async function закрыть_панель() {
+  if (панель_ключ == null) return;
+  панель_ключ = null;
+  панель_запись = null;
+  панель_текст = "";
+  панель_путь = "";
+  обновить_список();
+  const панель = $("tr-panel");
+  const анимировать = !снижено_движение();
+  панель.classList.remove("show");
+  // Сначала гаснет содержимое, потом схлопывается окно: наоборот выглядело
+  // бы так, будто список наезжает на ещё видимый текст панели.
+  if (анимировать) {
+    await new Promise((r) => setTimeout(r, 180));
+  }
+  панель.hidden = true;
+  await ширина_окна(false, анимировать);
+}
+
+// Перерисовывает уже загруженный текст — только чтобы показать/убрать баннер
+// «Расшифровываю заново». Ничего не читает с диска: пока расшифровка не
+// закончилась, в панели по-прежнему прошлая версия текста, и это ожидаемо.
+function обновить_баннер_панели(ключ) {
+  if (панель_ключ !== ключ) return;
+  if (!(панель_текст && панель_текст.trim())) return;
+  отрисовать_расшифровку(панель_текст);
+}
+
+// transcribe-done той же записи, что открыта в панели, — новый текст должен
+// появиться сам. `запись` тут не нужна целиком: read_transcript/transcript_path
+// принимают только folder+base, а заголовок панели (имя, дата) от
+// расшифровки не меняется.
+async function перезагрузить_панель_после_расшифровки(folder, base, ключ) {
+  if (панель_ключ !== ключ) return;
+  let текст;
+  try {
+    текст = await invoke("read_transcript", { folder: folder ?? null, base });
+  } catch {
+    // Редкий сбой чтения сразу после записи файла — прошлая версия остаётся
+    // на экране, банер снимется, как только придёт следующее её обновление.
+    return;
+  }
+  if (панель_ключ !== ключ) return;
+  панель_текст = текст;
+  try {
+    панель_путь = await invoke("transcript_path", { folder: folder ?? null, base });
+  } catch {
+    // Путь не прочитался — не критично, кнопка «Скопировать путь» останется
+    // с прошлым значением до следующего успешного похода.
+  }
+  показать_панель_состояние();
+}
+
 // Ключи записей, которые в этом окне уже показывались. Нужны затем, чтобы
 // каскад появления играл ТОЛЬКО у новых строк. Окно живёт в трее и
 // открывается по многу раз за день: каскад при каждом открытии из приятного
@@ -932,7 +1667,7 @@ let показанные = new Set();
 // Бед у одной записи может быть несколько: звук записался плохо И расшифровка
 // не доехала. Раньше здесь возвращалась первая попавшаяся, и вторая молча
 // пропадала — а это ровно тот случай, когда вторая объясняет первую («вас
-// почти не слышно» — вот почему в расшифровке половины реплик нет).
+// слышно тише» — вот почему в расшифровке половины реплик нет).
 //
 // Порядок — по времени: сначала что случилось при записи, потом что случилось
 // при расшифровке. Так это читается как история, а кнопка «попробовать снова»
@@ -957,7 +1692,7 @@ function беды_записи(запись, ошибка, ошибка_имен
         заголовок: i18n.t("trouble.noMicTitle"),
         текст: i18n.t("trouble.noMicText"),
       });
-    } else if (запись.quiet_mic_db != null) {
+    } else if (запись.quiet_mic) {
       список.push({
         значок: ЗНАЧКИ.микрофон_выкл,
         заголовок: i18n.t("trouble.quietTitle"),
@@ -976,6 +1711,7 @@ function беды_записи(запись, ошибка, ошибка_имен
       // `i18n.t` безопасен для обоих — тот же приём, что и `показать_фатальную`
       // с `status::DEAD` (см. её докблок).
       подробность: i18n.t(ошибка),
+      вид: "err",
       кнопки: [{ текст: i18n.t("trouble.retry"), on: () => начать_транскрипцию(запись) }],
       // Беда случилась от действия человека, а не была найдена при показе
       // списка: её появление надо озвучить (см. role="alert" ниже). У
@@ -993,6 +1729,7 @@ function беды_записи(запись, ошибка, ошибка_имен
       заголовок: i18n.t("trouble.renameTitle"),
       текст: i18n.t("trouble.renameText"),
       подробность: ошибка_имени,
+      вид: "err",
       тревога: true,
     });
   }
@@ -1003,14 +1740,29 @@ function строка_записи(запись) {
   const li = document.createElement("li");
   li.className = "rec";
 
+  const ключ = ключ_транскрипции(запись.folder, запись.name);
+  const ист = источник(запись);
+
+  // Вся строка с готовой расшифровкой — одна большая кнопка под содержимым:
+  // клик по названию, логотипу, пустому месту — везде открывает панель, а
+  // Enter/Space делают то же самое, потому что это настоящий <button>, а не
+  // div с обработчиком. Без расшифровки такой кнопки нет вовсе — как и пока
+  // запись ещё пишется (файла для панели ещё не существует): обычным
+  // строкам открыть_панель ничего не открывает, и ни курсор, ни подсветка
+  // не должны намекать, что здесь есть куда кликать.
+  if (запись.transcript && !запись.recording_now) {
+    const попадание = document.createElement("button");
+    попадание.type = "button";
+    попадание.className = "hit";
+    попадание.setAttribute("aria-label", i18n.t("transcript.open", { title: ист.имя }));
+    if (панель_ключ === ключ) попадание.setAttribute("aria-current", "true");
+    попадание.addEventListener("click", () => открыть_панель(запись, true));
+    li.append(попадание);
+  }
+  if (панель_ключ === ключ) li.classList.add("sel");
+
   const главное = document.createElement("div");
   главное.className = "main";
-
-  const ист = источник(запись);
-  const плашка = значок(
-    ист.лого ? ЛОГОТИПЫ[ист.лого] : ЗНАЧКИ.микрофон,
-    ист.лого ? `ava brand ${ист.лого}` : "ava",
-  );
 
   const колонка = document.createElement("div");
   колонка.className = "col";
@@ -1021,62 +1773,73 @@ function строка_записи(запись) {
   // переименования его будет не прочитать.
   название.title = ист.имя;
 
-  const ключ = ключ_транскрипции(запись.folder, запись.name);
   const стадия = транскрипции.get(ключ);
   const ошибка = ошибки_расшифровки.get(ключ);
   const ошибка_имени = ошибки_переименования.get(ключ);
 
   const мета = document.createElement("div");
   мета.className = "sub";
-  if (стадия && стадия !== "done") {
-    const детали = детали_расшифровки.get(ключ);
-    const подпись =
-      детали && стадия_идёт(стадия)
-        ? i18n.t("transcribe.progress", {
-            stage: подпись_стадии(стадия),
-            n: ДОРОЖКА_НОМЕР[детали.дорожка] ?? 1,
-            total: 2,
-            elapsed: сколько_идёт(детали.с),
-          })
-        : подпись_стадии(стадия);
-    мета.textContent = подпись;
+  // Мета-строка: «12:00 · 42 мин · статус». Время начала — из имени файла,
+  // длительность — из бэкенда. Статус пишется словами; цвет — только у бед.
+  const начало = момент_записи(запись.name);
+  const вычищена = !запись.mic && !запись.system && запись.transcript;
+  const части = [];
+  if (начало) части.push(чч_мм(начало));
+  // У вычищенной автоочисткой записи длительности нет: её считали по
+  // дорожке, а дорожки больше нет, и ноль соврал бы «меньше минуты».
+  if (!вычищена) части.push(длительность(запись.duration_sec));
+  const статус = (текст, класс) => {
+    const узел = document.createElement("span");
+    if (класс) узел.className = класс;
+    узел.textContent = текст;
+    мета.append(document.createTextNode(части.length ? " · " : ""), узел);
+  };
+  if (путь_скопирован.has(ключ)) {
+    // «Путь скопирован» — отклик на «Скопировать путь к расшифровке» из меню
+    // «⋯»: подменяет мета-строку на пару секунд.
+    const итог = document.createElement("span");
+    итог.className = "ok-msg";
+    итог.innerHTML = ГАЛОЧКА(16);
+    итог.append(document.createTextNode(i18n.t("menu.pathCopied")));
+    мета.append(итог);
   } else {
-    // Обе дорожки вычищены автоочисткой — размера файла больше нет и
-    // показывать нечего; вместо него честно сказано, что случилось со звуком
-    // (расшифровка при этом остаётся на месте, см. `запись.transcript` ниже).
-    const вычищена = !запись.mic && !запись.system && запись.transcript;
-    // Длительность считалась по размеру дорожки. У вычищенной записи её
-    // взять неоткуда, и `duration_sec` приходит нулём — а ноль рисуется как
-    // «меньше минуты» и врёт про часовую встречу. Поэтому у вычищенной
-    // записи длительности нет вовсе, остаётся только время начала.
-    мета.textContent = вычищена ? "" : длительность(запись.duration_sec);
-    const хвост = document.createElement("span");
-    хвост.className = "more";
-    const размер_или_вычищена = вычищена ? i18n.t("retention.cleared") : размер(запись.size);
-    // «Микрофон выключался» — не беда, а объяснение тишины в дорожке
-    // владельца, поэтому в хвосте строки, а не карточкой в «бедах».
-    хвост.textContent =
-      (вычищена ? размер_или_вычищена : ` · ${размер_или_вычищена}`) +
-      (запись.mic_muted ? ` · ${i18n.t("record.micWasMuted")}` : "") +
-      (запись.transcript ? ` · ${i18n.t("transcribe.ready")}` : "");
-    мета.append(хвост);
+    мета.textContent = части.join(" · ");
+    if (стадия && стадия !== "done") {
+      const детали = детали_расшифровки.get(ключ);
+      const подпись =
+        детали && стадия_идёт(стадия)
+          ? i18n.t("transcribe.progress", {
+              stage: подпись_стадии(стадия),
+              n: ДОРОЖКА_НОМЕР[детали.дорожка] ?? 1,
+              total: 2,
+              elapsed: сколько_идёт(детали.с),
+            })
+          : подпись_стадии(стадия);
+      // Идёт — мигает; в очереди — стоит: ждать нечего показывать.
+      статус(подпись, стадия_идёт(стадия) ? "pulsing" : "");
+    } else if (вычищена) {
+      статус(i18n.t("retention.cleared"));
+    } else if (запись.transcript && запись.transcript_partial) {
+      статус(i18n.t("status.partial"), "warn");
+    }
+    // Под наведение уходит только нейтральное — вес файла и отметка о
+    // готовой расшифровке.
+    if (!(стадия && стадия !== "done")) {
+      const хвост = document.createElement("span");
+      хвост.className = "more";
+      хвост.textContent =
+        (вычищена ? "" : ` · ${размер(запись.size)}`) +
+        // «Микрофон выключался» — не беда, а объяснение тишины в дорожке
+        // владельца, поэтому в хвосте строки, а не карточкой в «бедах».
+        (запись.mic_muted ? ` · ${i18n.t("record.micWasMuted")}` : "") +
+        (запись.transcript && !запись.transcript_partial ? ` · ${i18n.t("transcribe.ready")}` : "");
+      if (хвост.textContent) мета.append(хвост);
+    }
   }
   колонка.append(название, мета);
 
-  // Полоска неопределённая: сервер не сообщает процент, и врать процентом
-  // нельзя. У записи в очереди её нет — ждать нечего показывать.
-  if (стадия_идёт(стадия)) {
-    const полоска = document.createElement("div");
-    полоска.className = "prog";
-    полоска.append(document.createElement("i"));
-    колонка.append(полоска);
-  }
-
   const справа = document.createElement("div");
   справа.className = "right";
-  const время = document.createElement("span");
-  время.className = "time";
-  время.textContent = промежуток(момент_записи(запись.name), запись.duration_sec);
   const точки = document.createElement("span");
   точки.className = "dots";
   const кнопка = document.createElement("button");
@@ -1088,9 +1851,9 @@ function строка_записи(запись) {
     открыть_меню(запись, li, кнопка, название);
   });
   точки.append(кнопка);
-  справа.append(время, точки);
+  справа.append(точки);
 
-  главное.append(плашка, колонка, справа);
+  главное.append(колонка, справа);
   li.append(главное);
 
   const беды = беды_записи(запись, ошибка, ошибка_имени);
@@ -1104,6 +1867,7 @@ function строка_записи(запись) {
         ...беды,
         {
           значок: ЗНАЧКИ.корзина,
+          вид: "ask",
           заголовок: i18n.t("confirm.deleteTitle"),
           текст: i18n.t("confirm.deleteText"),
           кнопки: [
@@ -1113,7 +1877,7 @@ function строка_записи(запись) {
         },
       ]
     : беды;
-  if (заметки.length) li.classList.add("card");
+  if (заметки.length) li.classList.add("has-note");
   for (const заметка of заметки) li.append(собрать_плашку(заметка));
   return li;
 }
@@ -1125,10 +1889,9 @@ function строка_записи(запись) {
 // `строка_записи`.
 function собрать_плашку(нота) {
   const плашка_ноты = document.createElement("div");
-  плашка_ноты.className = "note";
-  // Живой областью помечается только то, что случилось от действия. Узел
-  // с role="alert" озвучивается в момент попадания в документ — а плашки
-  // про качество записи попадают туда при каждой отрисовке списка.
+  плашка_ноты.className = нота.вид ? `plate ${нота.вид}` : "plate";
+  // Живой областью — только то, что случилось от действия, иначе плашки про
+  // качество записи озвучивались бы при каждой отрисовке списка.
   if (нота.тревога) плашка_ноты.setAttribute("role", "alert");
   const текст = document.createElement("span");
   текст.className = "nt";
@@ -1136,20 +1899,20 @@ function собрать_плашку(нота) {
   заголовок.textContent = нота.заголовок;
   текст.append(заголовок, document.createTextNode(нота.текст));
   if (нота.кнопки?.length) {
-    текст.append(document.createElement("br"));
+    const ряд = document.createElement("span");
+    ряд.className = "acts";
     for (const { текст: подпись, on } of нота.кнопки) {
       const кнопка_ноты = document.createElement("button");
-      // Кнопка внутри плашки-беды — приглушённая, не заливная: она живёт
-      // внутри цветной карточки, и заливка спорила бы с её фоном.
-      кнопка_ноты.className = "act";
+      кнопка_ноты.type = "button";
+      кнопка_ноты.className = "btn-link";
       кнопка_ноты.textContent = подпись;
       кнопка_ноты.addEventListener("click", on);
-      текст.append(кнопка_ноты);
+      ряд.append(кнопка_ноты);
     }
+    текст.append(ряд);
   }
   плашка_ноты.append(значок(нота.значок, "ni"), текст);
-  // Сырое сообщение из движка человеку не показывается — техническая причина
-  // живёт в подсказке, то есть доступна тому, кто её ищет.
+  // Сырое сообщение движка — в подсказке, не на виду.
   if (нота.подробность) плашка_ноты.title = нота.подробность;
   return плашка_ноты;
 }
@@ -1187,13 +1950,18 @@ function подпись_строки(з, ключ) {
     з.mic,
     з.system,
     з.transcript,
-    з.quiet_mic_db,
+    з.quiet_mic,
     з.recording_now,
     з.mic_muted,
     транскрипции.get(ключ) ?? null,
     ошибки_расшифровки.get(ключ) ?? null,
     ошибки_переименования.get(ключ) ?? null,
     подтверждение_удаления.has(ключ),
+    путь_скопирован.has(ключ),
+    // Открытая справа панель — своя ли это строка: без сигнатуры класс `.sel`
+    // и кнопка `.hit` не переставились бы на новую выбранную строку и не
+    // снялись бы со старой.
+    панель_ключ === ключ,
     // Язык — в сигнатуре, а не рядом: без него смена языка не меняла бы эти
     // данные, и строка_записи() не пересобралась бы, оставив дату, размер и
     // подписи меню на прежнем языке до следующего изменения самой записи.
@@ -1455,11 +2223,20 @@ function начать_переименование(запись, узел_име
     закрыть_правку();
     забыть_строку(ключ);
     try {
-      await invoke("rename_recording", {
+      const новая_основа = await invoke("rename_recording", {
         folder: запись.folder ?? null,
         base: запись.name,
         newTail: поле.value,
       });
+      // Переименовали запись, чья расшифровка открыта в панели справа —
+      // у панели свой ключ (folder+name), и он тоже должен переехать на новое
+      // имя, иначе следующий клик по этой же строке читался бы панелью как
+      // клик по другой записи. Содержимое (файл `.md`) не трогали — только
+      // заголовок и путь у него теперь другие.
+      if (панель_ключ === ключ) {
+        панель_ключ = null;
+        открыть_панель({ ...запись, name: новая_основа }, false);
+      }
     } catch (e) {
       // Не получилось у конкретной записи — и показывается это в ней:
       // строка ниже пересоберётся с плашкой «Не удалось переименовать».
@@ -1548,6 +2325,9 @@ async function подтвердить_удаление(запись) {
   подтверждение_удаления.delete(ключ);
   try {
     await invoke("delete_recording", { folder: запись.folder ?? null, base: запись.name });
+    // Удалили запись, чья расшифровка была открыта справа — читать в панели
+    // больше нечего, а строка, на которую она указывала, вот-вот исчезнет.
+    if (панель_ключ === ключ) закрыть_панель();
     обновить_список();
   } catch (e) {
     // Как и отмена расшифровки (error.cancel) — общий баннер, а не карточка
@@ -1603,7 +2383,12 @@ function остановить_таймер() {
 
 let предыдущее_состояние = null;
 
+// Кто звонил, когда началась запись: строка взвода стирает `кто_звонит` на
+// выходе из Armed, а пульту имя нужно всю запись.
+let звонилка_записи = "";
+
 function применить_состояние(s) {
+  if (s === "recording" && предыдущее_состояние !== "recording") звонилка_записи = кто_звонит;
   const было_записью = предыдущее_состояние === "recording";
   const стало_записью = s === "recording";
 
@@ -1629,15 +2414,20 @@ function применить_состояние(s) {
       // `visibility: hidden` — а невидимому элементу движок фокус не даёт,
       // молча. Чтение offsetHeight заставляет пересчитать стили здесь и
       // сейчас; тот же приём стоит в открыть_меню по той же причине.
-      void $("rec-btn").offsetHeight;
-      $("rec-btn").focus();
+      void $("yes").offsetHeight;
+      $("yes").focus();
     }
   } else if (!стало_взводом) {
     кто_звонит = "";
   }
 
-  слот("s-record", !стало_записью);
+  // Во время записи большую кнопку «Начать запись» убираем: остановка —
+  // в панели записи.
+  $("rec-btn").closest(".recbar").hidden = стало_записью;
+  $("yes").disabled = false;
   слот("s-recpanel", стало_записью);
+  // Пульт: зона окна становится тёмной панелью, встречи «Дальше» уходят.
+  $("screen-list").classList.toggle("rec-on", стало_записью);
 
   if (стало_записью && !было_записью) {
     // Первое применение состояния — это снимок из get_state: он говорит «идёт
@@ -1650,22 +2440,35 @@ function применить_состояние(s) {
     // (role="status" у #rec-lbl) озвучивает смену текста, а не то, что
     // готовый текст стал видимым. Статичная подпись здесь молчала бы.
     $("rec-lbl").textContent = i18n.t("state.recording");
+    тишина_с = null;
+    закрыть_меню_экрана();
+    микрофон_записи = null;
+    отрисовать_кнопку_микрофона();
+    обновить_экран_пульта();
   } else if (!стало_записью && было_записью) {
     остановить_таймер();
     $("rec-lbl").textContent = "";
+    звонилка_записи = "";
+    $("pult-scr").hidden = true;
+    статус_экрана = null;
+    закрыть_меню_микрофона();
+    if (хозяин_меню === "pult") закрыть_меню_экрана();
+    $("pult-flash").hidden = true;
   }
 
   if (!стало_записью) {
     $("rec-btn").disabled = фатально;
-    $("rec-btn-label").textContent = i18n.t("record.start");
   }
 
   предыдущее_состояние = s;
   первое_состояние = false;
+  отрисовать_пульт();
   // «Обновить» гаснет на время записи и взвода — см. занято_записью.
   отрисовать_обновление();
 
   if (s !== "recording" && s !== "armed") обновить_список();
+  // «Зайти и записать» во время записи не показываем.
+  отрисовать_зону();
   if (s === "idle" && !проверка_идёт) {
     // Без явного сброса пик просто «сполз» бы на пару дБ (обновить_пик вызовется
     // один раз, а не по тику) и завис — вместо мгновенного возврата к -∞.
@@ -1684,8 +2487,7 @@ function обновить_подписи_состояния() {
   if (предыдущее_состояние === "recording") {
     $("stop-btn-label").textContent = i18n.t("record.stop");
     $("rec-lbl").textContent = i18n.t("state.recording");
-  } else {
-    $("rec-btn-label").textContent = i18n.t("record.start");
+    отрисовать_пульт();
   }
   if (предыдущее_состояние === "armed") {
     $("ask-q").textContent = кто_звонит
@@ -1715,6 +2517,9 @@ async function обновить_после_смены_языка() {
   // открыть его на новом языке можно тем же кликом.
   закрыть_меню(false, true);
   обновить_подписи_состояния();
+  отрисовать_календарь();
+  сегменты_выбора();
+  показать_проверку(проверка_идёт);
   показать_выключение_микрофона(микрофон_выключен);
   try {
     const снимок = await invoke("get_state");
@@ -1756,8 +2561,10 @@ function показать_экран(имя) {
     $(`screen-${s}`).classList.toggle("off-left", !активен && стек_экранов.includes(s));
     $(`screen-${s}`).classList.toggle("off-right", !активен && !стек_экранов.includes(s));
   }
+  закрыть_меню_экрана();
   if (имя === "settings") {
     обновить_устройства();
+    if (экран_доступен()) загрузить_источники(false);
     форсировать_перерисовку_метров();
   }
 }
@@ -1777,8 +2584,8 @@ function вернуться_назад() {
 
 $("to-settings").addEventListener("click", () => перейти_на("settings"));
 $("to-list").addEventListener("click", () => вернуться_назад());
-$("to-about").addEventListener("click", () => перейти_на("about"));
 $("to-support").addEventListener("click", () => перейти_на("support"));
+$("to-about").addEventListener("click", () => перейти_на("about"));
 $("about-back").addEventListener("click", () => вернуться_назад());
 $("support-back").addEventListener("click", () => вернуться_назад());
 
@@ -1828,18 +2635,54 @@ async function обновить_устройства() {
     $("theme").value = конфиг.theme ?? "system";
     $("retention").value =
       конфиг.audio_retention_days != null ? String(конфиг.audio_retention_days) : "never";
-    // Пока локального движка нет, режим в выпадашке не предлагается и
-    // сохранённое «local» показывается как сервер — ровно так его и трактует
-    // Rust (`transcribe::effective_mode`). Иначе человек выбрал бы режим,
-    // скачал бы «модель» с адреса-заглушки и упёрся бы в «движок не подключён».
+    // Пока локального движка нет, режим не предлагается и сохранённое
+    // «local» показывается как сервер — ровно так его и трактует Rust
+    // (`transcribe::effective_mode`). Иначе человек выбрал бы режим, скачал
+    // бы «модель» с адреса-заглушки и упёрся бы в «движок не подключён».
     const режим = ЛОКАЛЬНЫЙ_РЕЖИМ_ДОСТУПЕН ? (конфиг.transcribe_mode ?? "server") : "server";
     $("transcribe-mode").value = режим;
     применить_режим_расшифровки(режим);
     const тип_сервера = конфиг.transcribe_server === "whisper_cpp" ? "whisper_cpp" : "gateway";
     $("transcribe-server").value = тип_сервера;
     применить_тип_сервера(тип_сервера);
+    await загрузить_экран();
+    отрисовать_кнопку_микрофона();
+    сегменты_выбора();
+    обновить_календарь();
   } catch (e) {
     показать_ошибку(i18n.t("error.mics"), e);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Сегменты выбора (`.sg[data-for]`)
+//
+// Источник правды — спрятанный <select> с тем же id, что и раньше: его
+// значение ставит обновить_устройства, его `change` слушают обработчики ниже.
+// Сегменты только показывают значение и по клику ставят новое, посылая тот
+// же `change`. Подписи берутся из <option> — их переводит applyStatic.
+function сегменты_выбора() {
+  for (const группа of document.querySelectorAll(".sg[data-for]")) {
+    const sel = $(группа.dataset.for);
+    const подпись = JSON.stringify([...sel.options].map((o) => [o.value, o.textContent.trim()]));
+    if (группа.dataset.sig !== подпись) {
+      группа.dataset.sig = подпись;
+      группа.replaceChildren();
+      for (const o of sel.options) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.value = o.value;
+        b.textContent = o.textContent.trim();
+        b.addEventListener("click", () => {
+          if (sel.value === o.value) return;
+          sel.value = o.value;
+          sel.dispatchEvent(new Event("change"));
+          сегменты_выбора();
+        });
+        группа.append(b);
+      }
+    }
+    for (const b of группа.children) b.setAttribute("aria-pressed", String(b.dataset.value === sel.value));
   }
 }
 
@@ -2124,7 +2967,7 @@ $("mic").addEventListener("change", async (e) => {
   try {
     await invoke("set_mic_device", {
       id,
-      // Дефолт («Как выбрано в системе») — не устройство, имя ему не нужно.
+      // Дефолт («Как в системе») — не устройство, имя ему не нужно.
       name: id ? без_суффикса_недоступности(выбран.textContent) : null,
     });
     показать_ошибку("");
@@ -2171,6 +3014,1233 @@ $("theme").addEventListener("change", async (e) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Календарь
+//
+// Состояние целиком в Rust (`calendar_status`, событие `calendar-status`),
+// здесь только рисуем. Кнопка гаснет по клику (канон 3.6), не дожидаясь,
+// пока придёт «waiting».
+let календарь = null;
+let календарь_ждёт = false;
+
+async function обновить_календарь() {
+  try {
+    календарь = await invoke("calendar_status");
+  } catch (e) {
+    календарь = null;
+  }
+  отрисовать_календарь();
+}
+
+function кал_кнопка(класс, текст, действие, выключена) {
+  const b = document.createElement("button");
+  b.className = класс;
+  b.type = "button";
+  b.textContent = текст;
+  b.disabled = Boolean(выключена);
+  if (действие) b.addEventListener("click", действие);
+  return b;
+}
+
+// Человек нажал «Отключить» — карточка спрашивает подтверждение на месте.
+let кал_подтверждение = false;
+
+// Вторая строка карточки при подключённом календаре.
+function кал_строка_встречи(к) {
+  if (!к.next) return i18n.t("calendar.connectedNone");
+  const старт = new Date(к.next.start_ms);
+  const сегодня = начало_суток(старт).getTime() === начало_суток(new Date()).getTime();
+  return i18n.t(сегодня ? "calendar.connectedNext" : "calendar.connectedNextTomorrow", {
+    title: к.next.title || i18n.t("calendar.untitled"),
+    time: чч_мм(старт),
+  });
+}
+
+// Идущие и будущие встречи из статуса, не больше трёх: показываем их в карточке,
+// чтобы можно было сверить с настоящим календарём.
+function кал_ближайшие(к) {
+  const сейчас = Date.now();
+  return (к.today ?? []).filter((в) => в.end_ms > сейчас || в.start_ms >= сейчас).slice(0, 3);
+}
+
+// Иконка Google Calendar вместо первой буквы почты: аккаунт и так подписан
+// рядом, а значок сразу говорит, какой это календарь.
+function иконка_google_calendar() {
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 200 200");
+  const группа = document.createElementNS(NS, "g");
+  группа.setAttribute("transform", "translate(3.75 3.75)");
+  svg.append(группа);
+  // Официальный значок Google Calendar (2020), контуры без изменений.
+  const части = [
+    ["#FFFFFF", "M148.882,43.618l-47.368-5.263l-57.895,5.263L38.355,96.25l5.263,52.632l52.632,6.579l52.632-6.579l5.263-53.947L148.882,43.618z"],
+    ["#1A73E8", "M65.211,125.276c-3.934-2.658-6.658-6.539-8.145-11.671l9.132-3.763c0.829,3.158,2.276,5.605,4.342,7.342c2.053,1.737,4.553,2.592,7.474,2.592c2.987,0,5.553-0.908,7.697-2.724s3.224-4.132,3.224-6.934c0-2.868-1.132-5.211-3.395-7.026s-5.105-2.724-8.5-2.724h-5.276v-9.039H76.5c2.921,0,5.382-0.789,7.382-2.368c2-1.579,3-3.737,3-6.487c0-2.447-0.895-4.395-2.684-5.855s-4.053-2.197-6.803-2.197c-2.684,0-4.816,0.711-6.395,2.145s-2.724,3.197-3.447,5.276l-9.039-3.763c1.197-3.395,3.395-6.395,6.618-8.987c3.224-2.592,7.342-3.895,12.342-3.895c3.697,0,7.026,0.711,9.974,2.145c2.947,1.434,5.263,3.421,6.934,5.947c1.671,2.539,2.5,5.382,2.5,8.539c0,3.224-0.776,5.947-2.329,8.184c-1.553,2.237-3.461,3.947-5.724,5.145v0.539c2.987,1.25,5.421,3.158,7.342,5.724c1.908,2.566,2.868,5.632,2.868,9.211s-0.908,6.776-2.724,9.579c-1.816,2.803-4.329,5.013-7.513,6.618c-3.197,1.605-6.789,2.421-10.776,2.421C73.408,129.263,69.145,127.934,65.211,125.276z"],
+    ["#1A73E8", "M121.25,79.961l-9.974,7.25l-5.013-7.605l17.987-12.974h6.895v61.197h-9.895L121.25,79.961z"],
+    ["#EA4335", "M148.882,196.25l47.368-47.368l-23.684-10.526l-23.684,10.526l-10.526,23.684L148.882,196.25z"],
+    ["#34A853", "M33.092,172.566l10.526,23.684h105.263v-47.368H43.618L33.092,172.566z"],
+    ["#4285F4", "M12.039-3.75C3.316-3.75-3.75,3.316-3.75,12.039v136.842l23.684,10.526l23.684-10.526V43.618h105.263l10.526-23.684L148.882-3.75H12.039z"],
+    ["#188038", "M-3.75,148.882v31.579c0,8.724,7.066,15.789,15.789,15.789h31.579v-47.368H-3.75z"],
+    ["#FBBC04", "M148.882,43.618v105.263h47.368V43.618l-23.684-10.526L148.882,43.618z"],
+    ["#1967D2", "M196.25,43.618V12.039c0-8.724-7.066-15.789-15.789-15.789h-31.579v47.368H196.25z"],
+  ];
+  for (const [fill, d] of части) {
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("fill", fill);
+    p.setAttribute("d", d);
+    группа.append(p);
+  }
+  return svg;
+}
+
+// Карточка «Календарь»: иконка Google Calendar, почта (или «Google Календарь»),
+// точка статуса с текстом, справа действие. Шесть состояний: не подключён, жду
+// браузер, нет доступа, подключён, нет связи, отключился.
+function отрисовать_календарь() {
+  отрисовать_зону();
+  отрисовать_пульт();
+  const к = календарь;
+  $("cal-grp").hidden = !к?.available;
+  const тело = $("cal-body");
+  тело.replaceChildren();
+  if (!к?.available) return;
+
+  const почта = к.email ?? "";
+  if (к.auth !== "connected" && к.auth !== "revoked") кал_подтверждение = false;
+
+  const ряд = document.createElement("div");
+  ряд.className = "acc";
+  const ава = document.createElement("div");
+  ава.className = к.auth === "connected" && !к.offline ? "ava" : "ava off";
+  ава.setAttribute("aria-hidden", "true");
+  ава.append(иконка_google_calendar());
+  const tx = document.createElement("div");
+  tx.className = "tx";
+  const t1 = document.createElement("div");
+  t1.className = "t1 ell";
+  const t2 = document.createElement("div");
+  t2.className = "t2";
+  const точка = document.createElement("i");
+  точка.className = "st-dot";
+  const t2текст = document.createElement("span");
+  t2.append(точка, t2текст);
+  tx.append(t1, t2);
+  const действия = document.createElement("div");
+  действия.className = "acts";
+  ряд.append(ава, tx, действия);
+
+  const подключить = (подпись) =>
+    кал_кнопка("btn-pri", подпись, подключить_календарь, календарь_ждёт);
+  const отключить = () =>
+    кал_кнопка("btn soft-danger", i18n.t("calendar.disconnect"), () => {
+      кал_подтверждение = true;
+      отрисовать_календарь();
+      $("cal-confirm-cancel")?.focus();
+    });
+
+  if (к.auth === "connected") {
+    t1.textContent = почта;
+    t1.title = почта;
+    if (к.offline) {
+      точка.classList.add("w");
+      t2текст.textContent =
+        к.loaded_at_ms != null
+          ? i18n.t("calendar.offline", { time: чч_мм(new Date(к.loaded_at_ms)) })
+          : i18n.t("calendar.offlineNoData");
+      // «Повторить» — тот же запрос статуса, что при открытии настроек: он
+      // будит опрос, если список старше 30 секунд.
+      действия.append(кал_кнопка("btn", i18n.t("calendar.retry"), обновить_календарь));
+    } else {
+      const ближайшие = кал_ближайшие(к);
+      if (ближайшие.length) {
+        t2текст.textContent = i18n.t("calendar.connectedShort");
+        const список = document.createElement("ul");
+        список.className = "evs";
+        for (const в of ближайшие) {
+          const старт = new Date(в.start_ms);
+          const завтра = начало_суток(старт).getTime() !== начало_суток(new Date()).getTime();
+          const li = document.createElement("li");
+          li.className = "ell";
+          const время = document.createElement("span");
+          время.className = "tm";
+          время.textContent = (завтра ? i18n.t("calendar.tomorrowShort") + " " : "") + чч_мм(старт);
+          li.append(время, в.title?.trim() || i18n.t("calendar.untitled"));
+          li.title = li.textContent;
+          список.append(li);
+        }
+        tx.append(список);
+      } else {
+        t2текст.className = "ell";
+        t2текст.textContent = кал_строка_встречи(к);
+        t2текст.title = t2текст.textContent;
+      }
+    }
+    действия.append(отключить());
+  } else if (к.auth === "revoked") {
+    t1.textContent = почта || i18n.t("calendar.google");
+    точка.classList.add("e");
+    t2текст.textContent = i18n.t("calendar.revokedShort");
+    действия.append(подключить(i18n.t("calendar.reconnect")), отключить());
+  } else if (к.auth === "waiting" || календарь_ждёт) {
+    t1.textContent = i18n.t("calendar.google");
+    точка.classList.add("n", "pulsing");
+    t2текст.textContent = i18n.t("calendar.waiting");
+    действия.append(кал_кнопка("btn", i18n.t("calendar.cancel"), отменить_вход_в_календарь));
+  } else if (к.auth === "refused") {
+    // Не говорим «кончились места» и не гадаем о причине: `access_denied`
+    // бывает и от обычной «Отмены» на странице Google.
+    t1.className = "t1";
+    t1.textContent = i18n.t("calendar.refusedTitle");
+    точка.classList.add("w");
+    t2текст.textContent = i18n.t("calendar.refusedHint");
+    действия.append(подключить(i18n.t("calendar.connectAgain")));
+  } else {
+    t1.textContent = i18n.t("calendar.google");
+    точка.remove();
+    t2текст.textContent = i18n.t("calendar.cardHint");
+    действия.append(подключить(i18n.t("calendar.connectShort")));
+  }
+  тело.append(ряд);
+
+  if (кал_подтверждение) {
+    const вопрос = document.createElement("div");
+    вопрос.className = "confirm";
+    вопрос.setAttribute("role", "group");
+    const b = document.createElement("b");
+    b.textContent = i18n.t("calendar.confirmTitle");
+    const текст = document.createElement("div");
+    текст.className = "t2";
+    текст.textContent = i18n.t("calendar.confirmText");
+    const кнопки = document.createElement("div");
+    кнопки.className = "acts";
+    const отмена = кал_кнопка("btn", i18n.t("calendar.cancel"), () => {
+      кал_подтверждение = false;
+      отрисовать_календарь();
+    });
+    отмена.id = "cal-confirm-cancel";
+    const да = кал_кнопка("btn-danger", i18n.t("calendar.disconnect"), отключить_календарь);
+    да.id = "cal-confirm-off";
+    кнопки.append(отмена, да);
+    вопрос.append(b, текст, кнопки);
+    тело.append(вопрос);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Зона «Дальше» на экране записей
+//
+// Встречи на сегодня (`calendar_status.today`, до трёх, идущие и будущие).
+// Отсчёт и «Зайти и записать» окно считает само по `start_ms`/`end_ms`:
+// статус приходит раз в опрос, а «через 4 мин» должно идти. Кнопка — та же
+// команда, что пункт меню иконки «Подключиться и записать».
+const СЕРВИСЫ = { meet: "Google Meet", zoom: "Zoom", teams: "Teams" };
+// За сколько до начала встреча получает «Зайти и записать».
+const ЗАЙТИ_ЗА_МС = 10 * 60 * 1000;
+const заходим = new Set(); // id встреч, по которым нажали «Зайти» и ждут ответа
+let подпись_зоны = null;
+
+function через(мс) {
+  if (мс < 60000) return i18n.t("calendar.starting");
+  return i18n.t("zone.in", { time: длительность(Math.round(мс / 1000)) });
+}
+
+// Модель зоны — чистые данные. Отрисовка сверяет её с прошлой и не трогает
+// DOM, если ничего не поменялось: таймер дёргает зону каждые 15 секунд, и
+// пересборка без нужды сбивала бы фокус с кнопки «Зайти».
+function модель_зоны() {
+  const к = календарь;
+  if (!к?.available) return null;
+  const м = { auth: к.auth, строки: [], сообщения: [] };
+  if (к.auth === "connected") {
+    const сейчас = Date.now();
+    const идёт_запись = предыдущее_состояние === "recording";
+    if (к.offline) {
+      м.сообщения.push({
+        текст:
+          к.loaded_at_ms != null
+            ? i18n.t("calendar.offline", { time: чч_мм(new Date(к.loaded_at_ms)) })
+            : i18n.t("calendar.offlineNoData"),
+        warn: true,
+      });
+    }
+    for (const в of к.today ?? []) {
+      if (!(в.end_ms > сейчас || в.start_ms >= сейчас)) continue;
+      const до = в.start_ms - сейчас;
+      const идёт = до <= 0;
+      const сервис = СЕРВИСЫ[в.source] ?? "";
+      let t2;
+      if (идёт) {
+        t2 = в.end_ms > в.start_ms ? i18n.t("zone.ongoing", { time: чч_мм(new Date(в.end_ms)) }) : i18n.t("calendar.now");
+        if (сервис) t2 += ` · ${сервис}`;
+      } else if (до <= ЗАЙТИ_ЗА_МС) {
+        t2 = через(до) + (сервис ? ` · ${сервис}` : "");
+      } else {
+        t2 = `${чч_мм(new Date(в.start_ms))} · ${через(до)}`;
+      }
+      м.строки.push({
+        id: в.id,
+        t1: в.title?.trim() || i18n.t("calendar.untitled"),
+        t2,
+        зайти: в.has_link && до <= ЗАЙТИ_ЗА_МС && !идёт_запись,
+        ждёт: заходим.has(в.id),
+      });
+    }
+    if (!м.строки.length && !к.offline) м.сообщения.push({ текст: i18n.t("zone.noMore") });
+  } else {
+    м.ждёт = к.auth === "waiting" || календарь_ждёт;
+  }
+  return м;
+}
+
+function отрисовать_зону() {
+  const м = модель_зоны();
+  const подпись = JSON.stringify([м, i18n.lang]);
+  if (подпись === подпись_зоны) return;
+  подпись_зоны = подпись;
+
+  $("zone").hidden = !м;
+  const тело = $("zone-body");
+  тело.replaceChildren();
+  if (!м) return;
+
+  if (м.auth === "connected") {
+    for (const с of м.сообщения) {
+      const d = document.createElement("div");
+      d.className = с.warn ? "zmsg warn" : "zmsg";
+      d.textContent = с.текст;
+      тело.append(d);
+    }
+    for (const с of м.строки) {
+      const ряд = document.createElement("div");
+      ряд.className = "zrow";
+      const tx = document.createElement("div");
+      tx.className = "tx";
+      const t1 = document.createElement("div");
+      t1.className = "t1 ell";
+      t1.textContent = с.t1;
+      t1.title = с.t1;
+      const t2 = document.createElement("div");
+      t2.className = "t2 ell";
+      t2.textContent = с.t2;
+      tx.append(t1, t2);
+      ряд.append(tx);
+      if (с.зайти) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn-pri";
+        b.textContent = i18n.t("calendar.join");
+        b.disabled = с.ждёт;
+        b.addEventListener("click", () => зайти_во_встречу(с.id));
+        ряд.append(b);
+      }
+      тело.append(ряд);
+    }
+    return;
+  }
+
+  // Не подключён, отказ, «отключился», ждём браузер — просьба и кнопка.
+  const блок = document.createElement("div");
+  блок.className = "zconnect";
+  const p = document.createElement("p");
+  const кнопки = document.createElement("div");
+  кнопки.className = "row-btns";
+  const главная = (подпись_кнопки) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-pri";
+    b.textContent = подпись_кнопки;
+    b.disabled = м.ждёт;
+    b.addEventListener("click", подключить_календарь);
+    return b;
+  };
+  if (м.auth === "revoked") {
+    p.className = "warn";
+    p.textContent = i18n.t("calendar.revoked");
+    кнопки.append(главная(i18n.t("calendar.reconnect")));
+  } else if (м.ждёт) {
+    p.textContent = i18n.t("zone.connectText");
+    const b = главная(i18n.t("calendar.waiting"));
+    const отмена = document.createElement("button");
+    отмена.type = "button";
+    отмена.className = "btn-link";
+    отмена.textContent = i18n.t("calendar.cancel");
+    отмена.addEventListener("click", отменить_вход_в_календарь);
+    кнопки.append(b, отмена);
+  } else {
+    p.textContent = i18n.t("zone.connectText");
+    кнопки.append(главная(i18n.t("calendar.connect")));
+  }
+  блок.append(p, кнопки);
+  if (м.auth === "refused") {
+    const п2 = document.createElement("p");
+    п2.textContent = i18n.t("calendar.refused");
+    блок.append(п2);
+  }
+  тело.append(блок);
+}
+
+// Кнопка гаснет по клику (канон 3.6). Удалось — бэкенд сам начнёт запись, и
+// зона перерисуется по смене состояния; не удалось — ошибка общей строкой
+// сверху, кнопка снова живая.
+async function зайти_во_встречу(id) {
+  заходим.add(id);
+  отрисовать_зону();
+  try {
+    await invoke("calendar_join", { id, record: true });
+    показать_ошибку("");
+  } catch (e) {
+    показать_ошибку(i18n.t("error.generic"), e);
+  } finally {
+    заходим.delete(id);
+    отрисовать_зону();
+  }
+}
+
+setInterval(() => {
+  отрисовать_зону();
+  отрисовать_пульт();
+}, 15000);
+
+// Закрытый браузер или «Отмена» у Google — не ошибка: кнопка просто снова
+// «Подключить» (это решает Rust). Ошибкой показывается только сбой обмена
+// кода или связки ключей.
+async function подключить_календарь() {
+  календарь_ждёт = true;
+  отрисовать_календарь();
+  try {
+    await invoke("calendar_connect");
+    показать_ошибку("");
+  } catch (e) {
+    показать_ошибку(i18n.t("error.generic"), e);
+  } finally {
+    календарь_ждёт = false;
+    await обновить_календарь();
+  }
+}
+
+async function отменить_вход_в_календарь() {
+  try {
+    await invoke("calendar_cancel_connect");
+  } catch (e) {
+    console.error("отмена входа не ушла:", e);
+  }
+}
+
+async function отключить_календарь(e) {
+  e.currentTarget.disabled = true;
+  кал_подтверждение = false;
+  try {
+    await invoke("calendar_disconnect");
+    показать_ошибку("");
+  } catch (err) {
+    показать_ошибку(i18n.t("error.generic"), err);
+  }
+  await обновить_календарь();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Запись экрана
+//
+// Источник правды — конфиг в Rust (`get_screen_settings`); здесь копия для
+// показа. Выбор делается в трёх местах — меню у кнопки на главном экране,
+// кнопка «экран» на пульте и строка «Что записывать» в настройках, — и все
+// три открывают ОДНО меню (#scr-pop): main.js переносит узел к той кнопке,
+// которой его открыли. Рисуется всё из одного объекта `экран`, поэтому
+// везде показано одно и то же. Видео стартует и останавливается вместе со
+// звуком (см. `screen.rs`), окно для этого открыто быть не обязано.
+
+const экран = {
+  загружено: false,
+  mode: "off", // "off" | "meeting" | "window" | "screen"
+  windowId: null,
+  appId: null,
+  appName: null,
+  windowTitle: null,
+  displayId: null,
+  displayName: null,
+  hideSelf: true,
+  support: { window: false, screen: false, reason: null },
+  permission: true,
+  // Что включится тумблером, если сейчас выключено: последний выбор.
+  прежний: "meeting",
+  // Что выберется вкладкой «Окно»: последний оконный выбор, даже если
+  // между ними был «Экран».
+  оконный: "meeting",
+};
+// Растёт с каждым выбором человека. Ответ `get_screen_settings`, ушедший до
+// выбора, приходит уже устаревшим — по счётчику это видно, и он не
+// перетирает свежий выбор (раньше выбор откатывался по фокусу окна).
+let экран_версия = 0;
+// Окна и мониторы. Миниатюры живут только пока меню открыто.
+let источники = null;
+let миниатюры_есть = false;
+let источники_запрос = 0;
+let источники_в_пути = false;
+
+const экран_умеет = () => экран.support.window || экран.support.screen;
+const экран_доступен = () => экран_умеет() && экран.permission;
+const вид_режима = (m) => (m === "screen" ? "screen" : "window");
+
+// Где сейчас открыто меню и как оно там себя ведёт.
+//  main — у кнопки на главном: вкладка «Окно / Экран» выбирает сразу, меню
+//         после выбора остаётся открытым (как в макете);
+//  pult — на пульте: тёмное, без «Скрыть MeetRec», вкладка только
+//         показывает, выбор применяется на лету и закрывает меню;
+//  set  — в настройках под «Что записывать»: без тумблера сверху (он в
+//         строке рядом), выбор закрывает меню.
+const ХОЗЯЕВА = {
+  main: { место: () => document.querySelector(".recbar-row"), кнопка: () => $("scr-btn"), классы: [] },
+  pult: { место: () => $("pult-srcs"), кнопка: () => $("scr-chip"), классы: ["dark", "on-pult"] },
+  set: { место: () => $("scr-what-set"), кнопка: () => $("scr-what"), классы: ["no-toggle"] },
+};
+let хозяин_меню = null;
+// Вкладка, которую смотрят на пульте и в настройках, пока ничего не выбрано.
+let вкладка_просмотра = null;
+
+async function загрузить_экран() {
+  const версия = экран_версия;
+  let н;
+  try {
+    н = await invoke("get_screen_settings");
+  } catch (e) {
+    console.warn("настройки записи экрана:", e);
+    н = null;
+  }
+  if (версия !== экран_версия) return;
+  if (н) {
+    Object.assign(экран, {
+      mode: ["meeting", "window", "screen"].includes(н.mode) ? н.mode : "off",
+      windowId: н.windowId ?? null,
+      appId: н.appId ?? null,
+      appName: н.appName ?? null,
+      windowTitle: н.windowTitle ?? null,
+      displayId: н.displayId ?? null,
+      displayName: н.displayName ?? null,
+      hideSelf: н.hideSelf !== false,
+      support: { window: false, screen: false, reason: null, ...(н.support ?? {}) },
+      permission: н.permission !== false,
+    });
+    if ((экран.mode === "window" || экран.mode === "meeting") && !экран.support.window) экран.mode = "off";
+    if (экран.mode !== "off") экран.прежний = экран.mode;
+    else if (!экран.support.window && экран.support.screen) экран.прежний = "screen";
+    else if (экран.windowId != null) экран.прежний = "window";
+    экран.оконный =
+      экран.mode === "window" || (экран.mode !== "meeting" && экран.windowId != null) ? "window" : "meeting";
+  } else {
+    экран.support = { window: false, screen: false, reason: null };
+  }
+  экран.загружено = true;
+  отрисовать_экран();
+}
+
+async function сохранить_экран(закрыть = true) {
+  экран_версия++;
+  if (экран.mode !== "off") экран.прежний = экран.mode;
+  if (экран.mode === "meeting" || экран.mode === "window") экран.оконный = экран.mode;
+  вкладка_просмотра = null;
+  отрисовать_экран();
+  if (закрыть) после_выбора();
+  try {
+    // Поля окна и монитора уходят и при «Выкл»: включат обратно — вернётся
+    // тот же выбор. Во время записи бэкенд применяет выбор на лету.
+    await invoke("set_screen_source", {
+      mode: экран.mode,
+      windowId: экран.windowId,
+      appId: экран.appId,
+      appName: экран.appName,
+      windowTitle: экран.windowTitle,
+      displayId: экран.displayId,
+      displayName: экран.displayName,
+    });
+    показать_ошибку("");
+  } catch (err) {
+    показать_ошибку(i18n.t("error.generic"), err);
+  }
+}
+
+// На пульте выбор сразу меняет запись: меню закрывается, внизу на 3 с
+// зелёная строка о том, что теперь пишется. В настройках меню просто
+// закрывается. На главном остаётся открытым.
+function после_выбора() {
+  if (хозяин_меню === "pult") {
+    // Выключили — строка «Записывается …» больше не правда, не ждём события.
+    if (экран.mode === "off") $("pult-scr").hidden = true;
+    вспышка_пульта(текст_вспышки_экрана());
+    закрыть_меню_экрана(true);
+  } else if (хозяин_меню === "set") {
+    закрыть_меню_экрана(true);
+  }
+}
+
+function выбрать_встречу() {
+  экран.mode = "meeting";
+  return сохранить_экран();
+}
+function выбрать_окно(о) {
+  Object.assign(экран, {
+    mode: "window",
+    windowId: о.id,
+    appId: о.appId ?? null,
+    appName: о.appName ?? null,
+    windowTitle: о.title ?? null,
+  });
+  return сохранить_экран();
+}
+function выбрать_монитор(д) {
+  Object.assign(экран, { mode: "screen", displayId: д?.id ?? null, displayName: д?.name ?? null });
+  return сохранить_экран();
+}
+// Монитор, который выбран сейчас: по id, по имени, иначе основной.
+function текущий_монитор() {
+  const д = источники?.displays ?? [];
+  return (
+    д.find((x) => экран.displayId != null && x.id === экран.displayId) ??
+    д.find((x) => экран.displayName && x.name === экран.displayName) ??
+    д.find((x) => x.main) ??
+    д[0] ??
+    null
+  );
+}
+function перейти_на_вид(вид) {
+  if (вид === "screen") {
+    const д = текущий_монитор();
+    return выбрать_монитор(д ?? { id: экран.displayId, name: экран.displayName });
+  }
+  экран.mode = экран.оконный === "window" && экран.windowId != null ? "window" : "meeting";
+  return сохранить_экран();
+}
+// Тумблер «Записывать экран» — в меню и в строке настроек.
+function переключить_экран() {
+  if (!экран.permission) return;
+  if (экран.mode === "off") {
+    if (!экран.support.window || экран.прежний === "screen") return перейти_на_вид("screen");
+    экран.mode = экран.оконный === "window" && экран.windowId != null ? "window" : "meeting";
+    // Включили на пульте — меню остаётся открытым: следом обычно выбирают,
+    // что именно писать. Зелёная строка всё равно говорит, что пошло.
+    if (хозяин_меню === "pult") вспышка_пульта(текст_вспышки_экрана());
+    return сохранить_экран(хозяин_меню !== "pult");
+  } else {
+    экран.mode = "off";
+  }
+  return сохранить_экран();
+}
+async function переключить_скрытие() {
+  экран_версия++;
+  экран.hideSelf = !экран.hideSelf;
+  отрисовать_экран();
+  try {
+    await invoke("set_screen_hide_self", { hide: экран.hideSelf });
+  } catch (err) {
+    показать_ошибку(i18n.t("error.generic"), err);
+  }
+}
+
+async function загрузить_источники(с_миниатюрами) {
+  const номер = ++источники_запрос;
+  источники_в_пути = true;
+  const быстро = invoke("list_screen_sources", { thumbs: false });
+  const полно = с_миниатюрами ? invoke("list_screen_sources", { thumbs: true }) : null;
+  try {
+    const первый = await быстро;
+    источники_в_пути = false;
+    // Миниатюры могли прийти раньше списка — тогда их не затираем.
+    if (номер === источники_запрос && !(миниатюры_есть && источники)) {
+      источники = первый;
+      отрисовать_экран();
+    }
+  } catch (e) {
+    источники_в_пути = false;
+    console.warn("окна и экраны:", e);
+    // Доступ отозвали, пока окно было открыто: меню покажет объяснение.
+    if (String(e).includes("permission") && экран.permission) {
+      экран.permission = false;
+      отрисовать_экран();
+    }
+  }
+  if (!полно) return;
+  try {
+    const с = await полно;
+    if (номер !== источники_запрос || $("scr-pop").hidden) return;
+    источники = с;
+    миниатюры_есть = true;
+    отрисовать_экран();
+  } catch (e) {
+    console.warn("миниатюры окон:", e);
+    миниатюры_есть = true; // показываем плейсхолдеры со значком, а не вечное ожидание
+    отрисовать_экран();
+  }
+}
+
+// ── Значки ────────────────────────────────────────────────────────────────
+// Значок приложения — PNG 32×32 от бэкенда (`icon`). Нет его — нейтральный
+// значок окна цветом подписи.
+const ЗНАЧОК_ОКНА =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><rect x="1.65" y="2.65" width="12.7" height="10.7" rx="2" /><path d="M1.65 5.6h12.7" /></svg>';
+const ЗНАЧОК_МОНИТОРА =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.65" y="2.4" width="12.7" height="8.6" rx="1.6" /><path d="M5.8 14h4.4M8 11v3" /></svg>';
+const ГАЛОЧКА_ЭКРАНА =
+  '<svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.2 5 8.5l4.5-5" /></svg>';
+const ИСКРЫ =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7 1.5l1.3 3.7L12 6.5 8.3 7.8 7 11.5 5.7 7.8 2 6.5l3.7-1.3z" /><path d="M12.5 9.5l.6 1.7 1.7.6-1.7.6-.6 1.7-.6-1.7-1.7-.6 1.7-.6z" /></svg>';
+
+function значок_приложения(о, крупный = false) {
+  const класс = крупный ? "scr-ai scr-ai-lg" : "scr-ai";
+  if (о.icon) {
+    const img = document.createElement("img");
+    img.className = класс;
+    img.src = о.icon;
+    img.alt = "";
+    return img;
+  }
+  const s = document.createElement("span");
+  s.className = класс;
+  s.innerHTML = ЗНАЧОК_ОКНА;
+  s.firstChild.setAttribute("width", "100%");
+  s.firstChild.setAttribute("height", "100%");
+  return s;
+}
+
+function карточка({ выбрана, подсказка, миниатюра, подпись, действие }) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "scr-card";
+  b.setAttribute("role", "option");
+  b.setAttribute("aria-selected", String(выбрана));
+  if (подсказка) b.title = подсказка;
+  const ok = document.createElement("span");
+  ok.className = "scr-ok";
+  ok.innerHTML = ГАЛОЧКА_ЭКРАНА;
+  миниатюра.append(ok);
+  const cap = document.createElement("span");
+  cap.className = "scr-cap";
+  cap.append(...подпись);
+  b.append(миниатюра, cap);
+  b.addEventListener("click", действие);
+  return b;
+}
+
+function миниатюра_источника(о, есть_значок) {
+  const th = document.createElement("span");
+  th.className = "scr-th";
+  if (!миниатюры_есть) {
+    th.classList.add("wait");
+  } else if (о.thumb) {
+    const img = document.createElement("img");
+    img.src = о.thumb;
+    img.alt = "";
+    th.append(img);
+  } else if (есть_значок) {
+    th.append(значок_приложения(о, true));
+  }
+  return th;
+}
+
+function текст(т, класс = "ell") {
+  const s = document.createElement("span");
+  s.className = класс;
+  s.textContent = т;
+  return s;
+}
+
+function заглушка_карточки() {
+  const th = document.createElement("span");
+  th.className = "scr-th wait";
+  const cap = document.createElement("span");
+  cap.className = "scr-cap";
+  cap.append(текст("", "sk-cap"));
+  const c = document.createElement("span");
+  c.className = "scr-card";
+  c.setAttribute("aria-hidden", "true");
+  c.append(th, cap);
+  return c;
+}
+
+function отрисовать_сетки() {
+  const режим_окна = экран.mode === "off" ? экран.прежний : экран.mode;
+  const вид = вкладка_просмотра ?? вид_режима(режим_окна);
+  const кв = $("scr-kind");
+  const окна_можно = экран.support.window;
+  кв.querySelector('[data-kind="window"]').hidden = !окна_можно;
+  кв.hidden = !окна_можно || !экран.support.screen;
+  for (const b of кв.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.kind === вид));
+  $("scr-wins").hidden = вид !== "window";
+  $("scr-disps").hidden = вид !== "screen";
+
+  // Окна: первой — «Окно встречи», дальше каждое окно отдельно.
+  const окна = [];
+  const авто = document.createElement("span");
+  авто.className = "scr-th auto";
+  авто.innerHTML = ИСКРЫ;
+  авто.append(текст(i18n.t("screen.meetingAuto"), "scr-auto-t"));
+  const встреча = источники?.meetingApp;
+  окна.push(
+    карточка({
+      выбрана: режим_окна === "meeting",
+      подсказка: встреча ? i18n.t("screen.meetingNow", { app: встреча }) : i18n.t("screen.meetingHint"),
+      миниатюра: авто,
+      подпись: [текст(i18n.t("screen.meeting"))],
+      действие: выбрать_встречу,
+    }),
+  );
+  if (!источники) {
+    // Список ещё не пришёл: серые карточки той же формы.
+    for (let n = 0; n < 5; n++) окна.push(заглушка_карточки());
+  } else {
+    let найдено = false;
+    for (const о of источники.windows ?? []) {
+      const выбрана = режим_окна === "window" && о.id === экран.windowId;
+      найдено ||= выбрана;
+      окна.push(
+        карточка({
+          выбрана,
+          подсказка: о.title ? `${о.appName} — ${о.title}` : о.appName,
+          миниатюра: миниатюра_источника(о, true),
+          подпись: [значок_приложения(о), текст(о.appName)],
+          действие: () => выбрать_окно(о),
+        }),
+      );
+    }
+    // Выбранное окно сейчас закрыто — показываем его всё равно, иначе выбор
+    // молча выглядел бы как «Окно встречи».
+    if (режим_окна === "window" && экран.windowId != null && !найдено) {
+      const о = { id: экран.windowId, appName: экран.appName ?? "?", title: экран.windowTitle, icon: null };
+      const th = document.createElement("span");
+      th.className = "scr-th";
+      th.append(значок_приложения(о, true));
+      окна.push(
+        карточка({
+          выбрана: true,
+          подсказка: i18n.t("screen.notOpen", { name: о.title ? `${о.appName} — ${о.title}` : о.appName }),
+          миниатюра: th,
+          подпись: [значок_приложения(о), текст(о.appName)],
+          действие: () => {},
+        }),
+      );
+    }
+  }
+  $("scr-wins").replaceChildren(...окна);
+
+  // Мониторы: по два, подпись — имя, у основного серое «основной».
+  const мониторы = [];
+  if (!источники) {
+    for (let n = 0; n < 2; n++) мониторы.push(заглушка_карточки());
+  } else {
+    const тек = режим_окна === "screen" ? текущий_монитор() : null;
+    for (const д of источники.displays ?? []) {
+      const подпись = [текст(д.name)];
+      if (д.main) подпись.push(Object.assign(document.createElement("small"), { textContent: i18n.t("screen.main") }));
+      мониторы.push(
+        карточка({
+          выбрана: тек === д,
+          подсказка: д.name,
+          миниатюра: миниатюра_источника(д, false),
+          подпись,
+          действие: () => выбрать_монитор(д),
+        }),
+      );
+    }
+  }
+  $("scr-disps").replaceChildren(...мониторы);
+}
+
+// Имя того, что выбрано, — для подписи кнопок и подсказки.
+function имя_выбора() {
+  if (экран.mode === "meeting") return i18n.t("screen.meeting");
+  if (экран.mode === "window") return экран.appName ?? "?";
+  if (экран.mode === "screen") return текущий_монитор()?.name ?? экран.displayName ?? "";
+  return "";
+}
+
+function подсказка_экрана() {
+  if (!экран.permission && экран.mode !== "off") return i18n.t("screen.noAccessTitle");
+  if (экран.mode === "meeting") return i18n.t("screen.tipMeeting");
+  if (экран.mode === "window") {
+    const app = экран.appName ?? "?";
+    return экран.windowTitle ? i18n.t("screen.tipWindow", { app, title: экран.windowTitle }) : i18n.t("screen.tipApp", { app });
+  }
+  if (экран.mode === "screen") return i18n.t("screen.tipScreen", { name: имя_выбора() }).trim();
+  return i18n.t("screen.tipOff");
+}
+
+function текст_вспышки_экрана() {
+  if (экран.mode === "off") return i18n.t("screen.flashOff");
+  if (экран.mode === "meeting") return i18n.t("screen.flashMeeting");
+  if (экран.mode === "window") return i18n.t("screen.flashWindow", { app: экран.appName ?? "?" });
+  return i18n.t("screen.flashScreen", { name: имя_выбора() });
+}
+
+function отрисовать_экран() {
+  const вкл = экран.mode !== "off" && экран.permission;
+
+  // Кнопка на главном.
+  const btn = $("scr-btn");
+  btn.hidden = !экран.загружено || !экран_умеет();
+  btn.classList.toggle("on", вкл);
+  // Жёлтая точка — только когда экран хотят писать, а доступа нет. Выключено —
+  // кнопка обычная: беды нет, пока человек не попробовал включить.
+  btn.classList.toggle("bad", экран_умеет() && !экран.permission && экран.mode !== "off");
+  $("scr-tip").textContent = подсказка_экрана();
+
+  // Кнопка на пульте.
+  // Сбой (событие `screen` со state failed) — жёлтая «Не пишется» с
+  // объяснением в подсказке: кнопка не должна говорить, что пишется.
+  const чип = $("scr-chip");
+  const сбой = вкл && статус_экрана?.state === "failed";
+  // Бэкенд сказал «off» посреди записи — экран не пишется, хоть и выбран.
+  const пишет = вкл && статус_экрана?.state !== "off";
+  чип.hidden = !экран.загружено || !экран_умеет();
+  чип.classList.toggle("on", пишет && !сбой);
+  чип.classList.toggle("fail", сбой);
+  чип.classList.toggle("off", !пишет);
+  const что = сбой ? i18n.t("screen.chipFailed") : пишет ? имя_выбора() : i18n.t("screen.chipOff");
+  $("scr-chip-lbl").textContent = что;
+  чип.title = сбой ? текст_сбоя_экрана(статус_экрана) : "";
+  чип.setAttribute("aria-label", i18n.t("screen.chipLabel", { what: что }));
+
+  // Меню.
+  const pop = $("scr-pop");
+  const нет_доступа = !экран.permission;
+  $("scr-on").setAttribute("aria-checked", String(вкл));
+  $("scr-on").disabled = нет_доступа;
+  $("scr-noperm").hidden = !нет_доступа;
+  $("scr-body").hidden = нет_доступа;
+  pop.classList.toggle("disabled", !вкл && хозяин_меню !== "set");
+  $("scr-hide").setAttribute("aria-checked", String(экран.hideSelf));
+  if (!pop.hidden) {
+    отрисовать_сетки();
+    уместить_меню_экрана();
+  }
+
+  отрисовать_настройки_экрана();
+}
+
+// ── Одно меню на три места ────────────────────────────────────────────────
+function открыть_меню_экрана(хозяин, с_клавиатуры) {
+  закрыть_меню(false, true);
+  закрыть_меню_микрофона();
+  закрыть_меню_экрана();
+  const х = ХОЗЯЕВА[хозяин];
+  const pop = $("scr-pop");
+  х.место().append(pop);
+  for (const к of ["dark", "on-pult", "no-toggle"]) pop.classList.toggle(к, х.классы.includes(к));
+  хозяин_меню = хозяин;
+  вкладка_просмотра = null;
+  pop.hidden = false;
+  х.кнопка().setAttribute("aria-expanded", "true");
+  миниатюры_есть = false;
+  отрисовать_экран();
+  if (экран_доступен()) загрузить_источники(true);
+  // С клавиатуры фокус переходит в меню — на первое, что можно нажать.
+  // Мышью не трогаем: иначе на тумблере загоралась бы рамка фокуса.
+  if (с_клавиатуры) {
+    const первое = !экран.permission ? $("scr-noperm-open") : хозяин === "set" ? $("scr-kind").querySelector("button:not([hidden])") : $("scr-on");
+    первое?.focus({ preventScroll: true });
+  }
+}
+function закрыть_меню_экрана(вернуть_фокус = false) {
+  const pop = $("scr-pop");
+  if (pop.hidden) return;
+  const кнопка = ХОЗЯЕВА[хозяин_меню]?.кнопка();
+  pop.hidden = true;
+  кнопка?.setAttribute("aria-expanded", "false");
+  хозяин_меню = null;
+  вкладка_просмотра = null;
+  // Миниатюры не держим: снимки чужих окон — не то, что стоит хранить.
+  миниатюры_есть = false;
+  источники_запрос++;
+  источники_в_пути = false;
+  if (источники) {
+    for (const о of источники.windows ?? []) о.thumb = null;
+    for (const д of источники.displays ?? []) д.thumb = null;
+  }
+  if (вернуть_фокус) кнопка?.focus({ preventScroll: true });
+}
+
+// Меню всегда начинается под своей кнопкой и никогда её не закрывает: иначе
+// клик по видимому краю «Начать запись» запустил бы запись. Не влезает по
+// высоте (много встреч в «Дальше») — окна идут по четыре в ряд, миниатюры
+// меньше. Не влезает и так (окно ниже обычного) — сетка прокручивается, и
+// обрез идёт по середине следующего ряда миниатюр: видно, что дальше есть
+// ещё, а подписи не режутся.
+function уместить_меню_экрана() {
+  const pop = $("scr-pop");
+  if (pop.hidden) return;
+  const окна = $("scr-wins");
+  const сетки = [окна, $("scr-disps")];
+  for (const g of сетки) g.style.maxHeight = "";
+  окна.classList.remove("four");
+  pop.style.maxHeight = "";
+  pop.style.overflowY = "";
+  const низ = window.innerHeight - 12;
+  // Верх — без анимации появления (она сдвигает меню на 4px): от родителя.
+  const верх = () => pop.parentElement.getBoundingClientRect().top + pop.offsetTop;
+  const лишнее = () => верх() + pop.offsetHeight - низ;
+  if (лишнее() <= 0) return;
+  const g = сетки.find((x) => !x.hidden);
+  if (!g) return;
+  if (g === окна) {
+    окна.classList.add("four");
+    if (лишнее() <= 0) return;
+  }
+  const карта = g.querySelector(".scr-card");
+  if (!карта) return;
+  const ряд = карта.offsetHeight + 12; // 12 — промежуток между рядами
+  const полряда = (карта.querySelector(".scr-th")?.offsetHeight ?? 0) / 2;
+  const можно = g.clientHeight - лишнее();
+  const ряды = Math.max(0, Math.floor((можно - 3 - полряда) / ряд));
+  g.style.maxHeight = `${3 + ряды * ряд + полряда}px`;
+  // Совсем тесно — прокручивается само меню, но всё равно под кнопкой.
+  if (лишнее() > 0) {
+    pop.style.maxHeight = `${низ - верх()}px`;
+    pop.style.overflowY = "auto";
+  }
+}
+window.addEventListener("resize", уместить_меню_экрана);
+
+for (const [хозяин, х] of Object.entries(ХОЗЯЕВА)) {
+  х.кнопка().addEventListener("click", (e) => {
+    e.stopPropagation();
+    const было = хозяин_меню === хозяин;
+    закрыть_меню_экрана();
+    // `detail === 0` — нажали клавишей (Enter, пробел), а не мышью.
+    if (!было) открыть_меню_экрана(хозяин, e.detail === 0);
+  });
+}
+$("scr-pop").addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", () => {
+  закрыть_меню_экрана();
+  закрыть_меню_микрофона();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("scr-pop").hidden) {
+    e.stopPropagation();
+    закрыть_меню_экрана(true);
+  } else if (!$("mic-pop").hidden) {
+    e.stopPropagation();
+    закрыть_меню_микрофона(true);
+  }
+});
+$("scr-on").addEventListener("click", переключить_экран);
+$("scr-kind").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-kind]");
+  if (!b || b.getAttribute("aria-pressed") === "true") return;
+  // На главном вкладка выбирает сразу. На пульте это сменило бы запись на
+  // полуслове, а в настройках — выбор без выбора: там вкладка только
+  // показывает сетку, выбирает клик по карточке.
+  if (хозяин_меню === "main") return перейти_на_вид(b.dataset.kind);
+  вкладка_просмотра = b.dataset.kind;
+  отрисовать_сетки();
+  уместить_меню_экрана();
+});
+$("scr-hide").addEventListener("click", переключить_скрытие);
+// Без доступа сначала просим его у системы: до первой просьбы MeetRec нет
+// даже в списке «Запись экрана» в настройках macOS, и включать там нечего.
+async function открыть_доступ_экрана() {
+  try {
+    await invoke("request_screen_permission");
+  } catch {
+    // старой команды может не быть — настройки всё равно откроем
+  }
+  invoke("open_screen_privacy").catch((err) => показать_ошибку(i18n.t("error.generic"), err));
+}
+$("scr-noperm-open").addEventListener("click", открыть_доступ_экрана);
+
+// ── Строки в настройках ───────────────────────────────────────────────────
+// Бэкенд пишет «нужна macOS 15 или новее (у вас 14.6)» — из неё берём только
+// версию, а фразу ставим свою: без описания функции, одной строкой.
+function причина_старой_системы(reason) {
+  const r = String(reason ?? "");
+  if (/macOS\s*15/i.test(r)) {
+    const м = r.match(/(\d+\.\d+(?:\.\d+)?)\)?\s*$/);
+    return м ? i18n.t("screen.oldMac", { ver: м[1] }) : i18n.t("screen.oldMacNoVer");
+  }
+  return i18n.t("screen.unsupported", { reason: r.replace(/\.$/, "") });
+}
+
+function отрисовать_настройки_экрана() {
+  const нельзя = экран.загружено && !экран_умеет();
+  const вкл = экран.mode !== "off" && экран.permission;
+  // macOS 14: та же строка «Запись экрана», но вместо описания — версия, и
+  // без тумблера.
+  $("scr-note").textContent = нельзя ? причина_старой_системы(экран.support.reason) : i18n.t("screen.note");
+  $("scr-set-on").hidden = нельзя;
+  $("scr-set-on").setAttribute("aria-checked", String(вкл));
+  $("scr-set-on").disabled = !экран.permission || !экран.загружено;
+  $("scr-what-set").hidden = нельзя || !вкл;
+  $("scr-hide-set").hidden = нельзя || !вкл;
+  $("scr-set-hide").setAttribute("aria-checked", String(экран.hideSelf));
+
+  // Нет доступа — жёлтая плашка под строкой; кнопка ведёт в настройки macOS,
+  // поэтому есть только на маке.
+  $("scr-set-noperm").hidden = нельзя || !экран.загружено || экран.permission;
+  $("scr-open-privacy").closest(".acts").hidden = !document.documentElement.classList.contains("mac");
+
+  // «Что записывать»: значок и имя выбранного.
+  const ic = $("scr-what-ic");
+  if (экран.mode === "meeting") ic.innerHTML = ИСКРЫ;
+  else if (экран.mode === "screen") ic.innerHTML = ЗНАЧОК_МОНИТОРА;
+  else if (экран.mode === "window") {
+    const о = источники?.windows?.find((x) => x.id === экран.windowId) ?? { icon: null };
+    ic.replaceChildren(значок_приложения(о));
+  } else ic.replaceChildren();
+  ic.querySelector("svg")?.setAttribute("width", "16");
+  ic.querySelector("svg")?.setAttribute("height", "16");
+  $("scr-what-txt").textContent = имя_выбора();
+  // Значок окна — из списка окон: настройки открыли — догружаем его один раз.
+  if (
+    вкл && экран.mode === "window" && !источники && !источники_в_пути &&
+    !$("screen-settings").classList.contains("off")
+  ) {
+    загрузить_источники(false);
+  }
+}
+
+$("scr-set-on").addEventListener("click", переключить_экран);
+$("scr-set-hide").addEventListener("click", переключить_скрытие);
+$("scr-open-privacy").addEventListener("click", открыть_доступ_экрана);
+
+// ── Пульт: микрофон ───────────────────────────────────────────────────────
+// Список — те же устройства, что в выпадашке настроек (#mic): выбор ставит
+// ей значение и шлёт `change`, сохраняет тот же обработчик. Подпись кнопки
+// и зелёная строка меняются по событию `mic-switched` — когда бэкенд
+// действительно переключился, а не когда мы попросили.
+let микрофон_записи = null;
+
+function имя_микрофона_в_настройках() {
+  const sel = $("mic");
+  if (!sel.value) return i18n.t("pultmic.system");
+  return без_суффикса_недоступности(sel.selectedOptions[0]?.textContent ?? "");
+}
+// В подписи кнопки служебное слово лишнее: «MacBook Pro Microphone» →
+// «MacBook Pro». В меню имя полное.
+function короткое_имя_микрофона(имя) {
+  const к = String(имя).replace(/(^|\s)(microphone|микрофон)(?=\s|$)/giu, " ").replace(/\s{2,}/g, " ").trim();
+  return к || имя;
+}
+function отрисовать_кнопку_микрофона() {
+  const имя = микрофон_записи ?? имя_микрофона_в_настройках();
+  $("mic-chip-lbl").textContent = короткое_имя_микрофона(имя);
+  $("mic-chip").setAttribute("aria-label", i18n.t("pultmic.chipLabel", { name: имя }));
+}
+function открыть_меню_микрофона(с_клавиатуры) {
+  закрыть_меню_экрана();
+  const sel = $("mic");
+  const список = [];
+  for (const o of sel.options) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(o.value === sel.value));
+    b.textContent = o.value ? o.textContent : i18n.t("pultmic.system");
+    b.insertAdjacentHTML("beforeend", ГАЛОЧКА_ЭКРАНА);
+    b.addEventListener("click", () => {
+      закрыть_меню_микрофона(true);
+      if (sel.value === o.value) return;
+      sel.value = o.value;
+      sel.dispatchEvent(new Event("change"));
+    });
+    список.push(b);
+  }
+  // «Как в системе» — первым: в выпадашке он и так первый.
+  $("mic-list").replaceChildren(...список);
+  $("mic-pop").hidden = false;
+  $("mic-chip").setAttribute("aria-expanded", "true");
+  if (с_клавиатуры) $("mic-list").querySelector('[aria-selected="true"]')?.focus();
+}
+function закрыть_меню_микрофона(вернуть_фокус = false) {
+  if ($("mic-pop").hidden) return;
+  $("mic-pop").hidden = true;
+  $("mic-chip").setAttribute("aria-expanded", "false");
+  if (вернуть_фокус) $("mic-chip").focus({ preventScroll: true });
+}
+$("mic-chip").addEventListener("click", (e) => {
+  e.stopPropagation();
+  if ($("mic-pop").hidden) открыть_меню_микрофона(e.detail === 0);
+  else закрыть_меню_микрофона();
+});
+$("mic-pop").addEventListener("click", (e) => e.stopPropagation());
+
+// Зелёная строка на 3 с после смены источника.
+let вспышка_таймер = null;
+function вспышка_пульта(текст) {
+  const el = $("pult-flash");
+  el.textContent = текст;
+  el.hidden = false;
+  clearTimeout(вспышка_таймер);
+  вспышка_таймер = setTimeout(() => {
+    el.hidden = true;
+  }, 3000);
+}
+
+// ── Строка на пульте ──────────────────────────────────────────────────────
+// Что пишется — серым; почему не пишется — жёлтым, тем же классом, что
+// «Собеседников не слышно», и с тем, что делать.
+let статус_экрана = null;
+
+function показать_экран_на_пульте(с) {
+  статус_экрана = с?.state === "recording" ? { ...с, state: "on" } : (с ?? null);
+  отрисовать_экран();
+  const el = $("pult-scr");
+  // Старый бэкенд слал `recording` и `code` — понимаем и его.
+  const state = с?.state === "recording" ? "on" : с?.state;
+  if (!с || !state || state === "off") {
+    el.hidden = true;
+    return;
+  }
+  // Что пишется, показывает кнопка экрана на пульте — строки нет. Кроме
+  // одного случая: выбранное окно не дало себя записать, и запись вернулась
+  // к прежнему источнику (`why: "blocked"`, `blocked` — имя того приложения).
+  if (state === "on" && с.why !== "blocked") {
+    el.hidden = true;
+    return;
+  }
+  el.className = "pult-warn";
+  el.hidden = false;
+  el.textContent = текст_сбоя_экрана(с);
+}
+
+// Коды бэкенда: permission, unsupported, no_meeting_window, no_window
+// (выбранное окно закрыли), blocked (окно не даёт себя записать), failed. `detail` — исходный текст ошибки,
+// человеку его не показываем: подсказка говорит, что делать.
+function текст_сбоя_экрана(с) {
+  const why = с.why ?? с.code ?? "";
+  const kind = с.kind ?? (с.app ? "window" : "screen");
+  if (why === "no_window" && kind !== "meeting") {
+    return i18n.t("screen.pultNoWindow", { app: с.app ?? экран.appName ?? "" }).replace(/\s{2,}/g, " ");
+  }
+  if (why === "blocked") {
+    return i18n.t("screen.pultBlocked", { app: с.blocked ?? с.app ?? экран.appName ?? "" }).replace(/\s{2,}/g, " ");
+  }
+  let почему, что_делать;
+  if (why === "permission") {
+    почему = i18n.t("screen.whyPermission");
+    что_делать = i18n.t("screen.fixPermission");
+  } else if (why === "unsupported") {
+    почему = i18n.t("screen.whyUnsupported");
+    что_делать = i18n.t("screen.fixOther");
+  } else if (why === "no_meeting_window" || why === "no_window") {
+    почему = i18n.t("screen.whyNoMeeting");
+    что_делать = i18n.t("screen.fixSource");
+  } else if (why === "no_display" || why === "display_not_found") {
+    почему = i18n.t("screen.whyNoDisplay");
+    что_делать = i18n.t("screen.fixSource");
+  } else {
+    почему = i18n.t("screen.whyOther");
+    что_делать = i18n.t("screen.fixFailed");
+  }
+  return i18n.t("screen.pultFailed", { why: почему, fix: что_делать });
+}
+
+// Окно открыли посреди записи — событие `screen` уже прошло, спрашиваем.
+async function обновить_экран_пульта() {
+  try {
+    показать_экран_на_пульте(await invoke("get_screen_status"));
+  } catch (e) {
+    console.warn("состояние записи экрана:", e);
+  }
+}
+
 // Автоочистка сама решает, что и когда чистить (см. `spawn_retention_worker`
 // в Rust) — здесь только сохраняется срок. Список при этом не обновляем: то,
 // что уже вычищено, вычищено не мгновенно по смене настройки, а на следующем
@@ -2206,9 +4276,10 @@ async function нажать(кнопка, подпись_узел, подпис�
   }
 }
 
-$("rec-btn").addEventListener("click", () =>
-  нажать($("rec-btn"), $("rec-btn-label"), i18n.t("record.starting"), () => команда("toggle")),
-);
+$("rec-btn").addEventListener("click", () => нажать($("rec-btn"), null, null, () => команда("toggle")));
+// «Записать» в строке взвода — тот же `toggle`: во взводе он подтверждает
+// вопрос (`Ctl::Toggle` → `ManualStart`), и предзапись не теряется.
+$("yes").addEventListener("click", () => нажать($("yes"), null, null, () => команда("toggle")));
 $("stop-btn").addEventListener("click", async () => {
   $("rec-panel").classList.add("stopping");
   await нажать($("stop-btn"), $("stop-btn-label"), i18n.t("record.stopping"), () => команда("toggle"));
@@ -2232,6 +4303,7 @@ let микрофон_выключен = false;
 function показать_выключение_микрофона(выключен) {
   микрофон_выключен = выключен;
   $("rec-panel").classList.toggle("mic-muted", выключен);
+  $("pult-muted").hidden = !выключен;
   const кнопка = $("mic-mute");
   кнопка.setAttribute("aria-pressed", String(выключен));
   const подпись = i18n.t(выключен ? "record.micUnmute" : "record.micMute");
@@ -2331,7 +4403,7 @@ function отрисовать_контакты(id_списка, id_заглуш�
     const li = document.createElement("li");
     const кнопка = document.createElement("button");
     кнопка.type = "button";
-    кнопка.className = "contact-link";
+    кнопка.className = "btn-link";
     кнопка.textContent = label;
     кнопка.addEventListener("click", () => открыть_ссылку(url));
     li.appendChild(кнопка);
@@ -2346,7 +4418,8 @@ function отрисовать_контакты(id_списка, id_заглуш�
 async function отрисовать_версию() {
   try {
     const v = await getVersion();
-    $("app-version").textContent = i18n.t("about.version", { v });
+    $("app-version").textContent = i18n.t("about.footer", { v });
+    $("about-version").textContent = i18n.t("about.footer", { v });
   } catch {
     $("app-version").textContent = "";
   }
@@ -2446,6 +4519,13 @@ async function старт() {
   // t() ниже вернули бы голые ключи вместо текста.
   await window.i18n.ready;
   window.i18n.applyStatic();
+  // Галочка «Скопировано» встаёт в разметку заранее, а не при первом
+  // копировании: если бы кнопка панели меняла свою ширину в момент появления
+  // значка, «Скопировать путь/текст» дёрнулась бы вбок ровно тогда, когда
+  // человек за ней следит глазами.
+  for (const узел of document.querySelectorAll(".ok-msg[data-ok]")) {
+    узел.insertAdjacentHTML("afterbegin", ГАЛОЧКА(16));
+  }
   // Заголовок нативного окна ставит конфиг (tauri.conf.json, статично и
   // по-английски — он не умеет читать словарь), а на реальный язык доводит
   // его этот вызов.
@@ -2453,6 +4533,9 @@ async function старт() {
     .setTitle(i18n.t("app.windowMain"))
     .catch(() => {});
   отрисовать_версию();
+  for (const узел of document.querySelectorAll(".leds")) сегменты.собрать(узел);
+  сегменты_выбора();
+  показать_проверку(false);
   отрисовать_контакты("contacts-design", "contacts-design-soon", КОНТАКТЫ_ДИЗАЙН);
   отрисовать_контакты("contacts-code", "contacts-code-soon", КОНТАКТЫ_РАЗРАБОТКА);
   отрисовать_поддержку();
@@ -2474,6 +4557,18 @@ async function старт() {
     показать_отсутствие_системного_звука(e.payload),
   );
   await listen("levels", (e) => применить_уровни(e.payload));
+  await listen("screen", (e) => показать_экран_на_пульте(e.payload));
+  // Микрофон сменили на лету — подпись кнопки и зелёная строка на пульте.
+  await listen("mic-switched", (e) => {
+    const имя = e.payload?.name || i18n.t("pultmic.system");
+    микрофон_записи = имя;
+    отрисовать_кнопку_микрофона();
+    вспышка_пульта(i18n.t("pultmic.flash", { name: имя }));
+  });
+  await listen("calendar-status", (e) => {
+    календарь = e.payload;
+    отрисовать_календарь();
+  });
   await listen("update-available", (e) => показать_обновление(e.payload));
   await listen("update-progress", (e) => {
     // Событие и ответ команды идут разными путями, и последний процент может
@@ -2483,8 +4578,13 @@ async function старт() {
     отрисовать_обновление();
   });
   await listen("transcribe-progress", (e) => {
-    транскрипции.set(ключ_транскрипции(e.payload.folder, e.payload.base), e.payload.stage);
+    const ключ = ключ_транскрипции(e.payload.folder, e.payload.base);
+    транскрипции.set(ключ, e.payload.stage);
     обновить_список();
+    // Панель этой же записи открыта — баннер «Расшифровываю заново» должен
+    // появиться сразу, а не ждать transcribe-done: до этого момента панель
+    // честно показывает прошлую версию текста.
+    обновить_баннер_панели(ключ);
   });
   await listen("transcribe-track", (e) => {
     детали_расшифровки.set(ключ_транскрипции(e.payload.folder, e.payload.base), {
@@ -2498,6 +4598,10 @@ async function старт() {
     транскрипции.set(ключ, "done");
     детали_расшифровки.delete(ключ);
     обновить_список();
+    // Панель той же записи открыта — новый текст должен появиться сам, без
+    // повторного клика по строке: с точки зрения панели это ровно то же
+    // событие, что уже перерисовало строку списка.
+    перезагрузить_панель_после_расшифровки(e.payload.folder, e.payload.base, ключ);
     setTimeout(() => {
       транскрипции.delete(ключ);
       обновить_список();
@@ -2511,6 +4615,7 @@ async function старт() {
     транскрипции.delete(ключ);
     детали_расшифровки.delete(ключ);
     обновить_список();
+    обновить_баннер_панели(ключ);
   });
   await listen("transcribe-error", (e) => {
     const ключ = ключ_транскрипции(e.payload.folder, e.payload.base);
@@ -2520,6 +4625,7 @@ async function старт() {
     // а не общей строкой внизу экрана.
     ошибки_расшифровки.set(ключ, e.payload.message);
     обновить_список();
+    обновить_баннер_панели(ключ);
   });
   // Скачивание модели локальной расшифровки — три события, тем же приёмом,
   // что и расшифровка записи выше (прогресс/готово/ошибка), только не по

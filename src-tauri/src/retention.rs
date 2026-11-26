@@ -68,12 +68,20 @@ pub fn due_for_cleanup(
 /// Не ошибка, если дорожек уже нет: значит, звук этой записи уже вычищен
 /// раньше (например, ручным запуском чистки при уменьшенном сроке), и второй
 /// проход — не повод жаловаться.
-pub fn delete_audio(dir: &Path, base: &str) -> Result<(), String> {
-    let existing: Vec<PathBuf> = [".mic.wav", ".system.wav"]
+/// Что забирает чистка: обе дорожки и все видео записи. Видео экрана — тоже
+/// «тяжёлое», и ценность его та же, что у звука: смотреть встречу, а не
+/// читать. Видео под основой может быть несколько (`screen::video_files`).
+fn heavy_parts(dir: &Path, base: &str) -> Vec<PathBuf> {
+    [".mic.wav", ".system.wav"]
         .iter()
         .map(|s| dir.join(format!("{base}{s}")))
         .filter(|p| p.exists())
-        .collect();
+        .chain(meeting_recorder::screen::video_files(dir, base).into_iter().map(|(_, p)| p))
+        .collect()
+}
+
+pub fn delete_audio(dir: &Path, base: &str) -> Result<(), String> {
+    let existing = heavy_parts(dir, base);
     if existing.is_empty() {
         return Ok(());
     }
@@ -167,6 +175,30 @@ mod tests {
         assert!(
             dir.join("2026-07-30_13-03_chrome.meta.json").exists(),
             "нечего было чистить — файл-спутник и подавно не тронут"
+        );
+    }
+
+    /// Корзину не трогает: проверяется, ЧТО забрала бы чистка.
+    #[test]
+    fn чистка_забирает_все_видео_а_расшифровку_и_meta_оставляет() {
+        let dir = ScratchDir::new("videos");
+        for f in ["mic.wav", "system.wav", "screen.mp4", "screen-2.mp4", "meta.json"] {
+            файл(&dir, &format!("2026-07-30_13-03_chrome.{f}"));
+        }
+        std::fs::create_dir(dir.join("2026-07-30_13-03_chrome.transcript")).unwrap();
+        let mut names: Vec<String> = heavy_parts(&dir, "2026-07-30_13-03_chrome")
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "2026-07-30_13-03_chrome.mic.wav",
+                "2026-07-30_13-03_chrome.screen-2.mp4",
+                "2026-07-30_13-03_chrome.screen.mp4",
+                "2026-07-30_13-03_chrome.system.wav",
+            ]
         );
     }
 

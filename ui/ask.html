@@ -11,11 +11,11 @@
    висит за краем экрана и кликов не перехватывает. */
 html,body{margin:0;height:100%;background:transparent;overflow:hidden}
 body{
-  font:13px/1.3 -apple-system,system-ui,"SF Pro Text",sans-serif;
+  font:13px/1.3 var(--sans);
   -webkit-user-select:none;user-select:none;cursor:default;
   -webkit-font-smoothing:antialiased;
 }
-#wrap{width:380px;margin-left:16px}
+#wrap{width:380px;margin-left:16px;position:relative}
 
 /* ── Плашка ────────────────────────────────────────────── */
 /* Пропорции сняты с системного уведомления macOS: значок 38, скругление 18,
@@ -28,15 +28,15 @@ body{
    а не вместе с --accent приложения. */
 #card{
   position:relative;display:flex;align-items:center;gap:11px;
-  padding:12px;border-radius:18px;
+  padding:12px;border-radius: 16px;
   background:var(--toast-bg);
   box-shadow:var(--toast-shadow);
   color:var(--toast-fg);overflow:hidden;
   will-change:transform;
 }
 
-.ava{width:38px;height:38px;flex:none;border-radius:9px;display:grid;
-  place-items:center;color:var(--toast-fg);font-weight:600;font-size:15px;
+.ava{width:38px;height:38px;flex:none;border-radius: 8px;display:grid;
+  place-items:center;color:var(--toast-fg);font-weight:600;font-size: var(--fs-15);
   background:var(--toast-surface)}
 /* Фирменные цвета звонилок — не наши, не меняются вместе с темой. */
 .ava.zoom{background:#0B5CFF}
@@ -51,17 +51,17 @@ body{
 .tx{flex:1;min-width:0}
 /* Трекинг зависит от кегля: крупный текст на глаз кажется разреженным, мелкий
    наоборот. Одно значение на оба было бы неверным хотя бы для одного из них. */
-.tt{display:block;font-size:13px;font-weight:600;letter-spacing:-.008em;
+.tt{display:block;font-size: var(--fs-13);font-weight:600;letter-spacing:-.008em;
   color:var(--toast-fg)}
-.ts{display:block;font-size:12px;font-weight:400;color:var(--toast-fg-dim);
+.ts{display:block;font-size: var(--fs-12);font-weight:400;color:var(--toast-fg-dim);
   margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Кнопка — как действие в системном уведомлении: светлое полупрозрачное
    стекло на тёмной плашке, а не цветная заливка. Цветная читалась бы как
    веб-кнопка, наклеенная поверх системного окна. */
-.go{flex:none;font:inherit;font-size:13px;font-weight:600;border:none;
-  border-radius:8px;background:var(--toast-surface);color:var(--toast-fg);cursor:pointer;
-  padding:7px 14px;letter-spacing:-.004em;transition:background 90ms ease-out}
+.go{flex:none;font:inherit;font-size: var(--fs-13);font-weight:600;border:none;
+  border-radius: 8px;background:var(--toast-surface);color:var(--toast-fg);cursor:pointer;
+  height:28px;padding:0 14px;letter-spacing:-.004em;transition:background 90ms ease-out}
 /* Отклик на НАЖАТИЕ, а не на отпускание: ожидание клика читается как «не
    сработало». Своего токена для нажатого состояния нет — используем тот же
    «под наведением», третьей ступени стекла в палитре не заведено. */
@@ -81,10 +81,39 @@ body{
 /* Селектор длиннее, чем хотелось бы, и это не украшение: сокращённая запись
    `animation` в правиле выше сама выставляет `animation-play-state: running`,
    и правило с меньшей специфичностью паузу не поставит — оно просто молча не
-   сработает. */
-body.наведено #card .life{animation-play-state:paused;
+   сработает. В режиме «Зайти и записать» линия идёт по часам встречи, и
+   наведение её не останавливает (план, решение 5). */
+body.наведено:not(.кал-вход) #card .life{animation-play-state:paused;
   background:var(--toast-life-hover)}
 
+
+/* ── Встреча из календаря (канон 2.8-бис) ───────────────────────────── */
+/* Шире классики: на 380 с кнопкой «Зайти и записать» обрезалась подпись
+   «Через 1 мин · Google Meet». Ширина дублируется в ask.js и audio.rs. */
+body.кал #wrap{width:440px}
+/* Название встречи — до двух строк; вопрос «Записать встречу?» в одну. */
+body.кал .tt{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;white-space:normal}
+
+/* Нажатая кнопка гаснет сразу (канон 3.6) и остаётся «нажатой» на вид. */
+.go:disabled{background:var(--toast-surface-hover);cursor:default}
+
+.more{flex:none;width:28px;height:28px;padding:0;margin-left:-5px;border:none;
+  border-radius: 8px;background:var(--toast-surface);color:var(--toast-fg);
+  cursor:pointer;display:grid;place-items:center;transition:background 90ms ease-out}
+.more:hover,.more:active,.more.open{background:var(--toast-surface-hover)}
+.more:disabled{cursor:default}
+
+/* Меню ⋯ рисуется здесь, а не нативным NSMenu (путь B плана): окно на это
+   время вырастает вниз (`ask_menu` в audio.rs). Цвета — токены всплывашки:
+   это часть того же окна поверх чужих. `:hover` в неактивном приложении не
+   срабатывает, поэтому подсветка пункта — только на нажатии. */
+.pmenu{position:absolute;right:0;top:calc(100% + 4px);min-width:200px;padding:5px;
+  border-radius: 12px;background:var(--toast-bg);color:var(--toast-fg);
+  box-shadow:var(--toast-shadow);font:13px/22px var(--sans)}
+.pmenu .mi{display:block;width:100%;height:22px;padding:0 10px;border:none;border-radius: 8px;
+  background:none;color:inherit;font:inherit;text-align:left;white-space:nowrap;cursor:pointer}
+.pmenu .mi:active{background:var(--toast-surface-hover)}
 
 [hidden]{display:none !important}
 </style>
@@ -98,10 +127,12 @@ body.наведено #card .life{animation-play-state:paused;
       <span class="tt" id="title" data-i18n="app.windowAsk">Record this meeting?</span>
       <span class="ts" id="src"></span>
     </span>
-    <button class="go" id="yes" data-i18n="record.confirm">Record</button>
+    <button class="go" id="yes" data-i18n="record.confirm">Record</button><button class="more" id="more" type="button" hidden data-i18n-attr="aria-label:calendar.more;title:calendar.more" aria-label="More" title="More"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
     <span class="life" id="life"></span>
   </div>
-
+  <div class="pmenu" id="pmenu" hidden>
+    <button class="mi" id="join-only" type="button" data-i18n="calendar.joinOnly">Join without recording</button>
+  </div>
 </div>
 
 <script src="theme.js"></script>
